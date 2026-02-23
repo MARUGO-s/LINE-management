@@ -68,12 +68,12 @@ Deno.serve(async (_req) => {
       const summary = response.choices[0].message?.content || "要約を生成できませんでした。"
       roomSummaries[roomId] = summary
 
-      // Send to the room if access token is available
-      if (lineAccessToken) {
-        await sendLineMessage(roomId, `【各ルーム 定期要約】\n\n${summary}`, lineAccessToken)
-      } else {
-        console.warn(`LINE_CHANNEL_ACCESS_TOKEN is missing. Skipping send to room ${roomId}`);
-      }
+      // 実験のため、各ルームへの個別送信を一時的に停止（全体要約のみ生かす）
+      // if (lineAccessToken) {
+      //   await sendLineMessage(roomId, `【各ルーム 定期要約】\n\n${summary}`, lineAccessToken)
+      // } else {
+      //   console.warn(`LINE_CHANNEL_ACCESS_TOKEN is missing. Skipping send to room ${roomId}`);
+      // }
     }
 
     // 4. Generate overall summary and send to the overall room
