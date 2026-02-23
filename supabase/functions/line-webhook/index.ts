@@ -46,12 +46,31 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseKey)
 
     for (const event of events) {
-      if (event.type === 'message' && event.message.type === 'text') {
+      if (event.type === 'message') {
         // Determine room/group ID or user ID as fallback
         const source = event.source
         const roomId = source.groupId || source.roomId || source.userId
         const userId = source.userId
-        const content = event.message.text
+
+        // Parse content based on message type
+        let content = ""
+        if (event.message.type === 'text') {
+          content = event.message.text
+        } else if (event.message.type === 'image') {
+          content = "【画像が送信されました】"
+        } else if (event.message.type === 'video') {
+          content = "【動画が送信されました】"
+        } else if (event.message.type === 'file') {
+          content = `【ファイルが送信されました: ${event.message.fileName || '名称不明'}】`
+        } else if (event.message.type === 'audio') {
+          content = "【ボイスメッセージが送信されました】"
+        } else if (event.message.type === 'location') {
+          content = `【位置情報が送信されました: ${event.message.title || ''}】`
+        } else if (event.message.type === 'sticker') {
+          content = "【スタンプが送信されました】"
+        } else {
+          content = `【その他のメディア (${event.message.type}) が送信されました】`
+        }
 
         // Save message to target database
         const { error } = await supabase.from('line_messages').insert({
