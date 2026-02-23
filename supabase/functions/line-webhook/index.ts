@@ -1,6 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
-import * as crypto from "https://deno.land/std@0.177.0/crypto/mod.ts"
 
 Deno.serve(async (req) => {
   if (req.method !== 'POST') {

@@ -1,5 +1,8 @@
 -- Enable pg_net for HTTP requests
 create extension if not exists "pg_net";
+-- Enable pg_cron for scheduled jobs
+create extension if not exists "pg_cron" schema pg_catalog;
+
 
 -- Create a function to trigger the summary-cron Edge Function
 create or replace function public.invoke_summary_cron()

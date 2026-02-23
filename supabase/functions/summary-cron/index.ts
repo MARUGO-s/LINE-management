@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
-import { OpenAI } from "https://esm.sh/openai@4.52.0"
+import { Groq } from "https://esm.sh/groq-sdk@0.5.0"
 
 Deno.serve(async (_req) => {
   try {
@@ -10,12 +10,12 @@ Deno.serve(async (_req) => {
 
     const lineAccessToken = Deno.env.get('LINE_CHANNEL_ACCESS_TOKEN') ?? ''
     const overallRoomId = Deno.env.get('LINE_OVERALL_ROOM_ID') ?? ''
-    const openaiApiKey = Deno.env.get('OPENAI_API_KEY') ?? ''
+    const groqApiKey = Deno.env.get('GROQ_API_KEY') ?? ''
 
-    if (!openaiApiKey) {
-      throw new Error("Missing OPENAI_API_KEY environment variable")
+    if (!groqApiKey) {
+      throw new Error("Missing GROQ_API_KEY environment variable")
     }
-    const openai = new OpenAI({ apiKey: openaiApiKey })
+    const groq = new Groq({ apiKey: groqApiKey })
 
     // 1. Fetch unprocessed messages
     const { data: messages, error: fetchError } = await supabase
@@ -50,13 +50,13 @@ Deno.serve(async (_req) => {
     for (const [roomId, contents] of Object.entries(messagesByRoom)) {
       const roomText = contents.map((c, i) => `[${i + 1}]: ${c}`).join('\n')
 
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+      const response = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile", // Validated Groq model
         messages: [
           {
             role: "system", content: `あなたは優秀なAIアシスタントです。
 以下のLINEのチャット履歴（発言内容）を読み、簡潔で分かりやすく箇条書きなどで要約してください。
-挨拶や意味のないメッセージは省き、重要な情報や決定事項、話題の中心となった事柄を抽出してください。` },
+挨拶や意味のないメッセージは省き、重要な情報や決定事項、話題の中心となった事柄を抽出してください。必ず日本語で返信してください。` },
           { role: "user", content: `以下のメッセージリストを要約してください:\n\n${roomText}` }
         ]
       })
@@ -79,14 +79,14 @@ Deno.serve(async (_req) => {
         .map(([roomId, summary], index) => `■ ルーム${index + 1} (${roomId}):\n${summary}`)
         .join('\n\n')
 
-      const overallResponse = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+      const overallResponse = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile", // Validated Groq model
         messages: [
           {
             role: "system", content: `あなたは優秀な全体の管理者AIです。
 複数のLINEルームで行われた会話の「各ルームの要約」を受け取ります。
 全てのルームの動きを俯瞰し、全体としてどのような話題が挙がっているかを簡潔に統合したレポート（全体要約）を作成してください。
-必要に応じて重要な項目をピックアップし、全体像が把握しやすいように整理してください。` },
+必要に応じて重要な項目をピックアップし、全体像が把握しやすいように整理してください。必ず日本語で返信してください。` },
           { role: "user", content: `以下の各ルームの要約を統合し、全体レポートを作成してください:\n\n${allSummariesText}` }
         ]
       })
