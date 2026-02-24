@@ -30,7 +30,7 @@ port = 54322
 # Port used by db diff command to initialize the shadow database.
 shadow_port = 54320
 # Maximum amount of time to wait for health check when starting the local database.
-health_timeout = "2m"
+# health_timeout = "2m"  # Commented out for CLI v2.53.6 compatibility
 # The database major version to use. This has to be the same as your remote database's. Run `SHOW
 # server_version;` on the remote database to check.
 major_version = 17
@@ -119,8 +119,8 @@ file_size_limit = "50MiB"
 # objects_path = "./images"
 
 # Allow connections via S3 compatible clients
-[storage.s3_protocol]
-enabled = true
+# [storage.s3_protocol]  # Commented out for CLI v2.53.6 compatibility
+# enabled = true
 
 # Image transformation API is available to Supabase Pro plan.
 # [storage.image_transformation]
@@ -128,21 +128,21 @@ enabled = true
 
 # Store analytical data in S3 for running ETL jobs over Iceberg Catalog
 # This feature is only available on the hosted platform.
-[storage.analytics]
-enabled = false
-max_namespaces = 5
-max_tables = 10
-max_catalogs = 2
+# [storage.analytics]  # Commented out for CLI v2.53.6 compatibility
+# enabled = false
+# max_namespaces = 5
+# max_tables = 10
+# max_catalogs = 2
 
 # Analytics Buckets is available to Supabase Pro plan.
 # [storage.analytics.buckets.my-warehouse]
 
 # Store vector embeddings in S3 for large and durable datasets
 # This feature is only available on the hosted platform.
-[storage.vector]
-enabled = false
-max_buckets = 10
-max_indexes = 5
+# [storage.vector]  # Commented out for CLI v2.53.6 compatibility
+# enabled = false
+# max_buckets = 10
+# max_indexes = 5
 
 # Vector Buckets is available to Supabase Pro plan.
 # [storage.vector.buckets.documents-openai]
@@ -389,7 +389,7 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 
 [functions.line-webhook]
 enabled = true
-verify_jwt = true
+verify_jwt = false
 import_map = "./functions/line-webhook/deno.json"
 # Uncomment to specify a custom file path to the entrypoint.
 # Supported file extensions are: .ts, .js, .mjs, .jsx, .tsx
@@ -408,3 +408,15 @@ entrypoint = "./functions/summary-cron/index.ts"
 # Specifies static files to be bundled with the function. Supports glob patterns.
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/summary-cron/*.html" ]
+
+[functions.admin-api]
+enabled = true
+verify_jwt = false
+import_map = "./functions/admin-api/deno.json"
+entrypoint = "./functions/admin-api/index.ts"
+
+[functions.admin-ui]
+enabled = true
+verify_jwt = false
+import_map = "./functions/admin-ui/deno.json"
+entrypoint = "./functions/admin-ui/index.ts"

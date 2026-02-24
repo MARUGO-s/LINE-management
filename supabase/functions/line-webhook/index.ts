@@ -11,8 +11,14 @@ Deno.serve(async (req) => {
     const signature = req.headers.get('x-line-signature')
     const lineChannelSecret = Deno.env.get('LINE_CHANNEL_SECRET')
 
-    // LINE Signature Verification (if LINE_CHANNEL_SECRET is provided)
-    if (lineChannelSecret && signature) {
+    // LINE Signature Verification
+    // In production, if channel secret exists, signature must be present and valid.
+    if (lineChannelSecret) {
+      if (!signature) {
+        console.error('Missing LINE signature header')
+        return new Response('Forbidden', { status: 403 })
+      }
+
       const encoder = new TextEncoder()
       const key = await crypto.subtle.importKey(
         'raw',
