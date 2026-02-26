@@ -748,7 +748,7 @@ const html = String.raw`<!doctype html>
           '<td><span class="row-actions">' +
           '<button class="button primary room-save">保存</button>' +
           '<button class="button ghost room-reset">継承</button>' +
-          '<button class="button warn room-delete">削除</button>' +
+          '<button class="button warn room-delete">ルーム削除</button>' +
           '</span></td>';
         dom.roomTableBody.appendChild(tr);
       }
