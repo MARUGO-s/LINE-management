@@ -307,6 +307,7 @@ async function fetchState(
   url: URL,
 ) {
   const logsLimit = clampInt(url.searchParams.get("logs_limit"), 30, 10, 30)
+  const logsFetchLimit = logsLimit * 8
 
   const globalSettings = await fetchGlobalSettings(supabase)
   const [roomSettingsRes, roomOverviewRes, logsRes] = await Promise.all([
@@ -319,7 +320,7 @@ async function fetchState(
       .from("summary_delivery_logs")
       .select("id, run_at, jst_hour, status, reason, should_send_overall, rooms_targeted, messages_in_queue, messages_marked_processed, line_send_attempted, line_send_success, line_http_status, target_room_id, details")
       .order("id", { ascending: false })
-      .limit(logsLimit),
+      .limit(logsFetchLimit),
   ])
 
   if (roomSettingsRes.error) {
@@ -332,14 +333,31 @@ async function fetchState(
     throw { status: 500, message: `Failed to fetch delivery logs: ${logsRes.error.message}` } satisfies AppError
   }
 
+  const filteredLogs = (logsRes.data ?? [])
+    .filter((row) => isActionableDeliveryLogStatus(row.status))
+    .slice(0, logsLimit)
+
   return {
     global_settings: globalSettings,
     room_settings: roomSettingsRes.data ?? [],
     room_overview: roomOverviewRes.data ?? [],
-    delivery_logs: logsRes.data ?? [],
+    delivery_logs: filteredLogs,
     generated_at: new Date().toISOString(),
   }
 }
+
+function isActionableDeliveryLogStatus(status: unknown): boolean {
+  const normalized = String(status ?? "").trim().toLowerCase()
+  if (!normalized) return true
+  return !nonActionableDeliveryLogStatuses.has(normalized)
+}
+
+const nonActionableDeliveryLogStatuses = new Set([
+  "no_messages",
+  "not_scheduled",
+  "no_room_summary",
+  "overall_schedule_skip",
+])
 
 async function waitForNewLog(
   supabase: ReturnType<typeof createClient>,

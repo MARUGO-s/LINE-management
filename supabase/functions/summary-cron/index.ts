@@ -736,6 +736,9 @@ async function writeDeliveryLog(
     details?: Record<string, unknown>
   }
 ) {
+  if (!shouldPersistDeliveryLog(payload.status)) {
+    return
+  }
   try {
     const { error } = await supabase
       .from('summary_delivery_logs')
@@ -753,6 +756,19 @@ async function writeDeliveryLog(
   } catch (e) {
     console.error('Unexpected error while inserting summary_delivery_logs:', e)
   }
+}
+
+const nonActionableLogStatuses = new Set([
+  'no_messages',
+  'not_scheduled',
+  'no_room_summary',
+  'overall_schedule_skip',
+])
+
+function shouldPersistDeliveryLog(status: string): boolean {
+  const normalized = String(status || '').trim().toLowerCase()
+  if (!normalized) return true
+  return !nonActionableLogStatuses.has(normalized)
 }
 
 async function pruneDeliveryLogs(
