@@ -243,6 +243,16 @@ const html = String.raw`<!doctype html>
       table-layout: fixed;
     }
 
+    .rooms-table {
+      width: max(100%, 1520px);
+      min-width: 1520px;
+    }
+
+    .rooms-table th,
+    .rooms-table td {
+      white-space: nowrap;
+    }
+
     .log-table th:nth-child(1),
     .log-table td:nth-child(1) { width: 54px; }
     .log-table th:nth-child(2),
@@ -310,7 +320,7 @@ const html = String.raw`<!doctype html>
 
     .row-actions {
       display: inline-flex;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       gap: 6px;
     }
 
@@ -427,7 +437,7 @@ const html = String.raw`<!doctype html>
           <button id="addRoomBtn" class="button primary">ルーム設定を追加</button>
         </div>
         <div class="table-wrap" style="margin-top:12px;">
-          <table>
+          <table class="rooms-table">
             <thead>
               <tr>
                 <th>room_id</th>
