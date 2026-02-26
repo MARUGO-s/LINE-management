@@ -254,7 +254,7 @@ const html = String.raw`<!doctype html>
       white-space: nowrap;
     }
 
-    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 290px; }
+    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 96px; text-align: center; }
     .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 300px; }
     .rooms-table th:nth-child(3), .rooms-table td:nth-child(3) { width: 90px; text-align: center; }
     .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 150px; }
@@ -275,6 +275,12 @@ const html = String.raw`<!doctype html>
       width: 18px;
       height: 18px;
       accent-color: var(--accent-strong);
+    }
+
+    .rooms-table .room-show-id {
+      min-height: 30px;
+      padding: 0 10px;
+      font-size: 0.74rem;
     }
 
     .log-table th:nth-child(1),
@@ -354,6 +360,65 @@ const html = String.raw`<!doctype html>
       font-size: 0.76rem;
       padding: 0 9px;
       white-space: nowrap;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(2, 10, 18, 0.68);
+      z-index: 1000;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal-card {
+      width: min(560px, 100%);
+      border-radius: 14px;
+      border: 1px solid rgba(155, 220, 255, 0.32);
+      background: linear-gradient(160deg, rgba(8, 21, 35, 0.96), rgba(12, 34, 52, 0.94));
+      box-shadow: 0 24px 52px rgba(0, 0, 0, 0.45);
+      padding: 16px;
+    }
+
+    .modal-title {
+      margin: 0;
+      font-size: 1rem;
+      color: #d2ecff;
+      letter-spacing: 0.02em;
+    }
+
+    .modal-meta {
+      margin-top: 8px;
+      font-size: 0.84rem;
+      color: #9bc3da;
+    }
+
+    .modal-room-id {
+      display: block;
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(155, 220, 255, 0.24);
+      background: rgba(5, 17, 28, 0.7);
+      color: #e3f4ff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.84rem;
+      line-height: 1.4;
+      white-space: normal;
+      word-break: break-all;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 12px;
     }
 
     .muted {
@@ -466,7 +531,7 @@ const html = String.raw`<!doctype html>
           <table class="rooms-table">
             <thead>
               <tr>
-                <th>room_id</th>
+                <th>ID</th>
                 <th>表示名</th>
                 <th>未処理件数</th>
                 <th>最終投稿</th>
@@ -483,6 +548,18 @@ const html = String.raw`<!doctype html>
         </div>
       </section>
     </main>
+  </div>
+
+  <div id="roomIdModal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="roomIdModalTitle">
+      <h3 id="roomIdModalTitle" class="modal-title">ルームID</h3>
+      <div id="roomIdModalName" class="modal-meta">表示名: -</div>
+      <code id="roomIdModalValue" class="modal-room-id">-</code>
+      <div class="modal-actions">
+        <button id="copyRoomIdBtn" class="button">コピー</button>
+        <button id="closeRoomIdBtn" class="button primary">閉じる</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -516,6 +593,11 @@ const html = String.raw`<!doctype html>
       newRoomCleanupTiming: document.getElementById('newRoomCleanupTiming'),
       newRoomSummaryMode: document.getElementById('newRoomSummaryMode'),
       addRoomBtn: document.getElementById('addRoomBtn'),
+      roomIdModal: document.getElementById('roomIdModal'),
+      roomIdModalName: document.getElementById('roomIdModalName'),
+      roomIdModalValue: document.getElementById('roomIdModalValue'),
+      copyRoomIdBtn: document.getElementById('copyRoomIdBtn'),
+      closeRoomIdBtn: document.getElementById('closeRoomIdBtn'),
     };
     const AUTO_REFRESH_MS_VISIBLE = 5000;
     const AUTO_REFRESH_MS_HIDDEN = 15000;
@@ -728,7 +810,7 @@ const html = String.raw`<!doctype html>
         const tr = document.createElement('tr');
         tr.dataset.roomId = room.room_id;
         tr.innerHTML =
-          '<td><code>' + escapeHtml(room.room_id) + '</code></td>' +
+          '<td><button class="button room-show-id" type="button">ID表示</button></td>' +
           '<td><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"></td>' +
           '<td>' + Number(room.pending_messages || 0) + '件</td>' +
           '<td>' + formatDate(room.last_message_at) + '</td>' +
@@ -751,6 +833,32 @@ const html = String.raw`<!doctype html>
           '<button class="button warn room-delete">ルーム削除</button>' +
           '</span></td>';
         dom.roomTableBody.appendChild(tr);
+      }
+    }
+
+    function openRoomIdModal(tr) {
+      const roomId = tr.dataset.roomId || '-';
+      const nameInput = tr.querySelector('.room-name');
+      const roomName = nameInput ? nameInput.value.trim() : '';
+      dom.roomIdModalName.textContent = '表示名: ' + (roomName || '(未設定)');
+      dom.roomIdModalValue.textContent = roomId;
+      dom.roomIdModal.classList.add('open');
+      dom.roomIdModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeRoomIdModal() {
+      dom.roomIdModal.classList.remove('open');
+      dom.roomIdModal.setAttribute('aria-hidden', 'true');
+    }
+
+    async function copyRoomIdToClipboard() {
+      const roomId = dom.roomIdModalValue.textContent || '';
+      if (!roomId || roomId === '-') return;
+      try {
+        await navigator.clipboard.writeText(roomId);
+        alert('ルームIDをコピーしました。');
+      } catch (_) {
+        alert('クリップボードへのコピーに失敗しました。');
       }
     }
 
@@ -994,9 +1102,25 @@ const html = String.raw`<!doctype html>
         } else if (target.classList.contains('room-delete')) {
           await deleteRoomCompletely(tr);
           alert('ルームを削除しました。');
+        } else if (target.classList.contains('room-show-id')) {
+          openRoomIdModal(tr);
         }
       } catch (e) {
         alert(e.message || String(e));
+      }
+    });
+
+    dom.closeRoomIdBtn.addEventListener('click', function() {
+      closeRoomIdModal();
+    });
+
+    dom.copyRoomIdBtn.addEventListener('click', async function() {
+      await copyRoomIdToClipboard();
+    });
+
+    dom.roomIdModal.addEventListener('click', function(event) {
+      if (event.target === dom.roomIdModal) {
+        closeRoomIdModal();
       }
     });
 
@@ -1011,6 +1135,12 @@ const html = String.raw`<!doctype html>
     window.addEventListener('focus', function() {
       if (!token() || isEditingRoomForm()) return;
       safeLoadState({ silent: true });
+    });
+
+    document.addEventListener('keydown', function(event) {
+      if (event.key === 'Escape' && dom.roomIdModal.classList.contains('open')) {
+        closeRoomIdModal();
+      }
     });
 
     syncAuthState();
