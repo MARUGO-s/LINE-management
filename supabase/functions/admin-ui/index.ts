@@ -284,23 +284,21 @@ const html = String.raw`<!doctype html>
     }
 
     .log-table th:nth-child(1),
-    .log-table td:nth-child(1) { width: 54px; }
+    .log-table td:nth-child(1) { width: 176px; }
     .log-table th:nth-child(2),
-    .log-table td:nth-child(2) { width: 176px; }
-    .log-table th:nth-child(3),
-    .log-table td:nth-child(3) { width: 220px; }
-    .log-table th:nth-child(5),
-    .log-table td:nth-child(5) {
+    .log-table td:nth-child(2) { width: 220px; }
+    .log-table th:nth-child(4),
+    .log-table td:nth-child(4) {
       width: 120px;
       white-space: nowrap;
     }
-    .log-table th:nth-child(6),
-    .log-table td:nth-child(6) {
+    .log-table th:nth-child(5),
+    .log-table td:nth-child(5) {
       width: 90px;
       white-space: nowrap;
     }
-    .log-table th:nth-child(4),
-    .log-table td:nth-child(4) {
+    .log-table th:nth-child(3),
+    .log-table td:nth-child(3) {
       white-space: normal;
       word-break: normal;
       overflow-wrap: break-word;
@@ -494,7 +492,6 @@ const html = String.raw`<!doctype html>
           <table class="log-table">
             <thead>
               <tr>
-                <th>ID</th>
                 <th>実行時刻</th>
                 <th>状態</th>
                 <th>理由</th>
@@ -775,14 +772,13 @@ const html = String.raw`<!doctype html>
       dom.logTableBody.innerHTML = '';
       const rows = Array.isArray(logs) ? logs.slice(0, 30) : [];
       if (rows.length === 0) {
-        dom.logTableBody.innerHTML = '<tr><td class="empty" colspan="6">ログはありません。</td></tr>';
+        dom.logTableBody.innerHTML = '<tr><td class="empty" colspan="5">ログはありません。</td></tr>';
         return;
       }
       for (const row of rows) {
         const tr = document.createElement('tr');
         const tag = statusTag(row.status);
         tr.innerHTML =
-          '<td>' + (row.id ?? '-') + '</td>' +
           '<td>' + formatDate(row.run_at) + '</td>' +
           '<td><span class="tag ' + tag + '">' + escapeHtml(row.status || '-') + '</span></td>' +
           '<td>' + escapeHtml(logReasonJa(row)) + '</td>' +
