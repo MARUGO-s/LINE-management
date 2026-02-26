@@ -282,7 +282,7 @@
       <section class="card auth">
         <h2>接続設定</h2>
         <div class="controls">
-          <input id="projectUrlInput" class="input long" type="text" value="https://ppuzcvstdknliqbendaz.supabase.co" readonly>
+          <input id="projectUrlInput" class="input long" type="text" value="https://ppuzcvstdknliqbendaz.supabase.co" readonly tabindex="-1" aria-readonly="true" onfocus="this.blur()">
           <input id="tokenInput" class="input" type="password" placeholder="ADMIN_DASHBOARD_TOKEN">
           <button id="saveTokenBtn" class="button primary">保存して接続</button>
           <button id="clearTokenBtn" class="button">削除</button>
@@ -841,6 +841,11 @@
 
     (function init() {
       dom.projectUrlInput.value = FIXED_PROJECT_URL;
+      window.setTimeout(function() {
+        if (document.activeElement === dom.projectUrlInput) {
+          dom.projectUrlInput.blur();
+        }
+      }, 0);
       updateAuthPill();
       if (getToken()) {
         safeLoadState().then(function() {
