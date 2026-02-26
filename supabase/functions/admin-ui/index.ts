@@ -369,6 +369,14 @@ const html = String.raw`<!doctype html>
         <label class="switch"><input id="globalEnabled" type="checkbox">配信を有効化</label>
         <div class="controls" style="margin-top:10px;">
           <input id="globalHoursInput" class="input" type="text" placeholder="例: 12,17,23">
+          <select id="messageCleanupTiming" class="select" aria-label="メッセージ消去タイミング">
+            <option value="after_each_delivery">配信成功ごとに消去（従来）</option>
+            <option value="end_of_day">1日の最終配信後に消去</option>
+          </select>
+          <select id="lastDeliverySummaryMode" class="select" aria-label="最終配信の集計方式">
+            <option value="independent">各回独立で要約（従来）</option>
+            <option value="daily_rollup">最終配信のみ1日まとめ</option>
+          </select>
           <button id="saveGlobalBtn" class="button primary">全体設定を保存</button>
         </div>
         <div id="globalMeta" class="meta"></div>
@@ -438,6 +446,8 @@ const html = String.raw`<!doctype html>
       runNowBtn: document.getElementById('runNowBtn'),
       globalEnabled: document.getElementById('globalEnabled'),
       globalHoursInput: document.getElementById('globalHoursInput'),
+      messageCleanupTiming: document.getElementById('messageCleanupTiming'),
+      lastDeliverySummaryMode: document.getElementById('lastDeliverySummaryMode'),
       saveGlobalBtn: document.getElementById('saveGlobalBtn'),
       globalMeta: document.getElementById('globalMeta'),
       roomTableBody: document.getElementById('roomTableBody'),
@@ -523,9 +533,9 @@ const html = String.raw`<!doctype html>
         line_config_missing: 'LINE配信設定（トークンまたは送信先）の不足により配信できませんでした。',
         no_room_summary: '要約対象がなく、ルーム要約を生成できませんでした。',
         line_send_failed: 'LINEへの送信に失敗しました。',
-        db_update_failed: '配信後のメッセージ削除に失敗しました。',
-        delivered: '配信に成功し、対象メッセージを削除しました。',
-        delivered_no_messages_to_mark: '配信は成功しましたが、削除対象のメッセージはありませんでした。',
+        db_update_failed: '配信後のメッセージ状態更新に失敗しました。',
+        delivered: '配信に成功しました。',
+        delivered_no_messages_to_mark: '配信は成功しましたが、更新対象のメッセージはありませんでした。',
         delivered_with_room_failures: '配信は一部成功しましたが、ルーム別配信に失敗したものがあります。',
         runtime_error: '実行中に予期しないエラーが発生しました。',
       };
@@ -606,8 +616,18 @@ const html = String.raw`<!doctype html>
       dom.globalHoursInput.value = Array.isArray(settings.delivery_hours)
         ? settings.delivery_hours.join(',')
         : '12,17,23';
+      dom.messageCleanupTiming.value = settings.message_cleanup_timing === 'end_of_day'
+        ? 'end_of_day'
+        : 'after_each_delivery';
+      dom.lastDeliverySummaryMode.value = settings.last_delivery_summary_mode === 'daily_rollup'
+        ? 'daily_rollup'
+        : 'independent';
       const count = Array.isArray(settings.delivery_hours) ? settings.delivery_hours.length : 0;
-      dom.globalMeta.textContent = '配信回数: ' + count + '回/日  |  更新: ' + formatDate(settings.updated_at);
+      dom.globalMeta.textContent =
+        '配信回数: ' + count + '回/日'
+        + '  |  消去: ' + cleanupTimingLabel(dom.messageCleanupTiming.value)
+        + '  |  最終回: ' + summaryModeLabel(dom.lastDeliverySummaryMode.value)
+        + '  |  更新: ' + formatDate(settings.updated_at);
     }
 
     function renderLogs(logs) {
@@ -683,9 +703,12 @@ const html = String.raw`<!doctype html>
     }
 
     async function saveGlobal() {
+      validateGlobalModeCombination();
       const payload = {
         is_enabled: !!dom.globalEnabled.checked,
         delivery_hours: parseHoursInput(dom.globalHoursInput.value, false),
+        message_cleanup_timing: dom.messageCleanupTiming.value,
+        last_delivery_summary_mode: dom.lastDeliverySummaryMode.value,
       };
       await api('/settings/global', {
         method: 'PUT',
@@ -693,6 +716,20 @@ const html = String.raw`<!doctype html>
       });
       await safeLoadState();
       alert('全体設定を保存しました。');
+    }
+
+    function validateGlobalModeCombination() {
+      if (dom.lastDeliverySummaryMode.value === 'daily_rollup' && dom.messageCleanupTiming.value !== 'end_of_day') {
+        throw new Error('「最終配信のみ1日まとめ」を使う場合、消去タイミングは「1日の最終配信後に消去」を選択してください。');
+      }
+    }
+
+    function cleanupTimingLabel(value) {
+      return value === 'end_of_day' ? '1日の最終配信後' : '配信成功ごと';
+    }
+
+    function summaryModeLabel(value) {
+      return value === 'daily_rollup' ? '最終回のみ1日まとめ' : '各回独立';
     }
 
     async function saveRoomFromRow(tr) {

@@ -12,6 +12,9 @@ type AppError = {
   message: string
 }
 
+type MessageCleanupTiming = "after_each_delivery" | "end_of_day"
+type LastDeliverySummaryMode = "independent" | "daily_rollup"
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders })
@@ -47,9 +50,11 @@ Deno.serve(async (req) => {
           id: 1,
           delivery_hours: payload.delivery_hours,
           is_enabled: payload.is_enabled,
+          message_cleanup_timing: payload.message_cleanup_timing,
+          last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "id" })
-        .select("id, delivery_hours, is_enabled, updated_at")
+        .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -234,7 +239,7 @@ async function waitForNewLog(
 async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
   const { data, error } = await supabase
     .from("summary_settings")
-    .select("id, delivery_hours, is_enabled, updated_at")
+    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
     .eq("id", 1)
     .maybeSingle()
 
@@ -250,13 +255,15 @@ async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
     id: 1,
     delivery_hours: [12, 17, 23],
     is_enabled: true,
+    message_cleanup_timing: "after_each_delivery" as MessageCleanupTiming,
+    last_delivery_summary_mode: "independent" as LastDeliverySummaryMode,
     updated_at: new Date().toISOString(),
   }
 
   const { data: inserted, error: insertError } = await supabase
     .from("summary_settings")
     .upsert(fallback, { onConflict: "id" })
-    .select("id, delivery_hours, is_enabled, updated_at")
+    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
     .single()
 
   if (insertError) {
@@ -266,7 +273,12 @@ async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
   return inserted
 }
 
-function buildGlobalSettingsPayload(body: unknown): { delivery_hours: number[]; is_enabled: boolean } {
+function buildGlobalSettingsPayload(body: unknown): {
+  delivery_hours: number[]
+  is_enabled: boolean
+  message_cleanup_timing: MessageCleanupTiming
+  last_delivery_summary_mode: LastDeliverySummaryMode
+} {
   if (!isRecord(body)) {
     throw { status: 400, message: "Invalid JSON body." } satisfies AppError
   }
@@ -281,9 +293,20 @@ function buildGlobalSettingsPayload(body: unknown): { delivery_hours: number[]; 
     throw { status: 400, message: "delivery_hours must include at least one hour." } satisfies AppError
   }
 
+  const messageCleanupTiming = normalizeMessageCleanupTiming(body.message_cleanup_timing)
+  const lastDeliverySummaryMode = normalizeLastDeliverySummaryMode(body.last_delivery_summary_mode)
+  if (lastDeliverySummaryMode === "daily_rollup" && messageCleanupTiming !== "end_of_day") {
+    throw {
+      status: 400,
+      message: "last_delivery_summary_mode=daily_rollup requires message_cleanup_timing=end_of_day.",
+    } satisfies AppError
+  }
+
   return {
     is_enabled: isEnabled,
     delivery_hours: deliveryHours,
+    message_cleanup_timing: messageCleanupTiming,
+    last_delivery_summary_mode: lastDeliverySummaryMode,
   }
 }
 
@@ -349,6 +372,24 @@ function normalizeHours(value: unknown, allowNull: boolean): number[] | null {
   }
   hours.sort((a, b) => a - b)
   return hours
+}
+
+function normalizeMessageCleanupTiming(value: unknown): MessageCleanupTiming {
+  if (value == null) return "after_each_delivery"
+  if (value === "after_each_delivery" || value === "end_of_day") return value
+  throw {
+    status: 400,
+    message: "message_cleanup_timing must be either after_each_delivery or end_of_day.",
+  } satisfies AppError
+}
+
+function normalizeLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMode {
+  if (value == null) return "independent"
+  if (value === "independent" || value === "daily_rollup") return value
+  throw {
+    status: 400,
+    message: "last_delivery_summary_mode must be either independent or daily_rollup.",
+  } satisfies AppError
 }
 
 function secureEqual(a: string, b: string): boolean {
