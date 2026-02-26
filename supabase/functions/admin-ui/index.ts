@@ -596,8 +596,9 @@ const html = String.raw`<!doctype html>
     function isEditingRoomForm() {
       const active = document.activeElement;
       if (!(active instanceof HTMLElement)) return false;
-      if (active.closest('#roomTableBody')) return true;
-      return active.id === 'newRoomId' || active.id === 'newRoomName' || active.id === 'newRoomHours';
+      if (active.isContentEditable) return true;
+      if (active.matches('input, textarea, select')) return true;
+      return !!active.closest('#roomTableBody');
     }
 
     async function safeLoadState(options) {
