@@ -104,6 +104,55 @@ Deno.serve(async (req) => {
       return json({ success: true, room_id: roomId }, 200)
     }
 
+    if (req.method === "DELETE" && path.startsWith("/rooms/")) {
+      const roomId = decodeURIComponent(path.replace("/rooms/", ""))
+      if (!roomId) {
+        throw { status: 400, message: "room_id is required." } satisfies AppError
+      }
+
+      const { count: messageCount, error: messageCountError } = await supabase
+        .from("line_messages")
+        .select("id", { count: "exact", head: true })
+        .eq("room_id", roomId)
+      if (messageCountError) {
+        throw { status: 500, message: `Failed to count room messages: ${messageCountError.message}` } satisfies AppError
+      }
+
+      const { error: messageDeleteError } = await supabase
+        .from("line_messages")
+        .delete()
+        .eq("room_id", roomId)
+      if (messageDeleteError) {
+        throw { status: 500, message: `Failed to delete room messages: ${messageDeleteError.message}` } satisfies AppError
+      }
+
+      const { data: roomSettingsRow, error: roomSettingsCountError } = await supabase
+        .from("room_summary_settings")
+        .select("room_id")
+        .eq("room_id", roomId)
+        .maybeSingle()
+      if (roomSettingsCountError) {
+        throw { status: 500, message: `Failed to inspect room settings: ${roomSettingsCountError.message}` } satisfies AppError
+      }
+
+      const { error: roomSettingsDeleteError } = await supabase
+        .from("room_summary_settings")
+        .delete()
+        .eq("room_id", roomId)
+      if (roomSettingsDeleteError) {
+        throw { status: 500, message: `Failed to delete room settings: ${roomSettingsDeleteError.message}` } satisfies AppError
+      }
+
+      return json({
+        success: true,
+        room_id: roomId,
+        deleted: {
+          messages: messageCount ?? 0,
+          room_settings: roomSettingsRow ? 1 : 0,
+        },
+      }, 200)
+    }
+
     if (req.method === "POST" && path === "/actions/run-summary") {
       const body = await parseJson(req)
       if (!isRecord(body)) {

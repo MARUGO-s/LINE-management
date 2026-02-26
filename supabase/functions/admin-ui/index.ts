@@ -704,6 +704,7 @@ const html = String.raw`<!doctype html>
           '<td><span class="row-actions">' +
           '<button class="button primary room-save">保存</button>' +
           '<button class="button ghost room-reset">継承</button>' +
+          '<button class="button warn room-delete">ルーム削除</button>' +
           '</span></td>';
         dom.roomTableBody.appendChild(tr);
       }
@@ -788,6 +789,17 @@ const html = String.raw`<!doctype html>
     async function resetRoomToGlobal(tr) {
       const roomId = tr.dataset.roomId || '';
       await api('/settings/rooms/' + encodeURIComponent(roomId), { method: 'DELETE' });
+      await safeLoadState();
+    }
+
+    async function deleteRoomCompletely(tr) {
+      const roomId = tr.dataset.roomId || '';
+      const roomNameInput = tr.querySelector('.room-name');
+      const roomName = roomNameInput ? roomNameInput.value.trim() : '';
+      const label = roomName || roomId;
+      const ok = window.confirm('ルーム「' + label + '」を削除します。\\nこの操作で当該ルームの保存メッセージと設定を削除します。よろしいですか？');
+      if (!ok) return;
+      await api('/rooms/' + encodeURIComponent(roomId), { method: 'DELETE' });
       await safeLoadState();
     }
 
@@ -909,6 +921,9 @@ const html = String.raw`<!doctype html>
         } else if (target.classList.contains('room-reset')) {
           await resetRoomToGlobal(tr);
           alert('ルーム設定を削除し、全体設定継承に戻しました。');
+        } else if (target.classList.contains('room-delete')) {
+          await deleteRoomCompletely(tr);
+          alert('ルームを削除しました。');
         }
       } catch (e) {
         alert(e.message || String(e));
