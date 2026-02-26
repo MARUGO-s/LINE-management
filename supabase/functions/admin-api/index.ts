@@ -74,9 +74,11 @@ Deno.serve(async (req) => {
           is_enabled: payload.is_enabled,
           send_room_summary: payload.send_room_summary,
           delivery_hours: payload.delivery_hours,
+          message_cleanup_timing: payload.message_cleanup_timing,
+          last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -180,7 +182,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -316,6 +318,8 @@ function buildRoomSettingsPayload(body: unknown): {
   is_enabled: boolean
   send_room_summary: boolean
   delivery_hours: number[] | null
+  message_cleanup_timing: MessageCleanupTiming | null
+  last_delivery_summary_mode: LastDeliverySummaryMode | null
 } {
   if (!isRecord(body)) {
     throw { status: 400, message: "Invalid JSON body." } satisfies AppError
@@ -342,12 +346,23 @@ function buildRoomSettingsPayload(body: unknown): {
     throw { status: 400, message: "delivery_hours must contain at least one hour or null." } satisfies AppError
   }
 
+  const roomCleanupTiming = normalizeOptionalMessageCleanupTiming(body.message_cleanup_timing)
+  const roomSummaryMode = normalizeOptionalLastDeliverySummaryMode(body.last_delivery_summary_mode)
+  if (roomSummaryMode === "daily_rollup" && roomCleanupTiming === "after_each_delivery") {
+    throw {
+      status: 400,
+      message: "last_delivery_summary_mode=daily_rollup requires message_cleanup_timing=end_of_day or null (inherit).",
+    } satisfies AppError
+  }
+
   return {
     room_id: roomIdRaw,
     room_name: roomNameRaw || null,
     is_enabled: isEnabled,
     send_room_summary: sendRoomSummary,
     delivery_hours: deliveryHours,
+    message_cleanup_timing: roomCleanupTiming,
+    last_delivery_summary_mode: roomSummaryMode,
   }
 }
 
@@ -390,6 +405,16 @@ function normalizeLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMo
     status: 400,
     message: "last_delivery_summary_mode must be either independent or daily_rollup.",
   } satisfies AppError
+}
+
+function normalizeOptionalMessageCleanupTiming(value: unknown): MessageCleanupTiming | null {
+  if (value == null || value === "") return null
+  return normalizeMessageCleanupTiming(value)
+}
+
+function normalizeOptionalLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMode | null {
+  if (value == null || value === "") return null
+  return normalizeLastDeliverySummaryMode(value)
 }
 
 function secureEqual(a: string, b: string): boolean {

@@ -409,6 +409,16 @@ const html = String.raw`<!doctype html>
           <input id="newRoomHours" class="input narrow" type="text" placeholder="時刻: 12,17">
           <label class="switch"><input id="newRoomEnabled" type="checkbox" checked>有効</label>
           <label class="switch"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
+          <select id="newRoomCleanupTiming" class="select" aria-label="ルーム消去タイミング">
+            <option value="">消去: 全体設定を継承</option>
+            <option value="after_each_delivery">消去: 配信成功ごと</option>
+            <option value="end_of_day">消去: 1日の最終配信後</option>
+          </select>
+          <select id="newRoomSummaryMode" class="select" aria-label="ルーム最終配信の集計方式">
+            <option value="">最終回: 全体設定を継承</option>
+            <option value="independent">最終回: 各回独立</option>
+            <option value="daily_rollup">最終回: 1日まとめ</option>
+          </select>
           <button id="addRoomBtn" class="button primary">ルーム設定を追加</button>
         </div>
         <div class="table-wrap" style="margin-top:12px;">
@@ -422,6 +432,8 @@ const html = String.raw`<!doctype html>
                 <th>有効</th>
                 <th>ルーム要約配信</th>
                 <th>配信時刻</th>
+                <th>消去タイミング</th>
+                <th>最終回集計</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -457,6 +469,8 @@ const html = String.raw`<!doctype html>
       newRoomHours: document.getElementById('newRoomHours'),
       newRoomEnabled: document.getElementById('newRoomEnabled'),
       newRoomSendSummary: document.getElementById('newRoomSendSummary'),
+      newRoomCleanupTiming: document.getElementById('newRoomCleanupTiming'),
+      newRoomSummaryMode: document.getElementById('newRoomSummaryMode'),
       addRoomBtn: document.getElementById('addRoomBtn'),
     };
     const AUTO_REFRESH_MS_VISIBLE = 5000;
@@ -660,7 +674,7 @@ const html = String.raw`<!doctype html>
       dom.roomTableBody.innerHTML = '';
       const rooms = Array.isArray(roomOverview) ? roomOverview : [];
       if (rooms.length === 0) {
-        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="8">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
+        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="10">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
         return;
       }
 
@@ -676,6 +690,16 @@ const html = String.raw`<!doctype html>
           '<td><label class="switch"><input class="room-enabled" type="checkbox" ' + (((setting ? setting.is_enabled : room.settings_enabled) !== false) ? 'checked' : '') + '>有効</label></td>' +
           '<td><label class="switch"><input class="room-send-summary" type="checkbox" ' + ((setting && setting.send_room_summary === true) ? 'checked' : '') + '>配信</label></td>' +
           '<td><input class="input room-hours" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : ROOM_DEFAULT_HOURS) + '"></td>' +
+          '<td><select class="select room-cleanup-timing">' +
+          '<option value="" ' + (((setting && setting.message_cleanup_timing) ? '' : 'selected')) + '>継承</option>' +
+          '<option value="after_each_delivery" ' + ((setting && setting.message_cleanup_timing === 'after_each_delivery') ? 'selected' : '') + '>配信ごと</option>' +
+          '<option value="end_of_day" ' + ((setting && setting.message_cleanup_timing === 'end_of_day') ? 'selected' : '') + '>最終配信後</option>' +
+          '</select></td>' +
+          '<td><select class="select room-summary-mode">' +
+          '<option value="" ' + (((setting && setting.last_delivery_summary_mode) ? '' : 'selected')) + '>継承</option>' +
+          '<option value="independent" ' + ((setting && setting.last_delivery_summary_mode === 'independent') ? 'selected' : '') + '>各回独立</option>' +
+          '<option value="daily_rollup" ' + ((setting && setting.last_delivery_summary_mode === 'daily_rollup') ? 'selected' : '') + '>1日まとめ</option>' +
+          '</select></td>' +
           '<td><span class="row-actions">' +
           '<button class="button primary room-save">保存</button>' +
           '<button class="button ghost room-reset">継承</button>' +
@@ -738,12 +762,19 @@ const html = String.raw`<!doctype html>
       const enabledInput = tr.querySelector('.room-enabled');
       const sendSummaryInput = tr.querySelector('.room-send-summary');
       const hoursInput = tr.querySelector('.room-hours');
+      const cleanupTimingInput = tr.querySelector('.room-cleanup-timing');
+      const summaryModeInput = tr.querySelector('.room-summary-mode');
+      const roomCleanupTiming = normalizeOptionalSelectValue(cleanupTimingInput ? cleanupTimingInput.value : '');
+      const roomSummaryMode = normalizeOptionalSelectValue(summaryModeInput ? summaryModeInput.value : '');
+      validateRoomModeCombination(roomCleanupTiming, roomSummaryMode);
       const payload = {
         room_id: roomId,
         room_name: nameInput ? nameInput.value.trim() : '',
         is_enabled: !!(enabledInput && enabledInput.checked),
         send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
         delivery_hours: parseHoursInput(hoursInput ? hoursInput.value : '', true),
+        message_cleanup_timing: roomCleanupTiming,
+        last_delivery_summary_mode: roomSummaryMode,
       };
 
       await api('/settings/rooms', {
@@ -771,7 +802,10 @@ const html = String.raw`<!doctype html>
         is_enabled: !!dom.newRoomEnabled.checked,
         send_room_summary: !!dom.newRoomSendSummary.checked,
         delivery_hours: parseHoursInput(dom.newRoomHours.value, true),
+        message_cleanup_timing: normalizeOptionalSelectValue(dom.newRoomCleanupTiming.value),
+        last_delivery_summary_mode: normalizeOptionalSelectValue(dom.newRoomSummaryMode.value),
       };
+      validateRoomModeCombination(payload.message_cleanup_timing, payload.last_delivery_summary_mode);
       await api('/settings/rooms', {
         method: 'PUT',
         body: JSON.stringify(payload),
@@ -781,7 +815,25 @@ const html = String.raw`<!doctype html>
       dom.newRoomHours.value = '';
       dom.newRoomEnabled.checked = true;
       dom.newRoomSendSummary.checked = false;
+      dom.newRoomCleanupTiming.value = '';
+      dom.newRoomSummaryMode.value = '';
       await safeLoadState();
+    }
+
+    function normalizeOptionalSelectValue(value) {
+      return value ? value : null;
+    }
+
+    function validateRoomModeCombination(roomCleanupTiming, roomSummaryMode) {
+      if (roomSummaryMode !== 'daily_rollup') return;
+      const fallbackCleanup =
+        (currentState && currentState.global_settings && currentState.global_settings.message_cleanup_timing)
+        || dom.messageCleanupTiming.value
+        || 'after_each_delivery';
+      const effectiveCleanup = roomCleanupTiming || fallbackCleanup;
+      if (effectiveCleanup !== 'end_of_day') {
+        throw new Error('ルーム設定で「最終回: 1日まとめ」を使う場合、消去タイミングは「1日の最終配信後」または「継承（全体が最終配信後）」を選択してください。');
+      }
     }
 
     async function runNow() {

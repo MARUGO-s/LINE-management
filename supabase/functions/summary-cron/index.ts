@@ -5,6 +5,21 @@ import { Groq } from "https://esm.sh/groq-sdk@0.5.0"
 type MessageCleanupTiming = 'after_each_delivery' | 'end_of_day'
 type LastDeliverySummaryMode = 'independent' | 'daily_rollup'
 type MessageUpdateResult = { affectedCount: number; error: Error | null }
+type LineMessageRow = { id: string; room_id: string; content: string; created_at: string }
+type RoomRuntimeSetting = {
+  delivery_hours: number[] | null
+  is_enabled: boolean
+  send_room_summary: boolean
+  message_cleanup_timing: MessageCleanupTiming | null
+  last_delivery_summary_mode: LastDeliverySummaryMode | null
+}
+type RoomExecutionContext = {
+  messageIds: string[]
+  cleanupTiming: MessageCleanupTiming
+  summaryMode: LastDeliverySummaryMode
+  isDailyRollup: boolean
+  isEndOfDayCleanup: boolean
+}
 
 Deno.serve(async (req) => {
   let supabase: ReturnType<typeof createClient> | null = null
@@ -50,7 +65,7 @@ Deno.serve(async (req) => {
     const lastGlobalHour = getLastScheduledHour(globalHours)
     const isLastGlobalDeliverySlot = lastGlobalHour != null && jstHour === lastGlobalHour
     const jstDayRange = getJstDayRange(now)
-    const shouldUseDailyRollup = shouldSendOverall
+    const shouldUseOverallDailyRollup = shouldSendOverall
       && lastDeliverySummaryMode === 'daily_rollup'
       && messageCleanupTiming === 'end_of_day'
       && isLastGlobalDeliverySlot
@@ -64,46 +79,51 @@ Deno.serve(async (req) => {
     // Fetch per-room settings
     const { data: roomSettingsList, error: roomSettingsError } = await supabase
       .from('room_summary_settings')
-      .select('room_id, delivery_hours, is_enabled, send_room_summary')
+      .select('room_id, delivery_hours, is_enabled, send_room_summary, message_cleanup_timing, last_delivery_summary_mode')
 
     if (roomSettingsError) {
       console.error(`Error fetching room settings: ${roomSettingsError.message}`)
     }
 
-    const roomSettingsMap = new Map<string, { delivery_hours: number[] | null, is_enabled: boolean, send_room_summary: boolean }>()
+    const roomSettingsMap = new Map<string, RoomRuntimeSetting>()
     if (roomSettingsList) {
       for (const rs of roomSettingsList) {
         roomSettingsMap.set(rs.room_id, {
           delivery_hours: rs.delivery_hours,
           is_enabled: rs.is_enabled,
           send_room_summary: rs.send_room_summary === true,
+          message_cleanup_timing: normalizeNullableMessageCleanupTiming(rs.message_cleanup_timing),
+          last_delivery_summary_mode: normalizeNullableLastDeliverySummaryMode(rs.last_delivery_summary_mode),
         })
       }
     }
 
     // 1. Fetch target messages
-    let messageQuery: any = supabase
-      .from('line_messages')
-      .select('id, room_id, content, created_at')
-
-    if (shouldUseDailyRollup) {
-      messageQuery = messageQuery
+    const [{ data: unprocessedMessages, error: unprocessedError }, { data: todayMessages, error: todayError }] = await Promise.all([
+      supabase
+        .from('line_messages')
+        .select('id, room_id, content, created_at')
+        .eq('processed', false)
+        .order('created_at', { ascending: true }),
+      supabase
+        .from('line_messages')
+        .select('id, room_id, content, created_at')
         .gte('created_at', jstDayRange.startIso)
         .lt('created_at', jstDayRange.endIso)
-    } else {
-      messageQuery = messageQuery.eq('processed', false)
+        .order('created_at', { ascending: true }),
+    ])
+
+    if (unprocessedError) {
+      throw new Error(`Error fetching unprocessed messages: ${unprocessedError.message}`)
+    }
+    if (todayError) {
+      throw new Error(`Error fetching day messages: ${todayError.message}`)
     }
 
-    const { data: messages, error: fetchError } = await messageQuery
-      .order('created_at', { ascending: true })
+    const queueCount = unprocessedMessages?.length ?? 0
+    const dayMessageCount = todayMessages?.length ?? 0
 
-    if (fetchError) {
-      throw new Error(`Error fetching messages: ${fetchError.message}`)
-    }
-
-    const queueCount = messages?.length ?? 0
-
-    if (!messages || messages.length === 0) {
+    if (queueCount === 0 && dayMessageCount === 0) {
       let endOfDayPrunedCount = 0
       if (messageCleanupTiming === 'end_of_day' && shouldSendOverall && isLastGlobalDeliverySlot) {
         const pruneResult = await pruneProcessedMessagesForDay(supabase, jstDayRange.startIso, jstDayRange.endIso)
@@ -116,7 +136,7 @@ Deno.serve(async (req) => {
       await writeDeliveryLog(supabase, {
         jst_hour: jstHour,
         status: 'no_messages',
-        reason: shouldUseDailyRollup ? 'No messages found in current JST day window.' : 'No unprocessed messages.',
+        reason: shouldUseOverallDailyRollup ? 'No messages found in current JST day window.' : 'No unprocessed messages.',
         should_send_overall: shouldSendOverall,
         rooms_targeted: 0,
         messages_in_queue: 0,
@@ -128,7 +148,7 @@ Deno.serve(async (req) => {
           force_run: forceRun,
           message_cleanup_timing: messageCleanupTiming,
           last_delivery_summary_mode: lastDeliverySummaryMode,
-          using_daily_rollup_scope: shouldUseDailyRollup,
+          using_daily_rollup_scope: shouldUseOverallDailyRollup,
           end_of_day_pruned_count: endOfDayPrunedCount,
         },
       })
@@ -140,31 +160,58 @@ Deno.serve(async (req) => {
     }
 
     // 2. Group by room_id and decide delivery targets
+    const unprocessedByRoom = groupMessagesByRoom(unprocessedMessages ?? [])
+    const todayByRoom = groupMessagesByRoom(todayMessages ?? [])
+    const allRoomIds = new Set<string>([
+      ...unprocessedByRoom.keys(),
+      ...todayByRoom.keys(),
+    ])
+
     const messagesByRoom: Record<string, string[]> = {}
     const roomsToSummarize: string[] = []
     const roomDeliveryTargets: string[] = []
+    const roomContexts = new Map<string, RoomExecutionContext>()
 
-    for (const msg of messages) {
-      if (!messagesByRoom[msg.room_id]) {
-        messagesByRoom[msg.room_id] = []
-
-        const rs = roomSettingsMap.get(msg.room_id)
-        const roomEnabled = rs ? rs.is_enabled : true
-        const roomHours = rs?.delivery_hours ?? globalHours
-
-        const shouldSummarizeThisRoom = shouldUseDailyRollup
-          ? roomEnabled
-          : roomEnabled && (forceRun || roomHours.includes(jstHour))
-        const shouldDeliverRoomSummary = roomEnabled && (forceRun || roomHours.includes(jstHour)) && rs?.send_room_summary === true
-
-        if (shouldSummarizeThisRoom) {
-          roomsToSummarize.push(msg.room_id)
-        }
-        if (shouldDeliverRoomSummary) {
-          roomDeliveryTargets.push(msg.room_id)
-        }
+    for (const roomId of allRoomIds) {
+      const rs = roomSettingsMap.get(roomId)
+      const roomEnabled = rs ? rs.is_enabled : true
+      const roomHours = rs?.delivery_hours ?? globalHours
+      if (!roomEnabled || !(forceRun || roomHours.includes(jstHour))) {
+        continue
       }
-      messagesByRoom[msg.room_id].push(msg.content)
+
+      const effectiveCleanupTiming = rs?.message_cleanup_timing ?? messageCleanupTiming
+      let effectiveSummaryMode = rs?.last_delivery_summary_mode ?? lastDeliverySummaryMode
+      if (effectiveSummaryMode === 'daily_rollup' && effectiveCleanupTiming !== 'end_of_day') {
+        effectiveSummaryMode = 'independent'
+      }
+
+      const roomLastHour = getLastScheduledHour(roomHours)
+      const isRoomLastSlot = roomLastHour != null && roomLastHour === jstHour
+      const shouldUseRoomDailyRollup = effectiveSummaryMode === 'daily_rollup'
+        && effectiveCleanupTiming === 'end_of_day'
+        && isRoomLastSlot
+
+      const sourceMessages = shouldUseRoomDailyRollup
+        ? (todayByRoom.get(roomId) ?? [])
+        : (unprocessedByRoom.get(roomId) ?? [])
+      if (sourceMessages.length === 0) {
+        continue
+      }
+
+      roomsToSummarize.push(roomId)
+      if (rs?.send_room_summary === true) {
+        roomDeliveryTargets.push(roomId)
+      }
+
+      messagesByRoom[roomId] = sourceMessages.map((msg) => msg.content)
+      roomContexts.set(roomId, {
+        messageIds: sourceMessages.map((msg) => msg.id),
+        cleanupTiming: effectiveCleanupTiming,
+        summaryMode: effectiveSummaryMode,
+        isDailyRollup: shouldUseRoomDailyRollup,
+        isEndOfDayCleanup: effectiveCleanupTiming === 'end_of_day' && isRoomLastSlot,
+      })
     }
 
     const shouldSendRoomSummaries = roomDeliveryTargets.length > 0
@@ -187,7 +234,7 @@ Deno.serve(async (req) => {
           force_run: forceRun,
           message_cleanup_timing: messageCleanupTiming,
           last_delivery_summary_mode: lastDeliverySummaryMode,
-          using_daily_rollup_scope: shouldUseDailyRollup,
+          using_daily_rollup_scope: shouldUseOverallDailyRollup,
         },
       })
 
@@ -215,7 +262,7 @@ Deno.serve(async (req) => {
           force_run: forceRun,
           message_cleanup_timing: messageCleanupTiming,
           last_delivery_summary_mode: lastDeliverySummaryMode,
-          using_daily_rollup_scope: shouldUseDailyRollup,
+          using_daily_rollup_scope: shouldUseOverallDailyRollup,
         },
       })
 
@@ -243,7 +290,7 @@ Deno.serve(async (req) => {
           force_run: forceRun,
           message_cleanup_timing: messageCleanupTiming,
           last_delivery_summary_mode: lastDeliverySummaryMode,
-          using_daily_rollup_scope: shouldUseDailyRollup,
+          using_daily_rollup_scope: shouldUseOverallDailyRollup,
         },
       })
 
@@ -305,7 +352,7 @@ Deno.serve(async (req) => {
           force_run: forceRun,
           message_cleanup_timing: messageCleanupTiming,
           last_delivery_summary_mode: lastDeliverySummaryMode,
-          using_daily_rollup_scope: shouldUseDailyRollup,
+          using_daily_rollup_scope: shouldUseOverallDailyRollup,
         },
       })
 
@@ -342,7 +389,7 @@ Deno.serve(async (req) => {
             force_run: forceRun,
             message_cleanup_timing: messageCleanupTiming,
             last_delivery_summary_mode: lastDeliverySummaryMode,
-            using_daily_rollup_scope: shouldUseDailyRollup,
+            using_daily_rollup_scope: shouldUseOverallDailyRollup,
           },
         })
 
@@ -374,7 +421,7 @@ Deno.serve(async (req) => {
       })
 
       const overallSummary = overallResponse.choices[0].message?.content || "全体要約を生成できませんでした。"
-      const overallTitle = shouldUseDailyRollup ? '【全体 1日まとめレポート】' : '【全体 定期要約レポート】'
+      const overallTitle = shouldUseOverallDailyRollup ? '【全体 1日まとめレポート】' : '【全体 定期要約レポート】'
       const overallSendResult = await sendLineMessage(
         overallRoomId,
         `${overallTitle}\n\n${overallSummary}`,
@@ -404,7 +451,7 @@ Deno.serve(async (req) => {
             force_run: forceRun,
             message_cleanup_timing: messageCleanupTiming,
             last_delivery_summary_mode: lastDeliverySummaryMode,
-            using_daily_rollup_scope: shouldUseDailyRollup,
+            using_daily_rollup_scope: shouldUseOverallDailyRollup,
           },
         })
 
@@ -462,7 +509,7 @@ Deno.serve(async (req) => {
           force_run: forceRun,
           message_cleanup_timing: messageCleanupTiming,
           last_delivery_summary_mode: lastDeliverySummaryMode,
-          using_daily_rollup_scope: shouldUseDailyRollup,
+          using_daily_rollup_scope: shouldUseOverallDailyRollup,
         },
       })
 
@@ -477,134 +524,111 @@ Deno.serve(async (req) => {
 
     const deliveredRoomIds = shouldSendOverall ? roomsToSummarize : successfulRoomDeliveries
     const targetRoomId = (shouldSendOverall ? overallRoomId : roomDeliveryTargets[0]) || null
-    const messagesToHandle = messages.filter((m) => deliveredRoomIds.includes(m.room_id))
+
+    const deleteMessageIds = new Set<string>()
+    const markProcessedMessageIds = new Set<string>()
+    const endOfDayDeleteRoomIds = new Set<string>()
+
+    for (const roomId of deliveredRoomIds) {
+      const context = roomContexts.get(roomId)
+      if (!context) continue
+
+      if (context.cleanupTiming === 'after_each_delivery') {
+        for (const id of context.messageIds) deleteMessageIds.add(id)
+        continue
+      }
+
+      if (context.isEndOfDayCleanup) {
+        endOfDayDeleteRoomIds.add(roomId)
+      } else {
+        for (const id of context.messageIds) markProcessedMessageIds.add(id)
+      }
+    }
 
     let affectedCount = 0
-    let cleanupAction: 'deleted' | 'marked_processed' | 'end_of_day_deleted' | 'none' = 'none'
+    let deletedCount = 0
+    let markedProcessedCount = 0
+    let endOfDayDeletedCount = 0
+    let cleanupAction: 'deleted' | 'marked_processed' | 'end_of_day_deleted' | 'mixed' | 'none' = 'none'
 
-    if (messageCleanupTiming === 'after_each_delivery') {
-      const messageIds = messagesToHandle.map((m) => m.id)
-      if (messageIds.length > 0) {
-        const result = await deleteMessagesByIds(supabase, messageIds)
-        if (result.error) {
-          await writeDeliveryLog(supabase, {
-            jst_hour: jstHour,
-            status: 'db_update_failed',
-            reason: result.error.message,
-            should_send_overall: shouldSendOverall,
-            rooms_targeted: roomsToSummarize.length,
-            messages_in_queue: queueCount,
-            messages_marked_processed: 0,
-            line_send_attempted: lineSendAttempted,
-            line_send_success: lineSendSuccess,
-            line_http_status: lineHttpStatus,
-            target_room_id: targetRoomId,
-            details: {
-              room_ids: roomsToSummarize,
-              room_delivery_targets: roomDeliveryTargets,
-              room_delivery_success: successfulRoomDeliveries,
-              room_delivery_failed: failedRoomDeliveries,
-              force_run: forceRun,
-              message_cleanup_timing: messageCleanupTiming,
-              last_delivery_summary_mode: lastDeliverySummaryMode,
-              using_daily_rollup_scope: shouldUseDailyRollup,
-            },
-          })
-          throw new Error(`Error deleting delivered messages: ${result.error.message}`)
-        }
-        affectedCount = result.affectedCount
-        cleanupAction = 'deleted'
-      }
-    } else if (shouldSendOverall && isLastGlobalDeliverySlot) {
-      const result = await deleteMessagesForDayByRooms(supabase, deliveredRoomIds, jstDayRange.startIso, jstDayRange.endIso)
-      if (result.error) {
-        await writeDeliveryLog(supabase, {
-          jst_hour: jstHour,
-          status: 'db_update_failed',
-          reason: result.error.message,
-          should_send_overall: shouldSendOverall,
-          rooms_targeted: roomsToSummarize.length,
-          messages_in_queue: queueCount,
-          messages_marked_processed: 0,
-          line_send_attempted: lineSendAttempted,
-          line_send_success: lineSendSuccess,
-          line_http_status: lineHttpStatus,
-          target_room_id: targetRoomId,
-          details: {
-            room_ids: roomsToSummarize,
-            room_delivery_targets: roomDeliveryTargets,
-            room_delivery_success: successfulRoomDeliveries,
-            room_delivery_failed: failedRoomDeliveries,
-            force_run: forceRun,
-            message_cleanup_timing: messageCleanupTiming,
-            last_delivery_summary_mode: lastDeliverySummaryMode,
-            using_daily_rollup_scope: shouldUseDailyRollup,
+    const writeDbUpdateFailure = async (reason: string) => {
+      await writeDeliveryLog(supabase, {
+        jst_hour: jstHour,
+        status: 'db_update_failed',
+        reason,
+        should_send_overall: shouldSendOverall,
+        rooms_targeted: roomsToSummarize.length,
+        messages_in_queue: queueCount,
+        messages_marked_processed: 0,
+        line_send_attempted: lineSendAttempted,
+        line_send_success: lineSendSuccess,
+        line_http_status: lineHttpStatus,
+        target_room_id: targetRoomId,
+        details: {
+          room_ids: roomsToSummarize,
+          room_delivery_targets: roomDeliveryTargets,
+          room_delivery_success: successfulRoomDeliveries,
+          room_delivery_failed: failedRoomDeliveries,
+          force_run: forceRun,
+          message_cleanup_timing: messageCleanupTiming,
+          last_delivery_summary_mode: lastDeliverySummaryMode,
+          using_daily_rollup_scope: shouldUseOverallDailyRollup,
+          room_cleanup_breakdown: {
+            delete_message_ids: deleteMessageIds.size,
+            mark_processed_message_ids: markProcessedMessageIds.size,
+            end_of_day_room_ids: endOfDayDeleteRoomIds.size,
           },
-        })
+        },
+      })
+    }
+
+    if (deleteMessageIds.size > 0) {
+      const result = await deleteMessagesByIds(supabase, Array.from(deleteMessageIds))
+      if (result.error) {
+        await writeDbUpdateFailure(result.error.message)
+        throw new Error(`Error deleting delivered messages: ${result.error.message}`)
+      }
+      deletedCount = result.affectedCount
+      affectedCount += result.affectedCount
+    }
+
+    if (markProcessedMessageIds.size > 0) {
+      const result = await markMessagesProcessedByIds(supabase, Array.from(markProcessedMessageIds))
+      if (result.error) {
+        await writeDbUpdateFailure(result.error.message)
+        throw new Error(`Error marking delivered messages as processed: ${result.error.message}`)
+      }
+      markedProcessedCount = result.affectedCount
+      affectedCount += result.affectedCount
+    }
+
+    if (endOfDayDeleteRoomIds.size > 0) {
+      const result = await deleteMessagesForDayByRooms(
+        supabase,
+        Array.from(endOfDayDeleteRoomIds),
+        jstDayRange.startIso,
+        jstDayRange.endIso,
+      )
+      if (result.error) {
+        await writeDbUpdateFailure(result.error.message)
         throw new Error(`Error deleting end-of-day messages: ${result.error.message}`)
       }
-      const pruneResult = await pruneProcessedMessagesForDay(supabase, jstDayRange.startIso, jstDayRange.endIso)
-      if (pruneResult.error) {
-        await writeDeliveryLog(supabase, {
-          jst_hour: jstHour,
-          status: 'db_update_failed',
-          reason: pruneResult.error.message,
-          should_send_overall: shouldSendOverall,
-          rooms_targeted: roomsToSummarize.length,
-          messages_in_queue: queueCount,
-          messages_marked_processed: 0,
-          line_send_attempted: lineSendAttempted,
-          line_send_success: lineSendSuccess,
-          line_http_status: lineHttpStatus,
-          target_room_id: targetRoomId,
-          details: {
-            room_ids: roomsToSummarize,
-            room_delivery_targets: roomDeliveryTargets,
-            room_delivery_success: successfulRoomDeliveries,
-            room_delivery_failed: failedRoomDeliveries,
-            force_run: forceRun,
-            message_cleanup_timing: messageCleanupTiming,
-            last_delivery_summary_mode: lastDeliverySummaryMode,
-            using_daily_rollup_scope: shouldUseDailyRollup,
-          },
-        })
-        throw new Error(`Error pruning processed end-of-day messages: ${pruneResult.error.message}`)
-      }
-      affectedCount = result.affectedCount + pruneResult.affectedCount
-      cleanupAction = 'end_of_day_deleted'
+      endOfDayDeletedCount = result.affectedCount
+      affectedCount += result.affectedCount
+    }
+
+    const actionKinds = [
+      deleteMessageIds.size > 0 ? 'deleted' : null,
+      markProcessedMessageIds.size > 0 ? 'marked_processed' : null,
+      endOfDayDeleteRoomIds.size > 0 ? 'end_of_day_deleted' : null,
+    ].filter((value): value is 'deleted' | 'marked_processed' | 'end_of_day_deleted' => value != null)
+
+    if (actionKinds.length === 0) {
+      cleanupAction = 'none'
+    } else if (actionKinds.length === 1) {
+      cleanupAction = actionKinds[0]
     } else {
-      const messageIds = messagesToHandle.map((m) => m.id)
-      if (messageIds.length > 0) {
-        const result = await markMessagesProcessedByIds(supabase, messageIds)
-        if (result.error) {
-          await writeDeliveryLog(supabase, {
-            jst_hour: jstHour,
-            status: 'db_update_failed',
-            reason: result.error.message,
-            should_send_overall: shouldSendOverall,
-            rooms_targeted: roomsToSummarize.length,
-            messages_in_queue: queueCount,
-            messages_marked_processed: 0,
-            line_send_attempted: lineSendAttempted,
-            line_send_success: lineSendSuccess,
-            line_http_status: lineHttpStatus,
-            target_room_id: targetRoomId,
-            details: {
-              room_ids: roomsToSummarize,
-              room_delivery_targets: roomDeliveryTargets,
-              room_delivery_success: successfulRoomDeliveries,
-              room_delivery_failed: failedRoomDeliveries,
-              force_run: forceRun,
-              message_cleanup_timing: messageCleanupTiming,
-              last_delivery_summary_mode: lastDeliverySummaryMode,
-              using_daily_rollup_scope: shouldUseDailyRollup,
-            },
-          })
-          throw new Error(`Error marking delivered messages as processed: ${result.error.message}`)
-        }
-        affectedCount = result.affectedCount
-        cleanupAction = 'marked_processed'
-      }
+      cleanupAction = 'mixed'
     }
 
     const hasRoomFailures = failedRoomDeliveries.length > 0
@@ -616,6 +640,8 @@ Deno.serve(async (req) => {
           ? 'Scheduled deliveries succeeded and delivered messages were marked as processed.'
           : cleanupAction === 'end_of_day_deleted'
             ? 'Scheduled deliveries succeeded and day-end messages were deleted.'
+            : cleanupAction === 'mixed'
+              ? 'Scheduled deliveries succeeded and room-specific cleanup actions were applied.'
             : 'Deliveries succeeded but there were no message rows to update.'
 
     await writeDeliveryLog(supabase, {
@@ -637,9 +663,12 @@ Deno.serve(async (req) => {
         room_delivery_failed: failedRoomDeliveries,
         force_run: forceRun,
         cleanup_action: cleanupAction,
+        cleanup_deleted_count: deletedCount,
+        cleanup_marked_processed_count: markedProcessedCount,
+        cleanup_end_of_day_deleted_count: endOfDayDeletedCount,
         message_cleanup_timing: messageCleanupTiming,
         last_delivery_summary_mode: lastDeliverySummaryMode,
-        using_daily_rollup_scope: shouldUseDailyRollup,
+        using_daily_rollup_scope: shouldUseOverallDailyRollup,
       },
     })
 
@@ -793,6 +822,31 @@ function normalizeMessageCleanupTiming(value: unknown): MessageCleanupTiming {
 
 function normalizeLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMode {
   return value === 'daily_rollup' ? 'daily_rollup' : 'independent'
+}
+
+function normalizeNullableMessageCleanupTiming(value: unknown): MessageCleanupTiming | null {
+  if (value == null || value === '') return null
+  if (value === 'after_each_delivery' || value === 'end_of_day') return value
+  return null
+}
+
+function normalizeNullableLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMode | null {
+  if (value == null || value === '') return null
+  if (value === 'independent' || value === 'daily_rollup') return value
+  return null
+}
+
+function groupMessagesByRoom(messages: LineMessageRow[]): Map<string, LineMessageRow[]> {
+  const grouped = new Map<string, LineMessageRow[]>()
+  for (const message of messages) {
+    const list = grouped.get(message.room_id)
+    if (list) {
+      list.push(message)
+    } else {
+      grouped.set(message.room_id, [message])
+    }
+  }
+  return grouped
 }
 
 function getLastScheduledHour(hours: unknown): number | null {
