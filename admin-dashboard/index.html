@@ -181,13 +181,37 @@
     }
 
     .rooms-table {
-      width: max(100%, 1520px);
-      min-width: 1520px;
+      width: max(100%, 1700px);
+      min-width: 1700px;
+      table-layout: fixed;
     }
 
     .rooms-table th,
     .rooms-table td {
       white-space: nowrap;
+    }
+
+    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 290px; }
+    .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 300px; }
+    .rooms-table th:nth-child(3), .rooms-table td:nth-child(3) { width: 90px; text-align: center; }
+    .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 150px; }
+    .rooms-table th:nth-child(5), .rooms-table td:nth-child(5) { width: 70px; text-align: center; }
+    .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 110px; text-align: center; }
+    .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 160px; }
+    .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 170px; }
+    .rooms-table th:nth-child(9), .rooms-table td:nth-child(9) { width: 150px; }
+    .rooms-table th:nth-child(10), .rooms-table td:nth-child(10) { width: 220px; }
+
+    .rooms-table .room-name,
+    .rooms-table .room-hours {
+      width: 100%;
+      min-width: 0;
+    }
+
+    .rooms-table .room-check {
+      width: 18px;
+      height: 18px;
+      accent-color: #28c2ff;
     }
 
     .log-table th:nth-child(1),
@@ -256,12 +280,14 @@
       display: inline-flex;
       gap: 6px;
       flex-wrap: nowrap;
+      align-items: center;
     }
 
     .row-actions .button {
       min-height: 32px;
       font-size: 0.76rem;
       padding: 0 9px;
+      white-space: nowrap;
     }
 
     .empty {
@@ -611,8 +637,8 @@
           '<td><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"></td>' +
           '<td>' + Number(room.pending_messages || 0) + '件</td>' +
           '<td>' + formatDate(room.last_message_at) + '</td>' +
-          '<td><label class="switch"><input class="room-enabled" type="checkbox" ' + (((setting ? setting.is_enabled : room.settings_enabled) !== false) ? 'checked' : '') + '>有効</label></td>' +
-          '<td><label class="switch"><input class="room-send-summary" type="checkbox" ' + ((setting && setting.send_room_summary === true) ? 'checked' : '') + '>配信</label></td>' +
+          '<td><input class="room-enabled room-check" type="checkbox" aria-label="有効" ' + (((setting ? setting.is_enabled : room.settings_enabled) !== false) ? 'checked' : '') + '></td>' +
+          '<td><input class="room-send-summary room-check" type="checkbox" aria-label="ルーム要約配信" ' + ((setting && setting.send_room_summary === true) ? 'checked' : '') + '></td>' +
           '<td><input class="input room-hours short" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : '') + '"></td>' +
           '<td><select class="select room-cleanup-timing">' +
           '<option value="" ' + (((setting && setting.message_cleanup_timing) ? '' : 'selected')) + '>継承</option>' +
@@ -624,7 +650,7 @@
           '<option value="independent" ' + ((setting && setting.last_delivery_summary_mode === 'independent') ? 'selected' : '') + '>各回独立</option>' +
           '<option value="daily_rollup" ' + ((setting && setting.last_delivery_summary_mode === 'daily_rollup') ? 'selected' : '') + '>1日まとめ</option>' +
           '</select></td>' +
-          '<td><span class="row-actions"><button class="button primary room-save">保存</button><button class="button room-reset">継承</button><button class="button warn room-delete">ルーム削除</button></span></td>';
+          '<td><span class="row-actions"><button class="button primary room-save">保存</button><button class="button room-reset">継承</button><button class="button warn room-delete">削除</button></span></td>';
         dom.roomTableBody.appendChild(tr);
       }
     }
