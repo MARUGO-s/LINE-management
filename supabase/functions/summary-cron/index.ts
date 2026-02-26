@@ -7,6 +7,7 @@ type LastDeliverySummaryMode = 'independent' | 'daily_rollup'
 type MessageUpdateResult = { affectedCount: number; error: Error | null }
 type LineMessageRow = { id: string; room_id: string; content: string; created_at: string }
 type RoomRuntimeSetting = {
+  room_name: string | null
   delivery_hours: number[] | null
   is_enabled: boolean
   send_room_summary: boolean
@@ -79,7 +80,7 @@ Deno.serve(async (req) => {
     // Fetch per-room settings
     const { data: roomSettingsList, error: roomSettingsError } = await supabase
       .from('room_summary_settings')
-      .select('room_id, delivery_hours, is_enabled, send_room_summary, message_cleanup_timing, last_delivery_summary_mode')
+      .select('room_id, room_name, delivery_hours, is_enabled, send_room_summary, message_cleanup_timing, last_delivery_summary_mode')
 
     if (roomSettingsError) {
       console.error(`Error fetching room settings: ${roomSettingsError.message}`)
@@ -89,6 +90,7 @@ Deno.serve(async (req) => {
     if (roomSettingsList) {
       for (const rs of roomSettingsList) {
         roomSettingsMap.set(rs.room_id, {
+          room_name: normalizeOptionalRoomName(rs.room_name),
           delivery_hours: rs.delivery_hours,
           is_enabled: rs.is_enabled,
           send_room_summary: rs.send_room_summary === true,
@@ -400,7 +402,10 @@ Deno.serve(async (req) => {
       }
 
       const allSummariesText = summariesForOverall
-        .map((roomId, index) => `■ ルーム${index + 1} (${roomId}):\n${roomSummaries[roomId]}`)
+        .map((roomId) => {
+          const displayName = getRoomDisplayName(roomId, roomSettingsMap.get(roomId))
+          return `■ ${displayName}\n${roomSummaries[roomId]}`
+        })
         .join('\n\n')
 
       const overallResponse = await groq.chat.completions.create({
@@ -414,7 +419,7 @@ Deno.serve(async (req) => {
 また、各ルームの要約内に「@〇〇さん宛ての指示・連絡」のような特定の人物への名指し（メンション）が含まれていた場合は、それが誰宛てのものかが全体要約でも失われないように確実に記述してください。（※ただし「全員宛て（@ALL等）」の連絡事項に関しては、特定の個人宛てとして区別せず通常の要約内容として扱ってください。）
 なお、各ルームの要約に「添付資料あり」「画像共有あり」「リンクあり」などの報告が含まれている場合は、全体要約でもそれが一目でわかるように（誰かが確認に行くべき情報として）特記してください。
 【重要】出力時のフォーマット指定：
-「■ ルーム1」などの各ルームの要約ブロックを出力する際は、前のルームとの間に「必ず1行の空白（空行）」を挿入して、視覚的に読みやすく区切ってください。
+「■ {ルーム表示名}」の見出しで各ルームの要約ブロックを出力し、前のルームとの間に「必ず1行の空白（空行）」を挿入して、視覚的に読みやすく区切ってください。
 必ず日本語で返信してください。` },
           { role: "user", content: `以下の各ルームの要約を統合し、全体レポートを作成してください:\n\n${allSummariesText}` }
         ]
@@ -834,6 +839,16 @@ function normalizeNullableLastDeliverySummaryMode(value: unknown): LastDeliveryS
   if (value == null || value === '') return null
   if (value === 'independent' || value === 'daily_rollup') return value
   return null
+}
+
+function normalizeOptionalRoomName(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed.length > 0 ? trimmed : null
+}
+
+function getRoomDisplayName(roomId: string, setting: RoomRuntimeSetting | undefined): string {
+  return setting?.room_name ?? roomId
 }
 
 function groupMessagesByRoom(messages: LineMessageRow[]): Map<string, LineMessageRow[]> {
