@@ -361,6 +361,11 @@ const html = String.raw`<!doctype html>
           <button id="reloadBtn" class="button">再読み込み</button>
           <button id="runNowBtn" class="button warn">今すぐ要約実行</button>
         </div>
+        <div class="controls" style="margin-top:8px;">
+          <input id="newTokenInput" class="input" type="password" placeholder="新しい管理トークン">
+          <input id="newTokenConfirmInput" class="input" type="password" placeholder="新しい管理トークン（確認）">
+          <button id="changeTokenBtn" class="button warn">トークン変更</button>
+        </div>
         <div class="meta">トークンはブラウザの LocalStorage に保存されます。</div>
       </section>
 
@@ -452,6 +457,9 @@ const html = String.raw`<!doctype html>
       authState: document.getElementById('authState'),
       lastRefresh: document.getElementById('lastRefresh'),
       tokenInput: document.getElementById('tokenInput'),
+      newTokenInput: document.getElementById('newTokenInput'),
+      newTokenConfirmInput: document.getElementById('newTokenConfirmInput'),
+      changeTokenBtn: document.getElementById('changeTokenBtn'),
       saveTokenBtn: document.getElementById('saveTokenBtn'),
       clearTokenBtn: document.getElementById('clearTokenBtn'),
       reloadBtn: document.getElementById('reloadBtn'),
@@ -855,6 +863,24 @@ const html = String.raw`<!doctype html>
       alert('手動実行結果: HTTP ' + result.status);
     }
 
+    async function changeAdminToken() {
+      const newToken = dom.newTokenInput.value.trim();
+      const confirmToken = dom.newTokenConfirmInput.value.trim();
+      if (!newToken) throw new Error('新しい管理トークンを入力してください。');
+      if (newToken.length < 8) throw new Error('新しい管理トークンは8文字以上で入力してください。');
+      if (newToken !== confirmToken) throw new Error('新しい管理トークン（確認）が一致しません。');
+
+      await api('/auth/token', {
+        method: 'PUT',
+        body: JSON.stringify({ new_token: newToken }),
+      });
+      setToken(newToken);
+      dom.newTokenInput.value = '';
+      dom.newTokenConfirmInput.value = '';
+      await safeLoadState();
+      alert('管理トークンを変更しました。次回以降は新しいトークンを使用してください。');
+    }
+
     dom.saveTokenBtn.addEventListener('click', async function() {
       setToken(dom.tokenInput.value.trim());
       dom.tokenInput.value = '';
@@ -887,6 +913,14 @@ const html = String.raw`<!doctype html>
     dom.runNowBtn.addEventListener('click', async function() {
       try {
         await runNow();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
+    dom.changeTokenBtn.addEventListener('click', async function() {
+      try {
+        await changeAdminToken();
       } catch (e) {
         alert(e.message || String(e));
       }

@@ -20,11 +20,6 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders })
   }
 
-  const authResult = authenticate(req)
-  if (!authResult.ok) {
-    return json({ error: authResult.message }, authResult.status)
-  }
-
   const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? ""
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
   if (!supabaseUrl || !serviceRoleKey) {
@@ -32,6 +27,12 @@ Deno.serve(async (req) => {
   }
 
   const supabase = createClient(supabaseUrl, serviceRoleKey)
+  const fallbackAdminToken = Deno.env.get("ADMIN_DASHBOARD_TOKEN") ?? ""
+  const authResult = await authenticate(req, supabase, fallbackAdminToken)
+  if (!authResult.ok) {
+    return json({ error: authResult.message }, authResult.status)
+  }
+
   const url = new URL(req.url)
   const path = normalizePath(url.pathname)
 
@@ -39,6 +40,39 @@ Deno.serve(async (req) => {
     if (req.method === "GET" && path === "/state") {
       const state = await fetchState(supabase, url)
       return json(state, 200)
+    }
+
+    if (req.method === "PUT" && path === "/auth/token") {
+      const body = await parseJson(req)
+      if (!isRecord(body)) {
+        throw { status: 400, message: "Invalid JSON body." } satisfies AppError
+      }
+
+      const newToken = String(body.new_token ?? "").trim()
+      if (newToken.length < 8) {
+        throw { status: 400, message: "new_token must be at least 8 characters." } satisfies AppError
+      }
+
+      await fetchGlobalSettings(supabase)
+      const tokenHash = await hashToken(newToken)
+      const updatedAt = new Date().toISOString()
+      const { error } = await supabase
+        .from("summary_settings")
+        .update({
+          admin_dashboard_token_hash: tokenHash,
+          admin_dashboard_token_updated_at: updatedAt,
+          updated_at: updatedAt,
+        })
+        .eq("id", 1)
+
+      if (error) {
+        throw { status: 500, message: `Failed to update admin token: ${error.message}` } satisfies AppError
+      }
+
+      return json({
+        success: true,
+        token_updated_at: updatedAt,
+      }, 200)
     }
 
     if (req.method === "PUT" && path === "/settings/global") {
@@ -207,18 +241,65 @@ Deno.serve(async (req) => {
   }
 })
 
-function authenticate(req: Request): { ok: true } | { ok: false; status: number; message: string } {
-  const expected = Deno.env.get("ADMIN_DASHBOARD_TOKEN") ?? ""
-  if (!expected) {
+async function authenticate(
+  req: Request,
+  supabase: ReturnType<typeof createClient>,
+  fallbackToken: string,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const provided = req.headers.get("x-admin-token") ?? ""
+  if (!provided) {
+    return { ok: false, status: 401, message: "Unauthorized." }
+  }
+
+  const dbHashResult = await getStoredAdminTokenHash(supabase)
+  if (!dbHashResult.ok) {
+    return dbHashResult
+  }
+
+  if (dbHashResult.hash) {
+    const providedHash = await hashToken(provided)
+    if (!secureEqual(providedHash, dbHashResult.hash)) {
+      return { ok: false, status: 401, message: "Unauthorized." }
+    }
+    return { ok: true }
+  }
+
+  if (!fallbackToken) {
     return { ok: false, status: 500, message: "ADMIN_DASHBOARD_TOKEN is not configured." }
   }
 
-  const provided = req.headers.get("x-admin-token") ?? ""
-  if (!provided || !secureEqual(provided, expected)) {
+  if (!secureEqual(provided, fallbackToken)) {
     return { ok: false, status: 401, message: "Unauthorized." }
   }
 
   return { ok: true }
+}
+
+async function getStoredAdminTokenHash(
+  supabase: ReturnType<typeof createClient>,
+): Promise<{ ok: true; hash: string | null } | { ok: false; status: number; message: string }> {
+  const { data, error } = await supabase
+    .from("summary_settings")
+    .select("admin_dashboard_token_hash")
+    .eq("id", 1)
+    .maybeSingle()
+
+  if (error) {
+    return { ok: false, status: 500, message: `Failed to load admin token settings: ${error.message}` }
+  }
+
+  const hash = typeof data?.admin_dashboard_token_hash === "string"
+    ? data.admin_dashboard_token_hash.trim()
+    : ""
+  return { ok: true, hash: hash || null }
+}
+
+async function hashToken(value: string): Promise<string> {
+  const input = new TextEncoder().encode(value)
+  const digest = await crypto.subtle.digest("SHA-256", input)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
 }
 
 async function fetchState(

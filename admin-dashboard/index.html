@@ -282,14 +282,19 @@
       <section class="card auth">
         <h2>接続設定</h2>
         <div class="controls">
-          <input id="projectUrlInput" class="input long" type="text" value="https://ppuzcvstdknliqbendaz.supabase.co" placeholder="Supabase Project URL">
+          <input id="projectUrlInput" class="input long" type="text" value="https://ppuzcvstdknliqbendaz.supabase.co" readonly>
           <input id="tokenInput" class="input" type="password" placeholder="ADMIN_DASHBOARD_TOKEN">
           <button id="saveTokenBtn" class="button primary">保存して接続</button>
           <button id="clearTokenBtn" class="button">削除</button>
           <button id="reloadBtn" class="button">再読み込み</button>
           <button id="runNowBtn" class="button">今すぐ要約実行</button>
         </div>
-        <div class="meta">トークンはブラウザの LocalStorage に保存されます。</div>
+        <div class="controls" style="margin-top:8px;">
+          <input id="newTokenInput" class="input" type="password" placeholder="新しい管理トークン">
+          <input id="newTokenConfirmInput" class="input" type="password" placeholder="新しい管理トークン（確認）">
+          <button id="changeTokenBtn" class="button warn">トークン変更</button>
+        </div>
+        <div class="meta">Project URL は固定です。トークンはブラウザの LocalStorage に保存されます。</div>
       </section>
 
       <section class="card global">
@@ -374,12 +379,15 @@
 
   <script>
     const STORE_TOKEN_KEY = 'line_summary_admin_token';
-    const STORE_PROJECT_URL = 'line_summary_project_url';
+    const FIXED_PROJECT_URL = 'https://ppuzcvstdknliqbendaz.supabase.co';
     const dom = {
       authState: document.getElementById('authState'),
       lastRefresh: document.getElementById('lastRefresh'),
       projectUrlInput: document.getElementById('projectUrlInput'),
       tokenInput: document.getElementById('tokenInput'),
+      newTokenInput: document.getElementById('newTokenInput'),
+      newTokenConfirmInput: document.getElementById('newTokenConfirmInput'),
+      changeTokenBtn: document.getElementById('changeTokenBtn'),
       saveTokenBtn: document.getElementById('saveTokenBtn'),
       clearTokenBtn: document.getElementById('clearTokenBtn'),
       reloadBtn: document.getElementById('reloadBtn'),
@@ -407,20 +415,12 @@
     let isStateLoading = false;
 
     function getToken() { return localStorage.getItem(STORE_TOKEN_KEY) || ''; }
-    function getProjectUrl() {
-      const saved = localStorage.getItem(STORE_PROJECT_URL);
-      return saved || dom.projectUrlInput.value.trim();
-    }
+    function getProjectUrl() { return FIXED_PROJECT_URL; }
 
     function setToken(v) {
       if (v) localStorage.setItem(STORE_TOKEN_KEY, v);
       else localStorage.removeItem(STORE_TOKEN_KEY);
       updateAuthPill();
-    }
-
-    function setProjectUrl(v) {
-      if (v) localStorage.setItem(STORE_PROJECT_URL, v);
-      else localStorage.removeItem(STORE_PROJECT_URL);
     }
 
     function updateAuthPill() {
@@ -491,7 +491,7 @@
       const t = getToken();
       if (!t) throw new Error('先に管理トークンを保存してください。');
       const base = getProjectUrl().replace(/\/+$/, '');
-      if (!base) throw new Error('Project URL を入力してください。');
+      if (!base) throw new Error('Project URL が未設定です。');
 
       const request = options || {};
       const headers = Object.assign({
@@ -746,8 +746,25 @@
       alert('実行結果: HTTP ' + res.status + (res.success ? ' (OK)' : ' (FAILED)'));
     }
 
+    async function changeAdminToken() {
+      const newToken = dom.newTokenInput.value.trim();
+      const confirmToken = dom.newTokenConfirmInput.value.trim();
+      if (!newToken) throw new Error('新しい管理トークンを入力してください。');
+      if (newToken.length < 8) throw new Error('新しい管理トークンは8文字以上で入力してください。');
+      if (newToken !== confirmToken) throw new Error('新しい管理トークン（確認）が一致しません。');
+
+      await api('/auth/token', {
+        method: 'PUT',
+        body: JSON.stringify({ new_token: newToken }),
+      });
+      setToken(newToken);
+      dom.newTokenInput.value = '';
+      dom.newTokenConfirmInput.value = '';
+      await safeLoadState();
+      alert('管理トークンを変更しました。次回以降は新しいトークンを使用してください。');
+    }
+
     dom.saveTokenBtn.addEventListener('click', async function() {
-      setProjectUrl(dom.projectUrlInput.value.trim());
       setToken(dom.tokenInput.value.trim());
       dom.tokenInput.value = '';
       try {
@@ -774,6 +791,10 @@
 
     dom.runNowBtn.addEventListener('click', async function() {
       try { await runNow(); } catch (e) { alert(e.message || String(e)); }
+    });
+
+    dom.changeTokenBtn.addEventListener('click', async function() {
+      try { await changeAdminToken(); } catch (e) { alert(e.message || String(e)); }
     });
 
     dom.saveGlobalBtn.addEventListener('click', async function() {
@@ -819,8 +840,7 @@
     });
 
     (function init() {
-      const savedUrl = localStorage.getItem(STORE_PROJECT_URL);
-      if (savedUrl) dom.projectUrlInput.value = savedUrl;
+      dom.projectUrlInput.value = FIXED_PROJECT_URL;
       updateAuthPill();
       if (getToken()) {
         safeLoadState().then(function() {
