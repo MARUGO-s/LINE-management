@@ -11,6 +11,7 @@ type RoomRuntimeSetting = {
   delivery_hours: number[] | null
   is_enabled: boolean
   send_room_summary: boolean
+  calendar_tomorrow_reminder_enabled: boolean
   message_cleanup_timing: MessageCleanupTiming | null
   last_delivery_summary_mode: LastDeliverySummaryMode | null
 }
@@ -21,6 +22,37 @@ type RoomExecutionContext = {
   isDailyRollup: boolean
   isEndOfDayCleanup: boolean
 }
+
+type TomorrowReminderSettings = {
+  enabled: boolean
+  hours: number[]
+  onlyIfEvents: boolean
+  maxItems: number
+}
+
+type CalendarEnv = {
+  calendarId: string
+  serviceAccountEmail: string
+  serviceAccountPrivateKey: string
+  timezone: string
+}
+
+type CalendarEnvState =
+  | { ok: true; env: CalendarEnv }
+  | { ok: false; missing: string[] }
+
+type GoogleCalendarEvent = {
+  summary?: string
+  description?: string
+  location?: string
+  start?: { date?: string; dateTime?: string }
+  end?: { date?: string; dateTime?: string }
+}
+
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000
+const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar'
+const DEFAULT_TOMORROW_REMINDER_HOURS = [19]
+const DEFAULT_TOMORROW_REMINDER_MAX_ITEMS = 20
 
 Deno.serve(async (req) => {
   let supabase: ReturnType<typeof createClient> | null = null
@@ -50,7 +82,7 @@ Deno.serve(async (req) => {
     // Fetch global settings
     const { data: globalSettings, error: globalSettingsError } = await supabase
       .from('summary_settings')
-      .select('delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode')
+      .select('delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items')
       .eq('id', 1)
       .single();
 
@@ -62,6 +94,7 @@ Deno.serve(async (req) => {
     const globalHours = globalSettings?.delivery_hours ?? [12, 17, 23]
     const messageCleanupTiming = normalizeMessageCleanupTiming(globalSettings?.message_cleanup_timing)
     const lastDeliverySummaryMode = normalizeLastDeliverySummaryMode(globalSettings?.last_delivery_summary_mode)
+    const tomorrowReminderSettings = normalizeTomorrowReminderSettings(globalSettings)
     const shouldSendOverall = globalEnabled && (forceRun || globalHours.includes(jstHour))
     const lastGlobalHour = getLastScheduledHour(globalHours)
     const isLastGlobalDeliverySlot = lastGlobalHour != null && jstHour === lastGlobalHour
@@ -77,10 +110,23 @@ Deno.serve(async (req) => {
       )
     }
 
+    try {
+      await maybeSendTomorrowCalendarReminder({
+        supabase,
+        now,
+        jstHour,
+        lineAccessToken,
+        overallRoomId,
+        settings: tomorrowReminderSettings,
+      })
+    } catch (reminderErr) {
+      console.error('Failed to process tomorrow calendar reminder:', reminderErr)
+    }
+
     // Fetch per-room settings
     const { data: roomSettingsList, error: roomSettingsError } = await supabase
       .from('room_summary_settings')
-      .select('room_id, room_name, delivery_hours, is_enabled, send_room_summary, message_cleanup_timing, last_delivery_summary_mode')
+      .select('room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_cleanup_timing, last_delivery_summary_mode')
 
     if (roomSettingsError) {
       console.error(`Error fetching room settings: ${roomSettingsError.message}`)
@@ -94,6 +140,7 @@ Deno.serve(async (req) => {
           delivery_hours: rs.delivery_hours,
           is_enabled: rs.is_enabled,
           send_room_summary: rs.send_room_summary === true,
+          calendar_tomorrow_reminder_enabled: rs.calendar_tomorrow_reminder_enabled === true,
           message_cleanup_timing: normalizeNullableMessageCleanupTiming(rs.message_cleanup_timing),
           last_delivery_summary_mode: normalizeNullableLastDeliverySummaryMode(rs.last_delivery_summary_mode),
         })
@@ -719,6 +766,462 @@ Deno.serve(async (req) => {
   }
 })
 
+async function maybeSendTomorrowCalendarReminder(params: {
+  supabase: ReturnType<typeof createClient>
+  now: Date
+  jstHour: number
+  lineAccessToken: string
+  overallRoomId: string
+  settings: TomorrowReminderSettings
+}): Promise<void> {
+  const {
+    supabase,
+    now,
+    jstHour,
+    lineAccessToken,
+    overallRoomId,
+    settings,
+  } = params
+
+  if (!settings.enabled) return
+
+  if (!lineAccessToken) {
+    return
+  }
+
+  if (!settings.hours.includes(jstHour)) {
+    return
+  }
+
+  const targetRoomIds = await resolveTomorrowReminderTargetRooms(supabase, overallRoomId)
+  if (targetRoomIds.length === 0) {
+    return
+  }
+
+  const calendarEnvState = loadCalendarEnv()
+  if (!calendarEnvState.ok) {
+    console.warn(`Tomorrow reminder skipped: missing calendar env (${calendarEnvState.missing.join(', ')})`)
+    return
+  }
+
+  const todayJst = getTodayJstDateString(now)
+  const tomorrowJst = addDaysToDateString(todayJst, 1)
+  const jstDayRange = getJstDayRange(now)
+
+  const pendingTargets: string[] = []
+  for (const roomId of targetRoomIds) {
+    const alreadySent = await hasSentTomorrowReminderForRoomHour(
+      supabase,
+      tomorrowJst,
+      jstDayRange.startIso,
+      jstDayRange.endIso,
+      roomId,
+      jstHour,
+    )
+    if (!alreadySent) {
+      pendingTargets.push(roomId)
+    }
+  }
+  if (pendingTargets.length === 0) {
+    return
+  }
+
+  const accessToken = await fetchGoogleAccessToken(calendarEnvState.env)
+  const events = await fetchCalendarEventsForJstDate(calendarEnvState.env, accessToken, tomorrowJst)
+  if (settings.onlyIfEvents && events.length === 0) {
+    return
+  }
+
+  const message = buildTomorrowReminderMessage(
+    events,
+    tomorrowJst,
+    calendarEnvState.env.timezone,
+    settings.maxItems,
+  )
+
+  for (const targetRoomId of pendingTargets) {
+    const sendResult = await sendLineMessage(targetRoomId, message, lineAccessToken)
+    if (!sendResult.ok) {
+      await writeDeliveryLog(supabase, {
+        jst_hour: jstHour,
+        status: 'calendar_tomorrow_send_failed',
+        reason: sendResult.error,
+        should_send_overall: false,
+        rooms_targeted: 1,
+        messages_in_queue: 0,
+        messages_marked_processed: 0,
+        line_send_attempted: true,
+        line_send_success: false,
+        line_http_status: sendResult.status ?? null,
+        target_room_id: targetRoomId,
+        details: {
+          target_date: tomorrowJst,
+          event_count: events.length,
+          reminder_hour: jstHour,
+        },
+      })
+      continue
+    }
+
+    await writeDeliveryLog(supabase, {
+      jst_hour: jstHour,
+      status: 'calendar_tomorrow_sent',
+      reason: events.length > 0 ? `Sent ${events.length} events for tomorrow.` : 'No events for tomorrow.',
+      should_send_overall: false,
+      rooms_targeted: 1,
+      messages_in_queue: 0,
+      messages_marked_processed: 0,
+      line_send_attempted: true,
+      line_send_success: true,
+      line_http_status: sendResult.status ?? null,
+      target_room_id: targetRoomId,
+      details: {
+        target_date: tomorrowJst,
+        event_count: events.length,
+        reminder_hour: jstHour,
+      },
+    })
+  }
+}
+
+async function resolveTomorrowReminderTargetRooms(
+  supabase: ReturnType<typeof createClient>,
+  fallbackOverallRoomId: string,
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('room_summary_settings')
+    .select('room_id, is_enabled, calendar_tomorrow_reminder_enabled')
+
+  if (error) {
+    console.error('Failed to fetch room settings for tomorrow reminder targets:', error.message)
+    const fallback = String(fallbackOverallRoomId ?? '').trim()
+    return fallback ? [fallback] : []
+  }
+
+  const rows = Array.isArray(data) ? data : []
+  const enabledRoomIds = rows
+    .filter((row: any) => row?.is_enabled !== false && row?.calendar_tomorrow_reminder_enabled === true)
+    .map((row: any) => String(row?.room_id ?? '').trim())
+    .filter((roomId: string) => roomId.length > 0)
+
+  if (enabledRoomIds.length > 0) {
+    return Array.from(new Set(enabledRoomIds))
+  }
+
+  if (rows.length > 0) {
+    return []
+  }
+
+  const fallback = String(fallbackOverallRoomId ?? '').trim()
+  return fallback ? [fallback] : []
+}
+
+async function hasSentTomorrowReminderForRoomHour(
+  supabase: ReturnType<typeof createClient>,
+  targetDate: string,
+  dayStartIso: string,
+  dayEndIso: string,
+  targetRoomId: string,
+  reminderHour: number,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('summary_delivery_logs')
+    .select('id, details')
+    .eq('status', 'calendar_tomorrow_sent')
+    .eq('target_room_id', targetRoomId)
+    .gte('run_at', dayStartIso)
+    .lt('run_at', dayEndIso)
+    .limit(30)
+
+  if (error) {
+    console.error('Failed to check tomorrow reminder log:', error.message)
+    return false
+  }
+  const rows = Array.isArray(data) ? data : []
+  return rows.some((row: any) => {
+    const target = String(row?.details?.target_date ?? '').trim()
+    if (target !== targetDate) return false
+    const loggedHour = Number(row?.details?.reminder_hour)
+    if (!Number.isInteger(loggedHour)) return true
+    return loggedHour === reminderHour
+  })
+}
+
+function loadCalendarEnv(): CalendarEnvState {
+  const calendarId = (Deno.env.get('GOOGLE_CALENDAR_ID') ?? '').trim()
+  const serviceAccountEmail = (Deno.env.get('GOOGLE_SERVICE_ACCOUNT_EMAIL') ?? '').trim()
+  const serviceAccountPrivateKey = (Deno.env.get('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY') ?? '').trim()
+  const timezone = (Deno.env.get('GOOGLE_CALENDAR_TIMEZONE') ?? 'Asia/Tokyo').trim() || 'Asia/Tokyo'
+
+  const missing: string[] = []
+  if (!calendarId) missing.push('GOOGLE_CALENDAR_ID')
+  if (!serviceAccountEmail) missing.push('GOOGLE_SERVICE_ACCOUNT_EMAIL')
+  if (!serviceAccountPrivateKey) missing.push('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY')
+
+  if (missing.length > 0) {
+    return { ok: false, missing }
+  }
+
+  return {
+    ok: true,
+    env: {
+      calendarId,
+      serviceAccountEmail,
+      serviceAccountPrivateKey: serviceAccountPrivateKey.replace(/\\n/g, '\n'),
+      timezone,
+    },
+  }
+}
+
+async function fetchCalendarEventsForJstDate(
+  env: CalendarEnv,
+  accessToken: string,
+  date: string,
+): Promise<GoogleCalendarEvent[]> {
+  const range = dayRangeFromJstDate(date)
+  const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`)
+  url.searchParams.set('singleEvents', 'true')
+  url.searchParams.set('orderBy', 'startTime')
+  url.searchParams.set('timeMin', range.start.toISOString())
+  url.searchParams.set('timeMax', range.end.toISOString())
+  url.searchParams.set('maxResults', '100')
+  url.searchParams.set('timeZone', env.timezone)
+
+  const response = await fetch(url.toString(), {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`Google Calendar API error (${response.status}): ${text}`)
+  }
+
+  const data = await response.json()
+  const items: GoogleCalendarEvent[] = Array.isArray(data?.items) ? data.items : []
+  return items
+}
+
+function buildTomorrowReminderMessage(
+  events: GoogleCalendarEvent[],
+  targetDate: string,
+  timezone: string,
+  maxItems: number,
+): string {
+  const targetDateLabel = targetDate.replace(/-/g, '/')
+  const heading = `【明日の予定】\n${targetDateLabel}`
+  if (events.length === 0) {
+    return `${heading}\n（予定なし）`
+  }
+
+  const safeMaxItems =
+    Number.isInteger(maxItems) && maxItems >= 1 && maxItems <= 50
+      ? maxItems
+      : DEFAULT_TOMORROW_REMINDER_MAX_ITEMS
+  const shown = events.slice(0, safeMaxItems)
+  const lines: string[] = [`${heading}（${events.length}件）`]
+  for (let i = 0; i < shown.length; i += 1) {
+    const detail = formatCalendarEventDetail(shown[i], timezone)
+    lines.push(`${i + 1}.`)
+    lines.push(`  日付: ${detail.date}`)
+    lines.push(`  時間: ${detail.time}`)
+    lines.push(`  予定: ${detail.title}`)
+    lines.push(`  内容: ${detail.content}`)
+    if (i < shown.length - 1) {
+      lines.push('')
+    }
+  }
+  if (events.length > safeMaxItems) {
+    lines.push('')
+    lines.push(`他 ${events.length - safeMaxItems} 件`)
+  }
+  return lines.join('\n').slice(0, 4900)
+}
+
+function formatCalendarEventDetail(
+  event: GoogleCalendarEvent,
+  timezone: string,
+): { date: string; time: string; title: string; content: string } {
+  let date = '(日付不明)'
+  let time = '(時間不明)'
+
+  const startDateTime = event.start?.dateTime
+  const endDateTime = event.end?.dateTime
+  const startDate = event.start?.date
+
+  if (startDateTime) {
+    const start = new Date(startDateTime)
+    date = formatDateOnlyForLine(start, timezone)
+    if (endDateTime) {
+      const end = new Date(endDateTime)
+      time = `${formatTimeOnlyForLine(start, timezone)}-${formatTimeOnlyForLine(end, timezone)}`
+    } else {
+      time = formatTimeOnlyForLine(start, timezone)
+    }
+  } else if (startDate) {
+    date = String(startDate).replace(/-/g, '/')
+    time = '終日'
+  }
+
+  const title = normalizeInlineText(String(event.summary ?? '(無題)'))
+  const content = formatCalendarEventContent(event)
+  return { date, time, title: title || '(無題)', content }
+}
+
+function formatCalendarEventContent(event: GoogleCalendarEvent): string {
+  const pieces: string[] = []
+  const location = normalizeInlineText(String(event.location ?? ''))
+  if (location) pieces.push(location)
+
+  const description = sanitizeCalendarDescription(String(event.description ?? ''))
+  if (description) pieces.push(description)
+
+  if (pieces.length === 0) return '（内容なし）'
+  return pieces.join(' / ')
+}
+
+function sanitizeCalendarDescription(raw: string): string {
+  if (!raw) return ''
+  const lines = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !/^(LINE room_id:|LINE user_id:|source:\s*line-webhook)/i.test(line))
+  const merged = normalizeInlineText(lines.join(' / '))
+  if (!merged) return ''
+  if (merged.length > 140) return `${merged.slice(0, 140)}...`
+  return merged
+}
+
+function normalizeInlineText(raw: string): string {
+  return String(raw ?? '').replace(/\u3000/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function formatDateOnlyForLine(date: Date, timezone: string): string {
+  return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date).replace(/\./g, '/')
+}
+
+function formatTimeOnlyForLine(date: Date, timezone: string): string {
+  return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: timezone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
+}
+
+function getTodayJstDateString(base = new Date()): string {
+  const jst = new Date(base.getTime() + JST_OFFSET_MS)
+  const y = jst.getUTCFullYear()
+  const m = String(jst.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(jst.getUTCDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+function addDaysToDateString(date: string, days: number): string {
+  const [y, m, d] = date.split('-').map(Number)
+  const dt = new Date(Date.UTC(y, m - 1, d + days))
+  const yy = dt.getUTCFullYear()
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(dt.getUTCDate()).padStart(2, '0')
+  return `${yy}-${mm}-${dd}`
+}
+
+function dayRangeFromJstDate(date: string): { start: Date; end: Date } {
+  const [y, m, d] = date.split('-').map(Number)
+  const startUtc = new Date(Date.UTC(y, m - 1, d, -9, 0, 0, 0))
+  const endUtc = new Date(startUtc.getTime() + 24 * 60 * 60 * 1000)
+  return { start: startUtc, end: endUtc }
+}
+
+async function fetchGoogleAccessToken(env: CalendarEnv): Promise<string> {
+  const nowSec = Math.floor(Date.now() / 1000)
+  const header = { alg: 'RS256', typ: 'JWT' }
+  const payload = {
+    iss: env.serviceAccountEmail,
+    scope: CALENDAR_SCOPE,
+    aud: 'https://oauth2.googleapis.com/token',
+    exp: nowSec + 3600,
+    iat: nowSec,
+  }
+
+  const unsigned = `${base64UrlEncodeText(JSON.stringify(header))}.${base64UrlEncodeText(JSON.stringify(payload))}`
+  const signature = await signRs256(unsigned, env.serviceAccountPrivateKey)
+  const assertion = `${unsigned}.${signature}`
+
+  const body = new URLSearchParams()
+  body.set('grant_type', 'urn:ietf:params:oauth:grant-type:jwt-bearer')
+  body.set('assertion', assertion)
+
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(`OAuth token request failed (${response.status}): ${text}`)
+  }
+
+  const json = await response.json()
+  const accessToken = String(json?.access_token ?? '')
+  if (!accessToken) {
+    throw new Error('OAuth token response missing access_token.')
+  }
+  return accessToken
+}
+
+async function signRs256(data: string, privateKeyPem: string): Promise<string> {
+  const keyData = pemToArrayBuffer(privateKeyPem)
+  const key = await crypto.subtle.importKey(
+    'pkcs8',
+    keyData,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const signature = await crypto.subtle.sign(
+    'RSASSA-PKCS1-v1_5',
+    key,
+    new TextEncoder().encode(data),
+  )
+  return base64UrlEncodeBytes(new Uint8Array(signature))
+}
+
+function pemToArrayBuffer(pem: string): ArrayBuffer {
+  const cleaned = pem
+    .replace('-----BEGIN PRIVATE KEY-----', '')
+    .replace('-----END PRIVATE KEY-----', '')
+    .replace(/\s+/g, '')
+  const binary = atob(cleaned)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes.buffer
+}
+
+function base64UrlEncodeText(value: string): string {
+  return base64UrlEncodeBytes(new TextEncoder().encode(value))
+}
+
+function base64UrlEncodeBytes(value: Uint8Array): string {
+  let binary = ''
+  for (const b of value) {
+    binary += String.fromCharCode(b)
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
 async function writeDeliveryLog(
   supabase: ReturnType<typeof createClient>,
   payload: {
@@ -843,6 +1346,34 @@ function normalizeMessageCleanupTiming(value: unknown): MessageCleanupTiming {
 
 function normalizeLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMode {
   return value === 'daily_rollup' ? 'daily_rollup' : 'independent'
+}
+
+function normalizeTomorrowReminderSettings(value: any): TomorrowReminderSettings {
+  const enabled = value?.calendar_tomorrow_reminder_enabled !== false
+  const rawHours = Array.isArray(value?.calendar_tomorrow_reminder_hours)
+    ? value.calendar_tomorrow_reminder_hours
+    : []
+  const normalizedHours = Array.from(
+    new Set(
+      rawHours
+        .map((hour: unknown) => Number(hour))
+        .filter((hour) => Number.isInteger(hour) && hour >= 0 && hour <= 23),
+    ),
+  ).sort((a, b) => a - b)
+
+  const onlyIfEvents = value?.calendar_tomorrow_reminder_only_if_events === true
+  const rawMaxItems = Number(value?.calendar_tomorrow_reminder_max_items)
+  const maxItems =
+    Number.isInteger(rawMaxItems) && rawMaxItems >= 1 && rawMaxItems <= 50
+      ? rawMaxItems
+      : DEFAULT_TOMORROW_REMINDER_MAX_ITEMS
+
+  return {
+    enabled,
+    hours: normalizedHours.length > 0 ? normalizedHours : [...DEFAULT_TOMORROW_REMINDER_HOURS],
+    onlyIfEvents,
+    maxItems,
+  }
 }
 
 function normalizeNullableMessageCleanupTiming(value: unknown): MessageCleanupTiming | null {

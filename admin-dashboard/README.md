@@ -1,11 +1,12 @@
 # Admin Dashboard
 
-このフォルダの `index.html` が管理画面です。
+管理画面はプロジェクト直下の `index.html` です。  
+このフォルダの `index.html` は互換用リダイレクトです。
 
 ## 使い方
 
-1. ブラウザで `index.html` を開く  
-2. `Project URL` に Supabase の URL を入力  
+1. ブラウザでプロジェクト直下の `index.html` を開く  
+2. `Project URL` は固定（`https://jhpmzqxqvapdkyvvhyra.supabase.co`）  
 3. `ADMIN_DASHBOARD_TOKEN` を入力して接続
 
 ## 対応機能
@@ -23,6 +24,6 @@
 
 ```bash
 TOKEN=$(node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))")
-supabase secrets set ADMIN_DASHBOARD_TOKEN="$TOKEN" --project-ref ppuzcvstdknliqbendaz
+supabase secrets set ADMIN_DASHBOARD_TOKEN="$TOKEN" --project-ref jhpmzqxqvapdkyvvhyra
 echo "$TOKEN"
 ```

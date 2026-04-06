@@ -86,9 +86,13 @@ Deno.serve(async (req) => {
           is_enabled: payload.is_enabled,
           message_cleanup_timing: payload.message_cleanup_timing,
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
+          calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
+          calendar_tomorrow_reminder_hours: payload.calendar_tomorrow_reminder_hours,
+          calendar_tomorrow_reminder_only_if_events: payload.calendar_tomorrow_reminder_only_if_events,
+          calendar_tomorrow_reminder_max_items: payload.calendar_tomorrow_reminder_max_items,
           updated_at: new Date().toISOString(),
         }, { onConflict: "id" })
-        .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
         .single()
 
       if (error) {
@@ -107,12 +111,13 @@ Deno.serve(async (req) => {
           room_name: payload.room_name,
           is_enabled: payload.is_enabled,
           send_room_summary: payload.send_room_summary,
+          calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
           delivery_hours: payload.delivery_hours,
           message_cleanup_timing: payload.message_cleanup_timing,
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -258,10 +263,15 @@ async function authenticate(
 
   if (dbHashResult.hash) {
     const providedHash = await hashToken(provided)
-    if (!secureEqual(providedHash, dbHashResult.hash)) {
-      return { ok: false, status: 401, message: "Unauthorized." }
+    if (secureEqual(providedHash, dbHashResult.hash)) {
+      return { ok: true }
     }
-    return { ok: true }
+    // Break-glass path: allow fallback secret token even when DB hash exists.
+    // This keeps recovery possible if the hashed dashboard token is lost.
+    if (fallbackToken && secureEqual(provided, fallbackToken)) {
+      return { ok: true }
+    }
+    return { ok: false, status: 401, message: "Unauthorized." }
   }
 
   if (!fallbackToken) {
@@ -313,7 +323,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -389,7 +399,7 @@ async function waitForNewLog(
 async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
   const { data, error } = await supabase
     .from("summary_settings")
-    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
     .eq("id", 1)
     .maybeSingle()
 
@@ -407,13 +417,17 @@ async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
     is_enabled: true,
     message_cleanup_timing: "after_each_delivery" as MessageCleanupTiming,
     last_delivery_summary_mode: "independent" as LastDeliverySummaryMode,
+    calendar_tomorrow_reminder_enabled: true,
+    calendar_tomorrow_reminder_hours: [19],
+    calendar_tomorrow_reminder_only_if_events: false,
+    calendar_tomorrow_reminder_max_items: 20,
     updated_at: new Date().toISOString(),
   }
 
   const { data: inserted, error: insertError } = await supabase
     .from("summary_settings")
     .upsert(fallback, { onConflict: "id" })
-    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
     .single()
 
   if (insertError) {
@@ -428,6 +442,10 @@ function buildGlobalSettingsPayload(body: unknown): {
   is_enabled: boolean
   message_cleanup_timing: MessageCleanupTiming
   last_delivery_summary_mode: LastDeliverySummaryMode
+  calendar_tomorrow_reminder_enabled: boolean
+  calendar_tomorrow_reminder_hours: number[]
+  calendar_tomorrow_reminder_only_if_events: boolean
+  calendar_tomorrow_reminder_max_items: number
 } {
   if (!isRecord(body)) {
     throw { status: 400, message: "Invalid JSON body." } satisfies AppError
@@ -452,11 +470,35 @@ function buildGlobalSettingsPayload(body: unknown): {
     } satisfies AppError
   }
 
+  const reminderEnabled = body.calendar_tomorrow_reminder_enabled
+  if (typeof reminderEnabled !== "boolean") {
+    throw { status: 400, message: "calendar_tomorrow_reminder_enabled must be boolean." } satisfies AppError
+  }
+
+  const reminderHours = normalizeHours(body.calendar_tomorrow_reminder_hours, false)
+  if (reminderHours.length === 0) {
+    throw { status: 400, message: "calendar_tomorrow_reminder_hours must include at least one hour." } satisfies AppError
+  }
+
+  const onlyIfEvents = body.calendar_tomorrow_reminder_only_if_events
+  if (typeof onlyIfEvents !== "boolean") {
+    throw { status: 400, message: "calendar_tomorrow_reminder_only_if_events must be boolean." } satisfies AppError
+  }
+
+  const maxItems = Number(body.calendar_tomorrow_reminder_max_items)
+  if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > 50) {
+    throw { status: 400, message: "calendar_tomorrow_reminder_max_items must be an integer between 1 and 50." } satisfies AppError
+  }
+
   return {
     is_enabled: isEnabled,
     delivery_hours: deliveryHours,
     message_cleanup_timing: messageCleanupTiming,
     last_delivery_summary_mode: lastDeliverySummaryMode,
+    calendar_tomorrow_reminder_enabled: reminderEnabled,
+    calendar_tomorrow_reminder_hours: reminderHours,
+    calendar_tomorrow_reminder_only_if_events: onlyIfEvents,
+    calendar_tomorrow_reminder_max_items: maxItems,
   }
 }
 
@@ -465,6 +507,7 @@ function buildRoomSettingsPayload(body: unknown): {
   room_name: string | null
   is_enabled: boolean
   send_room_summary: boolean
+  calendar_tomorrow_reminder_enabled: boolean
   delivery_hours: number[] | null
   message_cleanup_timing: MessageCleanupTiming | null
   last_delivery_summary_mode: LastDeliverySummaryMode | null
@@ -488,6 +531,12 @@ function buildRoomSettingsPayload(body: unknown): {
     throw { status: 400, message: "send_room_summary must be boolean." } satisfies AppError
   }
 
+  const roomTomorrowReminderEnabledRaw = body.calendar_tomorrow_reminder_enabled
+  if (roomTomorrowReminderEnabledRaw != null && typeof roomTomorrowReminderEnabledRaw !== "boolean") {
+    throw { status: 400, message: "calendar_tomorrow_reminder_enabled must be boolean when provided." } satisfies AppError
+  }
+  const roomTomorrowReminderEnabled = roomTomorrowReminderEnabledRaw === true
+
   const roomNameRaw = typeof body.room_name === "string" ? body.room_name.trim() : ""
   const deliveryHours = body.delivery_hours == null ? null : normalizeHours(body.delivery_hours, false)
   if (Array.isArray(deliveryHours) && deliveryHours.length === 0) {
@@ -508,6 +557,7 @@ function buildRoomSettingsPayload(body: unknown): {
     room_name: roomNameRaw || null,
     is_enabled: isEnabled,
     send_room_summary: sendRoomSummary,
+    calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,
     delivery_hours: deliveryHours,
     message_cleanup_timing: roomCleanupTiming,
     last_delivery_summary_mode: roomSummaryMode,
@@ -617,6 +667,9 @@ function json(body: unknown, status = 200): Response {
     headers: {
       ...corsHeaders,
       "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "Pragma": "no-cache",
+      "Expires": "0",
     },
   })
 }
