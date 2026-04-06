@@ -27,6 +27,39 @@ type StorageUsageStats = {
   managed_tables_total_pretty: string
   managed_tables: StorageUsageTableStat[]
 }
+type MediaType = "image" | "video" | "audio" | "file"
+type MediaListRow = {
+  id: number
+  line_message_id: string
+  room_id: string
+  user_id: string | null
+  media_type: MediaType
+  storage_bucket: string
+  storage_path: string
+  original_file_name: string | null
+  mime_type: string | null
+  file_size_bytes: number
+  created_at: string
+}
+
+const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
+const MEDIA_LIST_DEFAULT_LIMIT = 24
+const MEDIA_LIST_MAX_LIMIT = 100
+const MEDIA_STORAGE_CAP_BYTES = 500 * 1024 * 1024
+const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
+const MAX_MEDIA_UPLOAD_MAX_MB = 20
+type MediaUsageStats = {
+  total_files: number
+  total_bytes: number
+}
+type GmailLinkedAccountState = {
+  enabled: boolean
+  configured: boolean
+  email_address: string | null
+  history_id: string | null
+  checked_at: string
+  error: string | null
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -53,6 +86,53 @@ Deno.serve(async (req) => {
     if (req.method === "GET" && path === "/state") {
       const state = await fetchState(supabase, url)
       return json(state, 200)
+    }
+
+    if (req.method === "GET" && path === "/gmail/account") {
+      const gmailAccount = await fetchGmailLinkedAccountState()
+      return json({ gmail_account: gmailAccount }, 200)
+    }
+
+    if (req.method === "GET" && path === "/media") {
+      const mediaState = await fetchMediaState(supabase, url)
+      return json(mediaState, 200)
+    }
+
+    if (req.method === "PUT" && path === "/settings/media-upload-limit") {
+      const body = await parseJson(req)
+      if (!isRecord(body)) {
+        throw { status: 400, message: "Invalid JSON body." } satisfies AppError
+      }
+      const maxMb = normalizeMediaUploadMaxMb(body.media_upload_max_mb)
+      await fetchGlobalSettings(supabase)
+      const updatedAt = new Date().toISOString()
+      const { data, error } = await supabase
+        .from("summary_settings")
+        .update({
+          media_upload_max_mb: maxMb,
+          updated_at: updatedAt,
+        })
+        .eq("id", 1)
+        .select("id, media_upload_max_mb, updated_at")
+        .single()
+      if (error) {
+        throw { status: 500, message: `Failed to update media upload limit: ${error.message}` } satisfies AppError
+      }
+      return json({
+        success: true,
+        media_upload_max_mb: Number(data?.media_upload_max_mb ?? maxMb),
+        updated_at: data?.updated_at ?? updatedAt,
+      }, 200)
+    }
+
+    if (req.method === "DELETE" && path.startsWith("/media/")) {
+      const mediaIdRaw = path.replace("/media/", "")
+      const mediaId = Number(mediaIdRaw)
+      if (!Number.isInteger(mediaId) || mediaId <= 0) {
+        throw { status: 400, message: "media_id must be a positive integer." } satisfies AppError
+      }
+      const deleted = await deleteMediaItemById(supabase, mediaId)
+      return json({ success: true, deleted }, 200)
     }
 
     if (req.method === "PUT" && path === "/auth/token") {
@@ -104,9 +184,10 @@ Deno.serve(async (req) => {
           calendar_tomorrow_reminder_hours: payload.calendar_tomorrow_reminder_hours,
           calendar_tomorrow_reminder_only_if_events: payload.calendar_tomorrow_reminder_only_if_events,
           calendar_tomorrow_reminder_max_items: payload.calendar_tomorrow_reminder_max_items,
+          media_upload_max_mb: payload.media_upload_max_mb,
           updated_at: new Date().toISOString(),
         }, { onConflict: "id" })
-        .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
+        .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, media_upload_max_mb, updated_at")
         .single()
 
       if (error) {
@@ -127,12 +208,13 @@ Deno.serve(async (req) => {
           send_room_summary: payload.send_room_summary,
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
           message_search_enabled: payload.message_search_enabled,
+          gmail_reservation_alert_enabled: payload.gmail_reservation_alert_enabled,
           delivery_hours: payload.delivery_hours,
           message_cleanup_timing: payload.message_cleanup_timing,
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_search_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -162,6 +244,11 @@ Deno.serve(async (req) => {
       const roomId = decodeURIComponent(path.replace("/rooms/", ""))
       if (!roomId) {
         throw { status: 400, message: "room_id is required." } satisfies AppError
+      }
+
+      const mediaCleanup = await removeRoomMediaObjects(supabase, roomId)
+      if (!mediaCleanup.ok) {
+        throw { status: 500, message: mediaCleanup.message } satisfies AppError
       }
 
       const { count: messageCount, error: messageCountError } = await supabase
@@ -202,6 +289,8 @@ Deno.serve(async (req) => {
         room_id: roomId,
         deleted: {
           messages: messageCount ?? 0,
+          media_files: mediaCleanup.deletedFiles,
+          media_metadata: mediaCleanup.deletedMetadataRows,
           room_settings: roomSettingsRow ? 1 : 0,
         },
       }, 200)
@@ -236,8 +325,9 @@ Deno.serve(async (req) => {
           success: true,
           queued: true,
           forced: forceRun,
+          before_log_id: beforeId,
           latest_log: null,
-          warning: "Cron was invoked, but a new delivery log was not observed within timeout.",
+          warning: "手動実行を受け付けました。ログ反映まで時間がかかっています。",
         }, 200)
       }
 
@@ -245,6 +335,7 @@ Deno.serve(async (req) => {
         success: true,
         queued: true,
         forced: forceRun,
+        before_log_id: beforeId,
         latest_log: {
           id: latestLog.id,
           run_at: latestLog.run_at,
@@ -338,7 +429,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_search_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -360,7 +451,7 @@ async function fetchState(
   }
 
   const filteredLogs = (logsRes.data ?? [])
-    .filter((row) => isActionableDeliveryLogStatus(row.status))
+    .filter((row) => isActionableDeliveryLogStatus(row.status, row.details))
     .slice(0, logsLimit)
 
   return {
@@ -372,6 +463,477 @@ async function fetchState(
     storage_usage_error: storageUsageState.error,
     generated_at: new Date().toISOString(),
   }
+}
+
+async function fetchGmailLinkedAccountState(): Promise<GmailLinkedAccountState> {
+  const checkedAt = new Date().toISOString()
+  const clientId = String(Deno.env.get("GMAIL_CLIENT_ID") ?? "").trim()
+  const clientSecret = String(Deno.env.get("GMAIL_CLIENT_SECRET") ?? "").trim()
+  const refreshToken = String(Deno.env.get("GMAIL_REFRESH_TOKEN") ?? "").trim()
+
+  const hasAnyCredential = !!clientId || !!clientSecret || !!refreshToken
+  const enabled = parseBooleanEnv(Deno.env.get("GMAIL_ALERT_ENABLED"), hasAnyCredential)
+  const configured = !!clientId && !!clientSecret && !!refreshToken
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      configured,
+      email_address: null,
+      history_id: null,
+      checked_at: checkedAt,
+      error: null,
+    }
+  }
+
+  if (!configured) {
+    const missing: string[] = []
+    if (!clientId) missing.push("GMAIL_CLIENT_ID")
+    if (!clientSecret) missing.push("GMAIL_CLIENT_SECRET")
+    if (!refreshToken) missing.push("GMAIL_REFRESH_TOKEN")
+    return {
+      enabled: true,
+      configured: false,
+      email_address: null,
+      history_id: null,
+      checked_at: checkedAt,
+      error: `Missing Gmail secrets: ${missing.join(", ")}`,
+    }
+  }
+
+  const tokenState = await fetchGmailAccessTokenByRefreshToken(clientId, clientSecret, refreshToken)
+  if (!tokenState.ok) {
+    return {
+      enabled: true,
+      configured: true,
+      email_address: null,
+      history_id: null,
+      checked_at: checkedAt,
+      error: tokenState.error,
+    }
+  }
+
+  const profileState = await fetchGmailProfile(tokenState.accessToken)
+  if (!profileState.ok) {
+    return {
+      enabled: true,
+      configured: true,
+      email_address: null,
+      history_id: null,
+      checked_at: checkedAt,
+      error: profileState.error,
+    }
+  }
+
+  return {
+    enabled: true,
+    configured: true,
+    email_address: profileState.emailAddress,
+    history_id: profileState.historyId,
+    checked_at: checkedAt,
+    error: null,
+  }
+}
+
+async function fetchGmailAccessTokenByRefreshToken(
+  clientId: string,
+  clientSecret: string,
+  refreshToken: string,
+): Promise<{ ok: true; accessToken: string } | { ok: false; error: string }> {
+  try {
+    const body = new URLSearchParams()
+    body.set("client_id", clientId)
+    body.set("client_secret", clientSecret)
+    body.set("refresh_token", refreshToken)
+    body.set("grant_type", "refresh_token")
+
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    })
+    const text = await response.text()
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `Gmail token取得エラー (${response.status}): ${extractGoogleApiErrorMessage(text)}`,
+      }
+    }
+
+    const data = parseJsonObjectSafe(text)
+    const accessToken = typeof data?.access_token === "string" ? data.access_token.trim() : ""
+    if (!accessToken) {
+      return { ok: false, error: "Gmail token取得エラー: access_token が空です。" }
+    }
+    return { ok: true, accessToken }
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Gmail token取得エラー: ${sanitizeSingleLine(error instanceof Error ? error.message : String(error))}`,
+    }
+  }
+}
+
+async function fetchGmailProfile(
+  accessToken: string,
+): Promise<{ ok: true; emailAddress: string | null; historyId: string | null } | { ok: false; error: string }> {
+  try {
+    const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+    })
+    const text = await response.text()
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: `Gmail profile取得エラー (${response.status}): ${extractGoogleApiErrorMessage(text)}`,
+      }
+    }
+
+    const data = parseJsonObjectSafe(text)
+    const emailAddress = typeof data?.emailAddress === "string" ? data.emailAddress.trim() : ""
+    const historyId = data?.historyId == null ? "" : String(data.historyId).trim()
+    return {
+      ok: true,
+      emailAddress: emailAddress || null,
+      historyId: historyId || null,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Gmail profile取得エラー: ${sanitizeSingleLine(error instanceof Error ? error.message : String(error))}`,
+    }
+  }
+}
+
+function extractGoogleApiErrorMessage(responseText: string): string {
+  const raw = String(responseText ?? "").trim()
+  if (!raw) return "unknown error"
+  const parsed = parseJsonObjectSafe(raw)
+  const nestedMessage = parsed?.error?.message
+  if (typeof nestedMessage === "string" && nestedMessage.trim()) {
+    return sanitizeSingleLine(nestedMessage)
+  }
+  const description = parsed?.error_description
+  if (typeof description === "string" && description.trim()) {
+    return sanitizeSingleLine(description)
+  }
+  return sanitizeSingleLine(raw)
+}
+
+function parseJsonObjectSafe(value: string): Record<string, any> | null {
+  try {
+    const parsed = JSON.parse(value)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function sanitizeSingleLine(value: string): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+async function fetchMediaState(
+  supabase: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const limit = clampInt(url.searchParams.get("limit"), MEDIA_LIST_DEFAULT_LIMIT, 1, MEDIA_LIST_MAX_LIMIT)
+  const offset = clampInt(url.searchParams.get("offset"), 0, 0, 1000000)
+  const roomId = String(url.searchParams.get("room_id") ?? "").trim()
+  const mediaType = normalizeMediaType(url.searchParams.get("media_type"))
+
+  let query = supabase
+    .from("line_message_media")
+    .select(
+      "id, line_message_id, room_id, user_id, media_type, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, created_at",
+      { count: "exact" },
+    )
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1)
+
+  if (roomId) {
+    query = query.eq("room_id", roomId)
+  }
+  if (mediaType) {
+    query = query.eq("media_type", mediaType)
+  }
+
+  const [listRes, filteredUsageRes, allUsageRes, mediaUploadMaxMb] = await Promise.all([
+    query,
+    fetchLineMediaUsageStats(supabase, roomId || null, mediaType),
+    fetchLineMediaUsageStats(supabase, null, null),
+    fetchMediaUploadMaxMb(supabase),
+  ])
+
+  const { data, error, count } = listRes
+  if (error) {
+    throw { status: 500, message: `Failed to fetch media list: ${error.message}` } satisfies AppError
+  }
+  if (!filteredUsageRes.ok) {
+    throw { status: 500, message: filteredUsageRes.message } satisfies AppError
+  }
+  if (!allUsageRes.ok) {
+    throw { status: 500, message: allUsageRes.message } satisfies AppError
+  }
+
+  const rows = Array.isArray(data) ? data.map((item) => normalizeMediaListRow(item)).filter((item): item is MediaListRow => item !== null) : []
+  const items = await Promise.all(rows.map(async (row) => {
+    const signedUrl = await createSignedMediaUrl(supabase, row.storage_bucket, row.storage_path)
+    return {
+      ...row,
+      signed_url: signedUrl,
+      line_message_tag: formatLineMediaTag(row.line_message_id),
+    }
+  }))
+
+  const safeTotal = Number.isFinite(Number(count)) ? Number(count) : items.length
+  const nextOffset = offset + items.length
+  return {
+    items,
+    total: safeTotal,
+    total_file_bytes: filteredUsageRes.stats.total_bytes,
+    total_file_count: filteredUsageRes.stats.total_files,
+    all_file_bytes: allUsageRes.stats.total_bytes,
+    all_file_count: allUsageRes.stats.total_files,
+    media_storage_cap_bytes: MEDIA_STORAGE_CAP_BYTES,
+    media_storage_usage_ratio: MEDIA_STORAGE_CAP_BYTES > 0
+      ? Math.min(1, allUsageRes.stats.total_bytes / MEDIA_STORAGE_CAP_BYTES)
+      : 0,
+    media_upload_max_mb: mediaUploadMaxMb,
+    limit,
+    offset,
+    has_more: nextOffset < safeTotal,
+    next_offset: nextOffset < safeTotal ? nextOffset : null,
+    generated_at: new Date().toISOString(),
+  }
+}
+
+async function fetchMediaUploadMaxMb(
+  supabase: ReturnType<typeof createClient>,
+): Promise<number> {
+  try {
+    const { data, error } = await supabase
+      .from("summary_settings")
+      .select("media_upload_max_mb")
+      .eq("id", 1)
+      .maybeSingle()
+    if (error) {
+      console.error("Failed to fetch media_upload_max_mb:", error.message)
+      return DEFAULT_MEDIA_UPLOAD_MAX_MB
+    }
+    return normalizeMediaUploadMaxMb(data?.media_upload_max_mb)
+  } catch (error) {
+    console.error("Unexpected error while fetching media_upload_max_mb:", error)
+    return DEFAULT_MEDIA_UPLOAD_MAX_MB
+  }
+}
+
+async function fetchLineMediaUsageStats(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string | null,
+  mediaType: MediaType | null,
+): Promise<{ ok: true; stats: MediaUsageStats } | { ok: false; message: string }> {
+  const { data, error } = await supabase.rpc("get_line_media_usage_stats", {
+    filter_room_id: roomId,
+    filter_media_type: mediaType,
+  })
+  if (error) {
+    return { ok: false, message: `Failed to fetch media usage stats: ${error.message}` }
+  }
+
+  const row = Array.isArray(data) ? data[0] : null
+  const totalFiles = toNonNegativeInteger((row as any)?.total_files)
+  const totalBytes = toNonNegativeInteger((row as any)?.total_bytes)
+  return {
+    ok: true,
+    stats: {
+      total_files: totalFiles,
+      total_bytes: totalBytes,
+    },
+  }
+}
+
+function normalizeMediaType(value: string | null): MediaType | null {
+  const normalized = String(value ?? "").trim().toLowerCase()
+  if (normalized === "image" || normalized === "video" || normalized === "audio" || normalized === "file") {
+    return normalized
+  }
+  return null
+}
+
+function normalizeMediaListRow(value: unknown): MediaListRow | null {
+  if (!isRecord(value)) return null
+  const idNum = Number(value.id)
+  if (!Number.isFinite(idNum) || idNum <= 0) return null
+  const mediaType = normalizeMediaType(String(value.media_type ?? ""))
+  if (!mediaType) return null
+
+  const lineMessageId = toSafeString(value.line_message_id)
+  const roomId = toSafeString(value.room_id)
+  const storageBucket = toSafeString(value.storage_bucket)
+  const storagePath = toSafeString(value.storage_path)
+  if (!lineMessageId || !roomId || !storageBucket || !storagePath) return null
+
+  return {
+    id: Math.floor(idNum),
+    line_message_id: lineMessageId,
+    room_id: roomId,
+    user_id: value.user_id == null ? null : String(value.user_id),
+    media_type: mediaType,
+    storage_bucket: storageBucket,
+    storage_path: storagePath,
+    original_file_name: value.original_file_name == null ? null : String(value.original_file_name),
+    mime_type: value.mime_type == null ? null : String(value.mime_type),
+    file_size_bytes: toNonNegativeInteger(value.file_size_bytes),
+    created_at: String(value.created_at ?? ""),
+  }
+}
+
+async function createSignedMediaUrl(
+  supabase: ReturnType<typeof createClient>,
+  storageBucket: string,
+  storagePath: string,
+): Promise<string | null> {
+  try {
+    const { data, error } = await supabase
+      .storage
+      .from(storageBucket)
+      .createSignedUrl(storagePath, MEDIA_SIGNED_URL_EXPIRES_SEC)
+    if (error) {
+      console.error(`Failed to create signed URL for ${storageBucket}/${storagePath}:`, error.message)
+      return null
+    }
+    const signedUrl = typeof data?.signedUrl === "string" ? data.signedUrl.trim() : ""
+    return signedUrl || null
+  } catch (error) {
+    console.error(`Unexpected error while signing media URL for ${storageBucket}/${storagePath}:`, error)
+    return null
+  }
+}
+
+function formatLineMediaTag(lineMessageId: string): string {
+  return `[[MEDIA:${lineMessageId}]]`
+}
+
+async function deleteMediaItemById(
+  supabase: ReturnType<typeof createClient>,
+  mediaId: number,
+): Promise<{ media_id: number; room_id: string; line_message_id: string; storage_deleted: boolean }> {
+  const { data: row, error: fetchError } = await supabase
+    .from("line_message_media")
+    .select("id, room_id, line_message_id, storage_bucket, storage_path")
+    .eq("id", mediaId)
+    .maybeSingle()
+  if (fetchError) {
+    throw { status: 500, message: `Failed to fetch media row: ${fetchError.message}` } satisfies AppError
+  }
+  if (!row) {
+    throw { status: 404, message: "Media not found." } satisfies AppError
+  }
+
+  const storageBucket = toSafeString(row.storage_bucket)
+  const storagePath = toSafeString(row.storage_path)
+  let storageDeleted = false
+  if (storageBucket && storagePath) {
+    const { data: removed, error: removeError } = await supabase
+      .storage
+      .from(storageBucket)
+      .remove([storagePath])
+    if (removeError) {
+      throw { status: 500, message: `Failed to delete storage object: ${removeError.message}` } satisfies AppError
+    }
+    storageDeleted = Array.isArray(removed) && removed.length > 0
+  }
+
+  const { error: deleteError } = await supabase
+    .from("line_message_media")
+    .delete()
+    .eq("id", mediaId)
+  if (deleteError) {
+    throw { status: 500, message: `Failed to delete media metadata: ${deleteError.message}` } satisfies AppError
+  }
+
+  return {
+    media_id: mediaId,
+    room_id: String(row.room_id ?? ""),
+    line_message_id: String(row.line_message_id ?? ""),
+    storage_deleted: storageDeleted,
+  }
+}
+
+async function removeRoomMediaObjects(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+): Promise<{ ok: true; deletedFiles: number; deletedMetadataRows: number } | { ok: false; message: string }> {
+  const { data: mediaRows, error: mediaError } = await supabase
+    .from("line_message_media")
+    .select("id, storage_bucket, storage_path")
+    .eq("room_id", roomId)
+
+  if (mediaError) {
+    return { ok: false, message: `Failed to fetch room media metadata: ${mediaError.message}` }
+  }
+
+  const rows = Array.isArray(mediaRows)
+    ? mediaRows
+        .map((item) => ({
+          id: Number(item?.id),
+          storage_bucket: toSafeString(item?.storage_bucket),
+          storage_path: toSafeString(item?.storage_path),
+        }))
+        .filter((item) => Number.isFinite(item.id) && item.id > 0 && item.storage_bucket && item.storage_path)
+    : []
+
+  if (rows.length === 0) {
+    return { ok: true, deletedFiles: 0, deletedMetadataRows: 0 }
+  }
+
+  const bucketMap = new Map<string, string[]>()
+  for (const row of rows) {
+    const list = bucketMap.get(row.storage_bucket) ?? []
+    list.push(row.storage_path)
+    bucketMap.set(row.storage_bucket, list)
+  }
+
+  let deletedFiles = 0
+  for (const [bucket, paths] of bucketMap.entries()) {
+    const chunks = chunkArray(paths, 100)
+    for (const chunk of chunks) {
+      const { data: removed, error: removeError } = await supabase
+        .storage
+        .from(bucket)
+        .remove(chunk)
+      if (removeError) {
+        return { ok: false, message: `Failed to delete storage files in bucket ${bucket}: ${removeError.message}` }
+      }
+      deletedFiles += Array.isArray(removed) ? removed.length : 0
+    }
+  }
+
+  const { count: deletedMetadataRows, error: deleteMetaError } = await supabase
+    .from("line_message_media")
+    .delete({ count: "exact" })
+    .eq("room_id", roomId)
+  if (deleteMetaError) {
+    return { ok: false, message: `Failed to delete media metadata: ${deleteMetaError.message}` }
+  }
+
+  return { ok: true, deletedFiles, deletedMetadataRows: deletedMetadataRows ?? 0 }
+}
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  if (size <= 0) return [items]
+  const chunks: T[][] = []
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size))
+  }
+  return chunks
 }
 
 async function fetchStorageUsageState(
@@ -413,9 +975,10 @@ function normalizeStorageUsageTableStat(value: unknown): StorageUsageTableStat |
   }
 }
 
-function isActionableDeliveryLogStatus(status: unknown): boolean {
+function isActionableDeliveryLogStatus(status: unknown, details?: unknown): boolean {
   const normalized = String(status ?? "").trim().toLowerCase()
   if (!normalized) return true
+  if (isForceRunLogDetails(details)) return true
   return !nonActionableDeliveryLogStatuses.has(normalized)
 }
 
@@ -426,14 +989,20 @@ const nonActionableDeliveryLogStatuses = new Set([
   "overall_schedule_skip",
 ])
 
+function isForceRunLogDetails(details: unknown): boolean {
+  if (!isRecord(details)) return false
+  return details.force_run === true
+}
+
 async function waitForNewLog(
   supabase: ReturnType<typeof createClient>,
   previousId: number,
 ): Promise<{ id: number; run_at: string; status: string; reason: string | null } | null> {
-  const maxAttempts = 6
+  const maxAttempts = 20
+  const intervalMs = 1000
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (attempt > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 700))
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
     }
 
     const { data, error } = await supabase
@@ -456,7 +1025,7 @@ async function waitForNewLog(
 async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
   const { data, error } = await supabase
     .from("summary_settings")
-    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
+    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, media_upload_max_mb, updated_at")
     .eq("id", 1)
     .maybeSingle()
 
@@ -479,13 +1048,14 @@ async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
     calendar_tomorrow_reminder_hours: [19],
     calendar_tomorrow_reminder_only_if_events: false,
     calendar_tomorrow_reminder_max_items: 20,
+    media_upload_max_mb: DEFAULT_MEDIA_UPLOAD_MAX_MB,
     updated_at: new Date().toISOString(),
   }
 
   const { data: inserted, error: insertError } = await supabase
     .from("summary_settings")
     .upsert(fallback, { onConflict: "id" })
-    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
+    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, media_upload_max_mb, updated_at")
     .single()
 
   if (insertError) {
@@ -505,6 +1075,7 @@ function buildGlobalSettingsPayload(body: unknown): {
   calendar_tomorrow_reminder_hours: number[]
   calendar_tomorrow_reminder_only_if_events: boolean
   calendar_tomorrow_reminder_max_items: number
+  media_upload_max_mb: number
 } {
   if (!isRecord(body)) {
     throw { status: 400, message: "Invalid JSON body." } satisfies AppError
@@ -529,6 +1100,7 @@ function buildGlobalSettingsPayload(body: unknown): {
     } satisfies AppError
   }
   const messageRetentionDays = normalizeMessageRetentionDays(body.message_retention_days)
+  const mediaUploadMaxMb = normalizeMediaUploadMaxMb(body.media_upload_max_mb)
 
   const reminderEnabled = body.calendar_tomorrow_reminder_enabled
   if (typeof reminderEnabled !== "boolean") {
@@ -560,6 +1132,7 @@ function buildGlobalSettingsPayload(body: unknown): {
     calendar_tomorrow_reminder_hours: reminderHours,
     calendar_tomorrow_reminder_only_if_events: onlyIfEvents,
     calendar_tomorrow_reminder_max_items: maxItems,
+    media_upload_max_mb: mediaUploadMaxMb,
   }
 }
 
@@ -570,6 +1143,7 @@ function buildRoomSettingsPayload(body: unknown): {
   send_room_summary: boolean
   calendar_tomorrow_reminder_enabled: boolean
   message_search_enabled: boolean
+  gmail_reservation_alert_enabled: boolean
   delivery_hours: number[] | null
   message_cleanup_timing: MessageCleanupTiming | null
   last_delivery_summary_mode: LastDeliverySummaryMode | null
@@ -605,6 +1179,12 @@ function buildRoomSettingsPayload(body: unknown): {
   }
   const messageSearchEnabled = messageSearchEnabledRaw !== false
 
+  const gmailReservationAlertEnabledRaw = body.gmail_reservation_alert_enabled
+  if (gmailReservationAlertEnabledRaw != null && typeof gmailReservationAlertEnabledRaw !== "boolean") {
+    throw { status: 400, message: "gmail_reservation_alert_enabled must be boolean when provided." } satisfies AppError
+  }
+  const gmailReservationAlertEnabled = gmailReservationAlertEnabledRaw === true
+
   const roomNameRaw = typeof body.room_name === "string" ? body.room_name.trim() : ""
   const deliveryHours = body.delivery_hours == null ? null : normalizeHours(body.delivery_hours, false)
   if (Array.isArray(deliveryHours) && deliveryHours.length === 0) {
@@ -627,6 +1207,7 @@ function buildRoomSettingsPayload(body: unknown): {
     send_room_summary: sendRoomSummary,
     calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,
     message_search_enabled: messageSearchEnabled,
+    gmail_reservation_alert_enabled: gmailReservationAlertEnabled,
     delivery_hours: deliveryHours,
     message_cleanup_timing: roomCleanupTiming,
     last_delivery_summary_mode: roomSummaryMode,
@@ -684,6 +1265,18 @@ function normalizeMessageRetentionDays(value: unknown): MessageRetentionDays {
   } satisfies AppError
 }
 
+function normalizeMediaUploadMaxMb(value: unknown): number {
+  if (value == null || value === "") return DEFAULT_MEDIA_UPLOAD_MAX_MB
+  const mb = Number(value)
+  if (!Number.isInteger(mb) || mb < 1 || mb > MAX_MEDIA_UPLOAD_MAX_MB) {
+    throw {
+      status: 400,
+      message: `media_upload_max_mb must be an integer between 1 and ${MAX_MEDIA_UPLOAD_MAX_MB}.`,
+    } satisfies AppError
+  }
+  return mb
+}
+
 function normalizeOptionalMessageCleanupTiming(value: unknown): MessageCleanupTiming | null {
   if (value == null || value === "") return null
   return normalizeMessageCleanupTiming(value)
@@ -734,6 +1327,15 @@ function clampInt(value: string | null, fallback: number, min: number, max: numb
   const parsed = Number(value)
   if (!Number.isInteger(parsed)) return fallback
   return Math.min(max, Math.max(min, parsed))
+}
+
+function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
+  if (value == null) return fallback
+  const normalized = String(value).trim().toLowerCase()
+  if (!normalized) return fallback
+  if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") return true
+  if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") return false
+  return fallback
 }
 
 function normalizePath(pathname: string): string {

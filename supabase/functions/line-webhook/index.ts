@@ -115,6 +115,8 @@ type SearchMessageRow = {
   user_id: string | null
 }
 
+type StorableLineMediaType = 'image' | 'video' | 'audio' | 'file'
+
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 const DEFAULT_DURATION_MIN = 60
 const MAX_DURATION_MIN = 720
@@ -132,6 +134,12 @@ const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 60
 const SEARCH_MAX_FETCH_ROWS = 800
 const SEARCH_MAX_SUMMARY_ROWS = 120
 const SEARCH_MAX_PREVIEW_ROWS = 5
+const LINE_MEDIA_BUCKET = 'line-media'
+const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
+const LINE_MEDIA_TOTAL_CAP_BYTES = 500 * 1024 * 1024
+const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
+const MAX_MEDIA_UPLOAD_MAX_MB = 20
+const STORABLE_LINE_MEDIA_TYPES = new Set<StorableLineMediaType>(['image', 'video', 'audio', 'file'])
 const KEYWORD_SYNONYM_GROUPS = [
   ['ミーティング', 'meeting', 'mtg', '会議', '打ち合わせ', '打合せ', '商談'],
   ['試飲会', '試飲', 'テイスティング', 'tasting'],
@@ -194,6 +202,7 @@ Deno.serve(async (req) => {
     const roomNameSyncDone = new Set<string>()
     const roomMessageSearchEnabledCache = new Map<string, boolean>()
     const messageRetentionDays = await loadMessageRetentionDays(supabase)
+    const mediaUploadMaxBytes = await loadMediaUploadMaxBytes(supabase)
 
     for (const event of events) {
       if (event.type !== 'message') continue
@@ -380,17 +389,33 @@ Deno.serve(async (req) => {
       // Parse content based on message type
       const content = toStoredMessageContent(event.message)
       // Save message to target database
-      const { error } = await supabase.from('line_messages').insert({
-        room_id: roomId,
-        user_id: userId,
-        content: content,
-        processed: false
-      })
+      const { data: savedMessage, error } = await supabase
+        .from('line_messages')
+        .insert({
+          room_id: roomId,
+          user_id: userId,
+          content,
+          processed: false,
+        })
+        .select('id')
+        .single()
 
       if (error) {
         console.error('Failed to insert message:', error)
       } else {
         console.log(`Saved message from ${roomId}: ${content.substring(0, 30)}...`)
+        const savedMessageId = String(savedMessage?.id ?? '').trim()
+        if (savedMessageId) {
+          await trySaveLineMediaContent(
+            supabase,
+            lineAccessToken,
+            event.message,
+            savedMessageId,
+            roomId,
+            userId,
+            mediaUploadMaxBytes,
+          )
+        }
       }
 
       if (aiAutoCreateReply) {
@@ -425,20 +450,22 @@ function toStoredMessageContent(message: any): string {
     return '【不明なメッセージが送信されました】'
   }
 
+  const mediaTag = buildLineMediaTag(message?.id)
+
   if (message.type === 'text') {
     return String(message.text ?? '')
   }
   if (message.type === 'image') {
-    return '【画像が送信されました】'
+    return `【画像が送信されました】${mediaTag}`
   }
   if (message.type === 'video') {
-    return '【動画が送信されました】'
+    return `【動画が送信されました】${mediaTag}`
   }
   if (message.type === 'file') {
-    return `【ファイルが送信されました: ${message.fileName || '名称不明'}】`
+    return `【ファイルが送信されました: ${message.fileName || '名称不明'}】${mediaTag}`
   }
   if (message.type === 'audio') {
-    return '【ボイスメッセージが送信されました】'
+    return `【ボイスメッセージが送信されました】${mediaTag}`
   }
   if (message.type === 'location') {
     return `【位置情報が送信されました: ${message.title || ''}】`
@@ -447,6 +474,345 @@ function toStoredMessageContent(message: any): string {
     return '【スタンプが送信されました】'
   }
   return `【その他のメディア (${message.type}) が送信されました】`
+}
+
+function buildLineMediaTag(lineMessageId: unknown): string {
+  const id = String(lineMessageId ?? '').trim()
+  if (!id) return ''
+  return ` [[MEDIA:${id}]]`
+}
+
+async function trySaveLineMediaContent(
+  supabase: ReturnType<typeof createClient>,
+  lineAccessToken: string,
+  message: any,
+  lineMessageRowId: string,
+  roomId: string,
+  userId: string | null,
+  mediaUploadMaxBytes: number,
+): Promise<void> {
+  const mediaType = normalizeStorableLineMediaType(message?.type)
+  if (!mediaType) return
+
+  const lineMessageId = String(message?.id ?? '').trim()
+  if (!lineMessageId) {
+    console.warn('Skip media save: LINE message ID is missing.')
+    return
+  }
+  if (!lineAccessToken) {
+    console.warn(`Skip media save: LINE_CHANNEL_ACCESS_TOKEN is missing (type=${mediaType}, lineMessageId=${lineMessageId}).`)
+    return
+  }
+
+  const { data: existing, error: existingError } = await supabase
+    .from('line_message_media')
+    .select('id')
+    .eq('line_message_id', lineMessageId)
+    .maybeSingle()
+
+  if (existingError) {
+    console.error('Failed to inspect existing media metadata:', existingError)
+    return
+  }
+  if (existing?.id != null) {
+    return
+  }
+
+  const contentFetch = await fetchLineMessageBinary(lineMessageId, lineAccessToken, mediaUploadMaxBytes)
+  if (!contentFetch.ok) {
+    console.error(`Failed to fetch media content from LINE (lineMessageId=${lineMessageId}):`, contentFetch.error)
+    return
+  }
+
+  const fileSizeBytes = contentFetch.bytes.byteLength
+  if (fileSizeBytes <= 0) {
+    console.warn(`Skip media save: empty payload (lineMessageId=${lineMessageId}).`)
+    return
+  }
+  if (fileSizeBytes >= mediaUploadMaxBytes) {
+    console.warn(
+      `Skip media save: payload too large (${fileSizeBytes} bytes, limit(<)=${mediaUploadMaxBytes}, lineMessageId=${lineMessageId}).`,
+    )
+    return
+  }
+
+  const usageBefore = await loadLineMediaUsageTotals(supabase)
+  if (!usageBefore.ok) {
+    console.error(`Skip media save: failed to inspect total media usage (lineMessageId=${lineMessageId}): ${usageBefore.error}`)
+    return
+  }
+  if (usageBefore.totalBytes + fileSizeBytes > LINE_MEDIA_TOTAL_CAP_BYTES) {
+    console.warn(
+      `Skip media save: total media cap exceeded (${usageBefore.totalBytes} + ${fileSizeBytes} > ${LINE_MEDIA_TOTAL_CAP_BYTES}, lineMessageId=${lineMessageId}).`,
+    )
+    return
+  }
+
+  const extension = resolveMediaExtension(mediaType, contentFetch.contentType, String(message?.fileName ?? ''))
+  const originalFileName = resolveOriginalFileName(
+    mediaType,
+    String(message?.fileName ?? ''),
+    lineMessageId,
+    extension,
+  )
+  const storagePath = buildMediaStoragePath(roomId, mediaType, lineMessageId, extension)
+  const uploadResult = await supabase
+    .storage
+    .from(LINE_MEDIA_BUCKET)
+    .upload(storagePath, contentFetch.bytes, {
+      contentType: contentFetch.contentType || undefined,
+      upsert: false,
+    })
+
+  if (uploadResult.error) {
+    console.error(`Failed to upload media to storage (lineMessageId=${lineMessageId}):`, uploadResult.error)
+    return
+  }
+
+  const { error: insertError } = await supabase.from('line_message_media').insert({
+    message_id: lineMessageRowId,
+    line_message_id: lineMessageId,
+    room_id: roomId,
+    user_id: userId,
+    media_type: mediaType,
+    storage_bucket: LINE_MEDIA_BUCKET,
+    storage_path: storagePath,
+    original_file_name: originalFileName,
+    mime_type: contentFetch.contentType || null,
+    file_size_bytes: fileSizeBytes,
+  })
+
+  if (insertError) {
+    const code = String((insertError as any)?.code ?? '')
+    if (code === '23505') return
+    console.error(`Failed to insert media metadata (lineMessageId=${lineMessageId}):`, insertError)
+    return
+  }
+
+  const usageAfter = await loadLineMediaUsageTotals(supabase)
+  if (usageAfter.ok && usageAfter.totalBytes > LINE_MEDIA_TOTAL_CAP_BYTES) {
+    console.warn(
+      `Rollback media save: total media usage exceeded cap after insert (${usageAfter.totalBytes} > ${LINE_MEDIA_TOTAL_CAP_BYTES}, lineMessageId=${lineMessageId}).`,
+    )
+    const removeFileRes = await supabase.storage.from(LINE_MEDIA_BUCKET).remove([storagePath])
+    if (removeFileRes.error) {
+      console.error(`Failed to rollback storage file for lineMessageId=${lineMessageId}:`, removeFileRes.error)
+    }
+    const rollbackMetaRes = await supabase
+      .from('line_message_media')
+      .delete()
+      .eq('line_message_id', lineMessageId)
+    if (rollbackMetaRes.error) {
+      console.error(`Failed to rollback media metadata for lineMessageId=${lineMessageId}:`, rollbackMetaRes.error)
+    }
+    return
+  }
+
+  console.log(`Saved media content (${mediaType}) for room=${roomId}, lineMessageId=${lineMessageId}`)
+}
+
+async function loadLineMediaUsageTotals(
+  supabase: ReturnType<typeof createClient>,
+): Promise<{ ok: true; totalBytes: number; totalFiles: number } | { ok: false; error: string }> {
+  try {
+    const { data, error } = await supabase.rpc('get_line_media_usage_stats', {
+      filter_room_id: null,
+      filter_media_type: null,
+    })
+    if (error) {
+      return { ok: false, error: error.message }
+    }
+    const row = Array.isArray(data) ? data[0] : null
+    const totalBytes = toNonNegativeInt((row as any)?.total_bytes)
+    const totalFiles = toNonNegativeInt((row as any)?.total_files)
+    return { ok: true, totalBytes, totalFiles }
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+async function loadMediaUploadMaxBytes(
+  supabase: ReturnType<typeof createClient>,
+): Promise<number> {
+  try {
+    const { data, error } = await supabase
+      .from('summary_settings')
+      .select('media_upload_max_mb')
+      .eq('id', 1)
+      .maybeSingle()
+    if (error) {
+      console.error('Failed to load media_upload_max_mb:', error.message)
+      return DEFAULT_MEDIA_UPLOAD_MAX_MB * 1024 * 1024
+    }
+    const maxMb = normalizeMediaUploadMaxMb(data?.media_upload_max_mb)
+    return maxMb * 1024 * 1024
+  } catch (error) {
+    console.error('Unexpected error while loading media_upload_max_mb:', error)
+    return DEFAULT_MEDIA_UPLOAD_MAX_MB * 1024 * 1024
+  }
+}
+
+function normalizeMediaUploadMaxMb(value: unknown): number {
+  const mb = Number(value)
+  if (!Number.isInteger(mb)) return DEFAULT_MEDIA_UPLOAD_MAX_MB
+  if (mb < 1) return 1
+  if (mb > MAX_MEDIA_UPLOAD_MAX_MB) return MAX_MEDIA_UPLOAD_MAX_MB
+  return mb
+}
+
+function toNonNegativeInt(value: unknown): number {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.floor(n)
+}
+
+function normalizeStorableLineMediaType(value: unknown): StorableLineMediaType | null {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (!normalized) return null
+  if (!STORABLE_LINE_MEDIA_TYPES.has(normalized as StorableLineMediaType)) return null
+  return normalized as StorableLineMediaType
+}
+
+async function fetchLineMessageBinary(
+  lineMessageId: string,
+  lineAccessToken: string,
+  mediaUploadMaxBytes: number,
+): Promise<{ ok: true; bytes: Uint8Array; contentType: string } | { ok: false; error: string }> {
+  try {
+    const response = await fetch(
+      `https://api-data.line.me/v2/bot/message/${encodeURIComponent(lineMessageId)}/content`,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${lineAccessToken}`,
+        },
+      },
+    )
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      return { ok: false, error: `LINE content API ${response.status}: ${errorText}` }
+    }
+
+    const lengthHeader = Number(response.headers.get('content-length'))
+    if (Number.isFinite(lengthHeader) && lengthHeader > LINE_MEDIA_ABSOLUTE_MAX_BYTES) {
+      return {
+        ok: false,
+        error: `content too large: ${lengthHeader} bytes (absolute limit ${LINE_MEDIA_ABSOLUTE_MAX_BYTES} bytes)`,
+      }
+    }
+
+    if (Number.isFinite(lengthHeader) && lengthHeader >= mediaUploadMaxBytes) {
+      return {
+        ok: false,
+        error: `content too large: ${lengthHeader} bytes (limit is under ${mediaUploadMaxBytes} bytes)`,
+      }
+    }
+
+    const contentTypeRaw = String(response.headers.get('content-type') ?? '')
+    const contentType = contentTypeRaw.split(';')[0].trim().toLowerCase()
+    const arrayBuffer = await response.arrayBuffer()
+    return { ok: true, bytes: new Uint8Array(arrayBuffer), contentType }
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+}
+
+function resolveMediaExtension(
+  mediaType: StorableLineMediaType,
+  contentType: string,
+  rawFileName: string,
+): string {
+  const fromName = extractExtension(rawFileName)
+  if (fromName) return fromName
+
+  const normalizedContentType = String(contentType ?? '').toLowerCase()
+  if (normalizedContentType.includes('jpeg') || normalizedContentType.includes('jpg')) return 'jpg'
+  if (normalizedContentType.includes('png')) return 'png'
+  if (normalizedContentType.includes('gif')) return 'gif'
+  if (normalizedContentType.includes('webp')) return 'webp'
+  if (normalizedContentType.includes('mp4')) return 'mp4'
+  if (normalizedContentType.includes('quicktime')) return 'mov'
+  if (normalizedContentType.includes('mpeg')) return 'mp3'
+  if (normalizedContentType.includes('wav')) return 'wav'
+  if (normalizedContentType.includes('aac')) return 'aac'
+  if (normalizedContentType.includes('pdf')) return 'pdf'
+  if (normalizedContentType.includes('zip')) return 'zip'
+  if (normalizedContentType.includes('json')) return 'json'
+  if (normalizedContentType.includes('csv')) return 'csv'
+  if (normalizedContentType.includes('plain')) return 'txt'
+
+  if (mediaType === 'image') return 'jpg'
+  if (mediaType === 'video') return 'mp4'
+  if (mediaType === 'audio') return 'm4a'
+  return 'bin'
+}
+
+function resolveOriginalFileName(
+  mediaType: StorableLineMediaType,
+  rawFileName: string,
+  lineMessageId: string,
+  extension: string,
+): string {
+  const cleaned = sanitizeFileName(rawFileName)
+  if (cleaned) return cleaned
+  const base = mediaType === 'image'
+    ? 'image'
+    : mediaType === 'video'
+      ? 'video'
+      : mediaType === 'audio'
+        ? 'audio'
+        : 'file'
+  return `${base}-${lineMessageId}.${extension}`
+}
+
+function buildMediaStoragePath(
+  roomId: string,
+  mediaType: StorableLineMediaType,
+  lineMessageId: string,
+  extension: string,
+): string {
+  const now = new Date()
+  const y = now.getUTCFullYear()
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(now.getUTCDate()).padStart(2, '0')
+  const roomKey = sanitizeStoragePathSegment(roomId || 'unknown-room')
+  const ext = extension.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'bin'
+  return `${y}/${m}/${d}/${roomKey}/${mediaType}/${lineMessageId}.${ext}`
+}
+
+function sanitizeStoragePathSegment(value: string): string {
+  const cleaned = String(value ?? '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+  if (!cleaned) return 'unknown'
+  return cleaned.length > 120 ? cleaned.slice(0, 120) : cleaned
+}
+
+function sanitizeFileName(value: string): string {
+  const normalized = String(value ?? '').trim()
+  if (!normalized) return ''
+  const safe = normalized
+    .replace(/[\/\\?%*:|"<>]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return safe.length > 180 ? safe.slice(0, 180) : safe
+}
+
+function extractExtension(fileName: string): string {
+  const normalized = sanitizeFileName(fileName)
+  if (!normalized) return ''
+  const idx = normalized.lastIndexOf('.')
+  if (idx < 0 || idx === normalized.length - 1) return ''
+  const ext = normalized.slice(idx + 1).toLowerCase().replace(/[^a-z0-9]/g, '')
+  if (!ext) return ''
+  return ext.length > 12 ? ext.slice(0, 12) : ext
 }
 
 function parseBooleanEnv(value: string | null): boolean {

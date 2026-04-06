@@ -108,6 +108,13 @@ const html = String.raw`<!doctype html>
       color: var(--ok);
     }
 
+    .pill.link {
+      color: #9be8ff;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+    }
+
     .panel-grid {
       display: grid;
       gap: 18px;
@@ -458,6 +465,7 @@ const html = String.raw`<!doctype html>
         <span id="authState" class="pill">未接続</span>
         <span class="pill">API: <strong>/functions/v1/admin-api</strong></span>
         <span id="lastRefresh" class="pill">最終更新: なし</span>
+        <a class="pill link" href="https://marugo-s.github.io/LINE-management/media.html" target="_blank" rel="noopener noreferrer">LINEメディアビューアー</a>
       </div>
     </header>
 
@@ -470,6 +478,11 @@ const html = String.raw`<!doctype html>
           <button id="clearTokenBtn" class="button ghost">削除</button>
           <button id="reloadBtn" class="button">再読み込み</button>
           <button id="runNowBtn" class="button warn">今すぐ要約実行</button>
+          <a class="button" href="https://marugo-s.github.io/LINE-management/media.html" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
+        </div>
+        <div class="controls" style="margin-top:8px;">
+          <button id="checkGmailAccountBtn" class="button">Gmail連携先を確認</button>
+          <span id="gmailAccountMeta" class="pill">Gmail連携先: 未確認</span>
         </div>
         <div class="controls" style="margin-top:8px;">
           <input id="newTokenInput" class="input" type="password" placeholder="新しい管理トークン">
@@ -541,6 +554,7 @@ const html = String.raw`<!doctype html>
           <label class="switch"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
           <label class="switch"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
           <label class="switch"><input id="newRoomMessageSearchEnabled" type="checkbox" checked>会話検索応答</label>
+          <label class="switch"><input id="newRoomGmailAlertEnabled" type="checkbox">Gmail予約通知</label>
           <select id="newRoomCleanupTiming" class="select" aria-label="ルーム処理タイミング">
             <option value="">処理: 全体設定を継承</option>
             <option value="after_each_delivery">処理: 配信成功ごと</option>
@@ -565,6 +579,7 @@ const html = String.raw`<!doctype html>
                 <th>ルーム要約配信</th>
                 <th>明日予定配信</th>
                 <th>会話検索応答</th>
+                <th>Gmail予約通知</th>
                 <th>配信時刻</th>
                 <th>処理タイミング</th>
                 <th>最終回集計</th>
@@ -595,6 +610,7 @@ const html = String.raw`<!doctype html>
     const TOKEN_KEY = 'line_summary_admin_token';
     const NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY = 'line_summary_new_room_default_tomorrow_reminder';
     const NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY = 'line_summary_new_room_default_message_search';
+    const NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY = 'line_summary_new_room_default_gmail_alert';
     const ROOM_DEFAULT_HOURS = '';
     const dom = {
       authState: document.getElementById('authState'),
@@ -607,6 +623,8 @@ const html = String.raw`<!doctype html>
       clearTokenBtn: document.getElementById('clearTokenBtn'),
       reloadBtn: document.getElementById('reloadBtn'),
       runNowBtn: document.getElementById('runNowBtn'),
+      checkGmailAccountBtn: document.getElementById('checkGmailAccountBtn'),
+      gmailAccountMeta: document.getElementById('gmailAccountMeta'),
       globalEnabled: document.getElementById('globalEnabled'),
       globalHoursInput: document.getElementById('globalHoursInput'),
       messageCleanupTiming: document.getElementById('messageCleanupTiming'),
@@ -629,6 +647,7 @@ const html = String.raw`<!doctype html>
       newRoomSendSummary: document.getElementById('newRoomSendSummary'),
       newRoomTomorrowReminder: document.getElementById('newRoomTomorrowReminder'),
       newRoomMessageSearchEnabled: document.getElementById('newRoomMessageSearchEnabled'),
+      newRoomGmailAlertEnabled: document.getElementById('newRoomGmailAlertEnabled'),
       newRoomCleanupTiming: document.getElementById('newRoomCleanupTiming'),
       newRoomSummaryMode: document.getElementById('newRoomSummaryMode'),
       addRoomBtn: document.getElementById('addRoomBtn'),
@@ -675,6 +694,7 @@ const html = String.raw`<!doctype html>
     function applyNewRoomDefaultCheckboxes() {
       dom.newRoomTomorrowReminder.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY, false);
       dom.newRoomMessageSearchEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, true);
+      dom.newRoomGmailAlertEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, false);
     }
 
     function syncAuthState() {
@@ -741,8 +761,11 @@ const html = String.raw`<!doctype html>
         line_config_missing: 'LINE配信設定（トークンまたは送信先）の不足により配信できませんでした。',
         no_room_summary: '要約対象がなく、ルーム要約を生成できませんでした。',
         line_send_failed: 'LINEへの送信に失敗しました。',
+        gmail_alert_sent: 'Gmail予約メール通知を送信しました。',
+        gmail_alert_send_failed: 'Gmail予約メール通知の送信に失敗しました。',
         calendar_tomorrow_sent: '翌日予定通知を送信しました。',
         calendar_tomorrow_send_failed: '翌日予定通知の送信に失敗しました。',
+        llm_config_missing: 'GROQ APIキー未設定のため要約処理を実行できませんでした。',
         db_update_failed: '配信後のメッセージ状態更新に失敗しました。',
         delivered: '配信に成功しました。',
         delivered_no_messages_to_mark: '配信は成功しましたが、更新対象のメッセージはありませんでした。',
@@ -805,7 +828,8 @@ const html = String.raw`<!doctype html>
       return target.classList.contains('room-enabled')
         || target.classList.contains('room-send-summary')
         || target.classList.contains('room-tomorrow-reminder')
-        || target.classList.contains('room-message-search-enabled');
+        || target.classList.contains('room-message-search-enabled')
+        || target.classList.contains('room-gmail-alert-enabled');
     }
 
     async function autoSaveRoomToggle(tr) {
@@ -834,6 +858,17 @@ const html = String.raw`<!doctype html>
         console.error(e);
       } finally {
         isStateLoading = false;
+      }
+    }
+
+    async function safeCheckGmailAccount(options) {
+      const opts = options || {};
+      try {
+        await checkGmailAccount();
+      } catch (e) {
+        renderGmailAccountState({ error: true });
+        if (!opts.silent) throw e;
+        console.error(e);
       }
     }
 
@@ -954,7 +989,7 @@ const html = String.raw`<!doctype html>
       dom.roomTableBody.innerHTML = '';
       const rooms = Array.isArray(roomOverview) ? roomOverview : [];
       if (rooms.length === 0) {
-        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="12">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
+        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="13">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
         return;
       }
 
@@ -971,6 +1006,7 @@ const html = String.raw`<!doctype html>
           '<td><input class="room-send-summary room-check" type="checkbox" aria-label="ルーム要約配信" ' + ((setting && setting.send_room_summary === true) ? 'checked' : '') + '></td>' +
           '<td><input class="room-tomorrow-reminder room-check" type="checkbox" aria-label="明日予定配信" ' + ((setting && setting.calendar_tomorrow_reminder_enabled === true) ? 'checked' : '') + '></td>' +
           '<td><input class="room-message-search-enabled room-check" type="checkbox" aria-label="会話検索応答" ' + (((setting && setting.message_search_enabled) !== false) ? 'checked' : '') + '></td>' +
+          '<td><input class="room-gmail-alert-enabled room-check" type="checkbox" aria-label="Gmail予約通知" ' + ((setting && setting.gmail_reservation_alert_enabled === true) ? 'checked' : '') + '></td>' +
           '<td><input class="input room-hours" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : ROOM_DEFAULT_HOURS) + '"></td>' +
           '<td><select class="select room-cleanup-timing">' +
           '<option value="" ' + (((setting && setting.message_cleanup_timing) ? '' : 'selected')) + '>継承</option>' +
@@ -1024,6 +1060,50 @@ const html = String.raw`<!doctype html>
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }
+
+    function renderGmailAccountState(gmailAccount) {
+      if (!dom.gmailAccountMeta) return;
+      dom.gmailAccountMeta.title = '';
+      if (!gmailAccount || typeof gmailAccount !== 'object') {
+        dom.gmailAccountMeta.textContent = 'Gmail連携先: 未確認';
+        dom.gmailAccountMeta.className = 'pill';
+        return;
+      }
+
+      if (gmailAccount.error) {
+        dom.gmailAccountMeta.textContent = 'Gmail連携先: 取得失敗';
+        dom.gmailAccountMeta.title = String(gmailAccount.error);
+        dom.gmailAccountMeta.className = 'pill';
+        return;
+      }
+
+      if (gmailAccount.enabled === false) {
+        dom.gmailAccountMeta.textContent = 'Gmail連携先: 通知OFF';
+        dom.gmailAccountMeta.className = 'pill';
+        return;
+      }
+
+      if (gmailAccount.configured === false) {
+        dom.gmailAccountMeta.textContent = 'Gmail連携先: 未設定';
+        dom.gmailAccountMeta.className = 'pill';
+        return;
+      }
+
+      const email = typeof gmailAccount.email_address === 'string' ? gmailAccount.email_address.trim() : '';
+      if (email) {
+        dom.gmailAccountMeta.textContent = 'Gmail連携先: ' + email;
+        dom.gmailAccountMeta.className = 'pill ok';
+        return;
+      }
+
+      dom.gmailAccountMeta.textContent = 'Gmail連携先: 取得不可';
+      dom.gmailAccountMeta.className = 'pill';
+    }
+
+    async function checkGmailAccount() {
+      const response = await api('/gmail/account');
+      renderGmailAccountState(response && response.gmail_account ? response.gmail_account : null);
     }
 
     async function loadState() {
@@ -1082,6 +1162,7 @@ const html = String.raw`<!doctype html>
       const sendSummaryInput = tr.querySelector('.room-send-summary');
       const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
       const messageSearchEnabledInput = tr.querySelector('.room-message-search-enabled');
+      const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
       const hoursInput = tr.querySelector('.room-hours');
       const cleanupTimingInput = tr.querySelector('.room-cleanup-timing');
       const summaryModeInput = tr.querySelector('.room-summary-mode');
@@ -1095,6 +1176,7 @@ const html = String.raw`<!doctype html>
         send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
         calendar_tomorrow_reminder_enabled: !!(tomorrowReminderInput && tomorrowReminderInput.checked),
         message_search_enabled: !!(messageSearchEnabledInput && messageSearchEnabledInput.checked),
+        gmail_reservation_alert_enabled: !!(gmailAlertEnabledInput && gmailAlertEnabledInput.checked),
         delivery_hours: parseHoursInput(hoursInput ? hoursInput.value : '', true),
         message_cleanup_timing: roomCleanupTiming,
         last_delivery_summary_mode: roomSummaryMode,
@@ -1140,6 +1222,7 @@ const html = String.raw`<!doctype html>
         send_room_summary: !!dom.newRoomSendSummary.checked,
         calendar_tomorrow_reminder_enabled: !!dom.newRoomTomorrowReminder.checked,
         message_search_enabled: !!dom.newRoomMessageSearchEnabled.checked,
+        gmail_reservation_alert_enabled: !!dom.newRoomGmailAlertEnabled.checked,
         delivery_hours: parseHoursInput(dom.newRoomHours.value, true),
         message_cleanup_timing: normalizeOptionalSelectValue(dom.newRoomCleanupTiming.value),
         last_delivery_summary_mode: normalizeOptionalSelectValue(dom.newRoomSummaryMode.value),
@@ -1177,10 +1260,53 @@ const html = String.raw`<!doctype html>
       }
     }
 
+    function formatManualRunResultMessage(latest) {
+      const lines = [
+        '手動実行結果',
+        '状態: ' + String(latest && latest.status ? latest.status : '-'),
+        '実行時刻: ' + formatDate(latest && latest.run_at ? latest.run_at : ''),
+        '理由: ' + logReasonJa(latest || {}),
+      ];
+      return lines.join('\n');
+    }
+
+    async function waitForLatestLogAfter(beforeLogId, maxAttempts, intervalMs) {
+      const targetId = Number(beforeLogId);
+      if (!Number.isFinite(targetId) || targetId < 0) return null;
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        }
+        try {
+          const state = await api('/state?logs_limit=30');
+          const logs = Array.isArray(state && state.delivery_logs) ? state.delivery_logs : [];
+          const row = logs.find(function(item) {
+            return Number(item && item.id) > targetId;
+          });
+          if (row) return row;
+        } catch (_) {
+          // ignore transient fetch errors while waiting for async cron log
+        }
+      }
+      return null;
+    }
+
     async function runNow() {
       const result = await api('/actions/run-summary', { method: 'POST', body: JSON.stringify({ force: true }) });
+      let latest = result && result.latest_log ? result.latest_log : null;
+      if (!latest) {
+        latest = await waitForLatestLogAfter(result && result.before_log_id, 12, 2000);
+      }
       await safeLoadState();
-      alert('手動実行結果: HTTP ' + result.status);
+      if (latest && latest.status) {
+        alert(formatManualRunResultMessage(latest));
+        return;
+      }
+      if (result && result.warning) {
+        alert('手動実行結果:\n' + result.warning + '\n少し待ってから「再読み込み」を押してください。');
+        return;
+      }
+      alert('手動実行を受け付けました。ログ反映まで数秒かかる場合があります。');
     }
 
     async function changeAdminToken() {
@@ -1206,6 +1332,7 @@ const html = String.raw`<!doctype html>
       dom.tokenInput.value = '';
       try {
         await safeLoadState();
+        await safeCheckGmailAccount({ silent: true });
         scheduleAutoRefresh();
       } catch (e) {
         stopAutoRefresh();
@@ -1222,6 +1349,7 @@ const html = String.raw`<!doctype html>
       dom.storageUsageSummary.textContent = '';
       dom.storageUsageDetails.textContent = '';
       dom.lastRefresh.textContent = '最終更新: なし';
+      renderGmailAccountState(null);
     });
 
     dom.reloadBtn.addEventListener('click', async function() {
@@ -1235,6 +1363,14 @@ const html = String.raw`<!doctype html>
     dom.runNowBtn.addEventListener('click', async function() {
       try {
         await runNow();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
+    dom.checkGmailAccountBtn.addEventListener('click', async function() {
+      try {
+        await checkGmailAccount();
       } catch (e) {
         alert(e.message || String(e));
       }
@@ -1318,6 +1454,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomSendSummary,
       dom.newRoomTomorrowReminder,
       dom.newRoomMessageSearchEnabled,
+      dom.newRoomGmailAlertEnabled,
       dom.newRoomCleanupTiming,
       dom.newRoomSummaryMode,
     ].forEach(function(el) {
@@ -1331,6 +1468,9 @@ const html = String.raw`<!doctype html>
     });
     dom.newRoomMessageSearchEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, !!dom.newRoomMessageSearchEnabled.checked);
+    });
+    dom.newRoomGmailAlertEnabled.addEventListener('change', function() {
+      saveBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, !!dom.newRoomGmailAlertEnabled.checked);
     });
 
     dom.closeRoomIdBtn.addEventListener('click', function() {
@@ -1368,9 +1508,11 @@ const html = String.raw`<!doctype html>
 
     syncAuthState();
     applyNewRoomDefaultCheckboxes();
+    renderGmailAccountState(null);
     if (token()) {
       safeLoadState().then(function() {
         scheduleAutoRefresh();
+        safeCheckGmailAccount({ silent: true });
       }).catch(function(e) {
         stopAutoRefresh();
         alert(e.message || String(e));
