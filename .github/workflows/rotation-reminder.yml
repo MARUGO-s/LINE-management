@@ -54,5 +54,4 @@ jobs:
               repo,
               title,
               body,
-              labels: ["security"],
             });
