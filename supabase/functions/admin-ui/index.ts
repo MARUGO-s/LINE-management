@@ -593,6 +593,8 @@ const html = String.raw`<!doctype html>
   <script>
     const API_BASE = '/functions/v1/admin-api';
     const TOKEN_KEY = 'line_summary_admin_token';
+    const NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY = 'line_summary_new_room_default_tomorrow_reminder';
+    const NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY = 'line_summary_new_room_default_message_search';
     const ROOM_DEFAULT_HOURS = '';
     const dom = {
       authState: document.getElementById('authState'),
@@ -642,6 +644,7 @@ const html = String.raw`<!doctype html>
     let isStateLoading = false;
     let currentState = null;
     let isRoomDirty = false;
+    const roomAutoSaveInFlight = new Set();
 
     function token() {
       return localStorage.getItem(TOKEN_KEY) || '';
@@ -654,6 +657,24 @@ const html = String.raw`<!doctype html>
         localStorage.setItem(TOKEN_KEY, value);
       }
       syncAuthState();
+    }
+
+    function loadBooleanSetting(key, fallback) {
+      const raw = localStorage.getItem(key);
+      if (raw == null) return fallback;
+      const normalized = String(raw).trim().toLowerCase();
+      if (normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on') return true;
+      if (normalized === '0' || normalized === 'false' || normalized === 'no' || normalized === 'off') return false;
+      return fallback;
+    }
+
+    function saveBooleanSetting(key, value) {
+      localStorage.setItem(key, value ? '1' : '0');
+    }
+
+    function applyNewRoomDefaultCheckboxes() {
+      dom.newRoomTomorrowReminder.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY, false);
+      dom.newRoomMessageSearchEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, true);
     }
 
     function syncAuthState() {
@@ -778,6 +799,28 @@ const html = String.raw`<!doctype html>
 
     function markRoomDirty() {
       isRoomDirty = true;
+    }
+
+    function isAutoSaveToggle(target) {
+      return target.classList.contains('room-enabled')
+        || target.classList.contains('room-send-summary')
+        || target.classList.contains('room-tomorrow-reminder')
+        || target.classList.contains('room-message-search-enabled');
+    }
+
+    async function autoSaveRoomToggle(tr) {
+      const roomId = String(tr.dataset.roomId || '').trim();
+      if (!roomId) return;
+      if (roomAutoSaveInFlight.has(roomId)) return;
+      roomAutoSaveInFlight.add(roomId);
+      try {
+        await saveRoomFromRow(tr);
+      } catch (error) {
+        await safeLoadState({ silent: true });
+        throw error;
+      } finally {
+        roomAutoSaveInFlight.delete(roomId);
+      }
     }
 
     async function safeLoadState(options) {
@@ -1112,8 +1155,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomHours.value = '';
       dom.newRoomEnabled.checked = true;
       dom.newRoomSendSummary.checked = false;
-      dom.newRoomTomorrowReminder.checked = false;
-      dom.newRoomMessageSearchEnabled.checked = true;
+      applyNewRoomDefaultCheckboxes();
       dom.newRoomCleanupTiming.value = '';
       dom.newRoomSummaryMode.value = '';
       await safeLoadState();
@@ -1255,7 +1297,17 @@ const html = String.raw`<!doctype html>
     dom.roomTableBody.addEventListener('change', function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (target.closest('tr')) markRoomDirty();
+      const tr = target.closest('tr');
+      if (!tr) return;
+
+      if (target instanceof HTMLInputElement && target.type === 'checkbox' && isAutoSaveToggle(target)) {
+        autoSaveRoomToggle(tr).catch(function(e) {
+          alert(e.message || String(e));
+        });
+        return;
+      }
+
+      markRoomDirty();
     });
 
     [
@@ -1272,6 +1324,13 @@ const html = String.raw`<!doctype html>
       if (!el) return;
       el.addEventListener('input', markRoomDirty);
       el.addEventListener('change', markRoomDirty);
+    });
+
+    dom.newRoomTomorrowReminder.addEventListener('change', function() {
+      saveBooleanSetting(NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY, !!dom.newRoomTomorrowReminder.checked);
+    });
+    dom.newRoomMessageSearchEnabled.addEventListener('change', function() {
+      saveBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, !!dom.newRoomMessageSearchEnabled.checked);
     });
 
     dom.closeRoomIdBtn.addEventListener('click', function() {
@@ -1308,6 +1367,7 @@ const html = String.raw`<!doctype html>
     });
 
     syncAuthState();
+    applyNewRoomDefaultCheckboxes();
     if (token()) {
       safeLoadState().then(function() {
         scheduleAutoRefresh();
