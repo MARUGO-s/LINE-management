@@ -14,6 +14,19 @@ type AppError = {
 
 type MessageCleanupTiming = "after_each_delivery" | "end_of_day"
 type LastDeliverySummaryMode = "independent" | "daily_rollup"
+type MessageRetentionDays = 60 | 120 | 180
+type StorageUsageTableStat = {
+  table_name: string
+  size_bytes: number
+  size_pretty: string
+}
+type StorageUsageStats = {
+  database_size_bytes: number
+  database_size_pretty: string
+  managed_tables_total_bytes: number
+  managed_tables_total_pretty: string
+  managed_tables: StorageUsageTableStat[]
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -86,13 +99,14 @@ Deno.serve(async (req) => {
           is_enabled: payload.is_enabled,
           message_cleanup_timing: payload.message_cleanup_timing,
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
+          message_retention_days: payload.message_retention_days,
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
           calendar_tomorrow_reminder_hours: payload.calendar_tomorrow_reminder_hours,
           calendar_tomorrow_reminder_only_if_events: payload.calendar_tomorrow_reminder_only_if_events,
           calendar_tomorrow_reminder_max_items: payload.calendar_tomorrow_reminder_max_items,
           updated_at: new Date().toISOString(),
         }, { onConflict: "id" })
-        .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
+        .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
         .single()
 
       if (error) {
@@ -112,12 +126,13 @@ Deno.serve(async (req) => {
           is_enabled: payload.is_enabled,
           send_room_summary: payload.send_room_summary,
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
+          message_search_enabled: payload.message_search_enabled,
           delivery_hours: payload.delivery_hours,
           message_cleanup_timing: payload.message_cleanup_timing,
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_search_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -320,10 +335,10 @@ async function fetchState(
   const logsFetchLimit = logsLimit * 8
 
   const globalSettings = await fetchGlobalSettings(supabase)
-  const [roomSettingsRes, roomOverviewRes, logsRes] = await Promise.all([
+  const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_search_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -331,6 +346,7 @@ async function fetchState(
       .select("id, run_at, jst_hour, status, reason, should_send_overall, rooms_targeted, messages_in_queue, messages_marked_processed, line_send_attempted, line_send_success, line_http_status, target_room_id, details")
       .order("id", { ascending: false })
       .limit(logsFetchLimit),
+    fetchStorageUsageState(supabase),
   ])
 
   if (roomSettingsRes.error) {
@@ -352,7 +368,48 @@ async function fetchState(
     room_settings: roomSettingsRes.data ?? [],
     room_overview: roomOverviewRes.data ?? [],
     delivery_logs: filteredLogs,
+    storage_usage: storageUsageState.stats,
+    storage_usage_error: storageUsageState.error,
     generated_at: new Date().toISOString(),
+  }
+}
+
+async function fetchStorageUsageState(
+  supabase: ReturnType<typeof createClient>,
+): Promise<{ stats: StorageUsageStats | null; error: string | null }> {
+  const { data, error } = await supabase.rpc("get_storage_usage_stats")
+  if (error) {
+    return { stats: null, error: `容量取得エラー: ${error.message}` }
+  }
+  return { stats: normalizeStorageUsageStats(data), error: null }
+}
+
+function normalizeStorageUsageStats(value: unknown): StorageUsageStats | null {
+  if (!isRecord(value)) return null
+
+  const managedTablesRaw = Array.isArray(value.managed_tables) ? value.managed_tables : []
+  const managedTables = managedTablesRaw
+    .map((item) => normalizeStorageUsageTableStat(item))
+    .filter((item): item is StorageUsageTableStat => item !== null)
+    .sort((a, b) => b.size_bytes - a.size_bytes)
+
+  return {
+    database_size_bytes: toNonNegativeInteger(value.database_size_bytes),
+    database_size_pretty: toSafeString(value.database_size_pretty) || "0 bytes",
+    managed_tables_total_bytes: toNonNegativeInteger(value.managed_tables_total_bytes),
+    managed_tables_total_pretty: toSafeString(value.managed_tables_total_pretty) || "0 bytes",
+    managed_tables: managedTables,
+  }
+}
+
+function normalizeStorageUsageTableStat(value: unknown): StorageUsageTableStat | null {
+  if (!isRecord(value)) return null
+  const tableName = toSafeString(value.table_name)
+  if (!tableName) return null
+  return {
+    table_name: tableName,
+    size_bytes: toNonNegativeInteger(value.size_bytes),
+    size_pretty: toSafeString(value.size_pretty) || "0 bytes",
   }
 }
 
@@ -399,7 +456,7 @@ async function waitForNewLog(
 async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
   const { data, error } = await supabase
     .from("summary_settings")
-    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
+    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
     .eq("id", 1)
     .maybeSingle()
 
@@ -417,6 +474,7 @@ async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
     is_enabled: true,
     message_cleanup_timing: "after_each_delivery" as MessageCleanupTiming,
     last_delivery_summary_mode: "independent" as LastDeliverySummaryMode,
+    message_retention_days: 60 as MessageRetentionDays,
     calendar_tomorrow_reminder_enabled: true,
     calendar_tomorrow_reminder_hours: [19],
     calendar_tomorrow_reminder_only_if_events: false,
@@ -427,7 +485,7 @@ async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
   const { data: inserted, error: insertError } = await supabase
     .from("summary_settings")
     .upsert(fallback, { onConflict: "id" })
-    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
+    .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, updated_at")
     .single()
 
   if (insertError) {
@@ -442,6 +500,7 @@ function buildGlobalSettingsPayload(body: unknown): {
   is_enabled: boolean
   message_cleanup_timing: MessageCleanupTiming
   last_delivery_summary_mode: LastDeliverySummaryMode
+  message_retention_days: MessageRetentionDays
   calendar_tomorrow_reminder_enabled: boolean
   calendar_tomorrow_reminder_hours: number[]
   calendar_tomorrow_reminder_only_if_events: boolean
@@ -469,6 +528,7 @@ function buildGlobalSettingsPayload(body: unknown): {
       message: "last_delivery_summary_mode=daily_rollup requires message_cleanup_timing=end_of_day.",
     } satisfies AppError
   }
+  const messageRetentionDays = normalizeMessageRetentionDays(body.message_retention_days)
 
   const reminderEnabled = body.calendar_tomorrow_reminder_enabled
   if (typeof reminderEnabled !== "boolean") {
@@ -495,6 +555,7 @@ function buildGlobalSettingsPayload(body: unknown): {
     delivery_hours: deliveryHours,
     message_cleanup_timing: messageCleanupTiming,
     last_delivery_summary_mode: lastDeliverySummaryMode,
+    message_retention_days: messageRetentionDays,
     calendar_tomorrow_reminder_enabled: reminderEnabled,
     calendar_tomorrow_reminder_hours: reminderHours,
     calendar_tomorrow_reminder_only_if_events: onlyIfEvents,
@@ -508,6 +569,7 @@ function buildRoomSettingsPayload(body: unknown): {
   is_enabled: boolean
   send_room_summary: boolean
   calendar_tomorrow_reminder_enabled: boolean
+  message_search_enabled: boolean
   delivery_hours: number[] | null
   message_cleanup_timing: MessageCleanupTiming | null
   last_delivery_summary_mode: LastDeliverySummaryMode | null
@@ -537,6 +599,12 @@ function buildRoomSettingsPayload(body: unknown): {
   }
   const roomTomorrowReminderEnabled = roomTomorrowReminderEnabledRaw === true
 
+  const messageSearchEnabledRaw = body.message_search_enabled
+  if (messageSearchEnabledRaw != null && typeof messageSearchEnabledRaw !== "boolean") {
+    throw { status: 400, message: "message_search_enabled must be boolean when provided." } satisfies AppError
+  }
+  const messageSearchEnabled = messageSearchEnabledRaw !== false
+
   const roomNameRaw = typeof body.room_name === "string" ? body.room_name.trim() : ""
   const deliveryHours = body.delivery_hours == null ? null : normalizeHours(body.delivery_hours, false)
   if (Array.isArray(deliveryHours) && deliveryHours.length === 0) {
@@ -558,6 +626,7 @@ function buildRoomSettingsPayload(body: unknown): {
     is_enabled: isEnabled,
     send_room_summary: sendRoomSummary,
     calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,
+    message_search_enabled: messageSearchEnabled,
     delivery_hours: deliveryHours,
     message_cleanup_timing: roomCleanupTiming,
     last_delivery_summary_mode: roomSummaryMode,
@@ -605,6 +674,16 @@ function normalizeLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMo
   } satisfies AppError
 }
 
+function normalizeMessageRetentionDays(value: unknown): MessageRetentionDays {
+  if (value == null || value === "") return 60
+  const days = Number(value)
+  if (days === 60 || days === 120 || days === 180) return days
+  throw {
+    status: 400,
+    message: "message_retention_days must be one of 60, 120, or 180.",
+  } satisfies AppError
+}
+
 function normalizeOptionalMessageCleanupTiming(value: unknown): MessageCleanupTiming | null {
   if (value == null || value === "") return null
   return normalizeMessageCleanupTiming(value)
@@ -638,6 +717,16 @@ async function parseJson(req: Request): Promise<unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function toSafeString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+function toNonNegativeInteger(value: unknown): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) return 0
+  return Math.floor(parsed)
 }
 
 function clampInt(value: string | null, fallback: number, min: number, max: number): number {

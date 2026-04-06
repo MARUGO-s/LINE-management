@@ -217,6 +217,15 @@ const html = String.raw`<!doctype html>
       margin-top: 8px;
     }
 
+    .meta.usage-summary {
+      color: #9be8ff;
+      font-weight: 700;
+    }
+
+    .meta.usage-details {
+      line-height: 1.45;
+    }
+
     .table-wrap {
       overflow: auto;
       -webkit-overflow-scrolling: touch;
@@ -244,8 +253,8 @@ const html = String.raw`<!doctype html>
     }
 
     .rooms-table {
-      width: max(100%, 1820px);
-      min-width: 1820px;
+      width: max(100%, 1960px);
+      min-width: 1960px;
       table-layout: fixed;
     }
 
@@ -261,10 +270,11 @@ const html = String.raw`<!doctype html>
     .rooms-table th:nth-child(5), .rooms-table td:nth-child(5) { width: 70px; text-align: center; }
     .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 110px; text-align: center; }
     .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 110px; text-align: center; }
-    .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 160px; }
-    .rooms-table th:nth-child(9), .rooms-table td:nth-child(9) { width: 170px; }
-    .rooms-table th:nth-child(10), .rooms-table td:nth-child(10) { width: 150px; }
-    .rooms-table th:nth-child(11), .rooms-table td:nth-child(11) { width: 220px; }
+    .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 90px; text-align: center; }
+    .rooms-table th:nth-child(9), .rooms-table td:nth-child(9) { width: 160px; }
+    .rooms-table th:nth-child(10), .rooms-table td:nth-child(10) { width: 170px; }
+    .rooms-table th:nth-child(11), .rooms-table td:nth-child(11) { width: 150px; }
+    .rooms-table th:nth-child(12), .rooms-table td:nth-child(12) { width: 220px; }
 
     .rooms-table .room-name,
     .rooms-table .room-hours {
@@ -474,13 +484,18 @@ const html = String.raw`<!doctype html>
         <label class="switch"><input id="globalEnabled" type="checkbox">配信を有効化</label>
         <div class="controls" style="margin-top:10px;">
           <input id="globalHoursInput" class="input" type="text" placeholder="例: 12,17,23">
-          <select id="messageCleanupTiming" class="select" aria-label="メッセージ消去タイミング">
-            <option value="after_each_delivery">配信成功ごとに消去（従来）</option>
-            <option value="end_of_day">1日の最終配信後に消去</option>
+          <select id="messageCleanupTiming" class="select" aria-label="メッセージ処理タイミング">
+            <option value="after_each_delivery">配信成功ごとに処理済み化</option>
+            <option value="end_of_day">1日の最終配信後に処理済み化</option>
           </select>
           <select id="lastDeliverySummaryMode" class="select" aria-label="最終配信の集計方式">
             <option value="independent">各回独立で要約（従来）</option>
             <option value="daily_rollup">最終配信のみ1日まとめ</option>
+          </select>
+          <select id="messageRetentionDays" class="select" aria-label="メッセージ保持期間">
+            <option value="60">会話保持: 60日</option>
+            <option value="120">会話保持: 120日</option>
+            <option value="180">会話保持: 180日</option>
           </select>
           <button id="saveGlobalBtn" class="button primary">全体設定を保存</button>
         </div>
@@ -494,6 +509,8 @@ const html = String.raw`<!doctype html>
           <input id="tomorrowReminderMaxItems" class="input narrow" type="number" min="1" max="50" step="1" placeholder="表示件数">
         </div>
         <div id="globalMeta" class="meta"></div>
+        <div id="storageUsageSummary" class="meta usage-summary"></div>
+        <div id="storageUsageDetails" class="meta usage-details"></div>
       </section>
 
       <section class="card logs">
@@ -523,10 +540,11 @@ const html = String.raw`<!doctype html>
           <label class="switch"><input id="newRoomEnabled" type="checkbox" checked>有効</label>
           <label class="switch"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
           <label class="switch"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
-          <select id="newRoomCleanupTiming" class="select" aria-label="ルーム消去タイミング">
-            <option value="">消去: 全体設定を継承</option>
-            <option value="after_each_delivery">消去: 配信成功ごと</option>
-            <option value="end_of_day">消去: 1日の最終配信後</option>
+          <label class="switch"><input id="newRoomMessageSearchEnabled" type="checkbox" checked>会話検索応答</label>
+          <select id="newRoomCleanupTiming" class="select" aria-label="ルーム処理タイミング">
+            <option value="">処理: 全体設定を継承</option>
+            <option value="after_each_delivery">処理: 配信成功ごと</option>
+            <option value="end_of_day">処理: 1日の最終配信後</option>
           </select>
           <select id="newRoomSummaryMode" class="select" aria-label="ルーム最終配信の集計方式">
             <option value="">最終回: 全体設定を継承</option>
@@ -546,8 +564,9 @@ const html = String.raw`<!doctype html>
                 <th>有効</th>
                 <th>ルーム要約配信</th>
                 <th>明日予定配信</th>
+                <th>会話検索応答</th>
                 <th>配信時刻</th>
-                <th>消去タイミング</th>
+                <th>処理タイミング</th>
                 <th>最終回集計</th>
                 <th>操作</th>
               </tr>
@@ -590,12 +609,15 @@ const html = String.raw`<!doctype html>
       globalHoursInput: document.getElementById('globalHoursInput'),
       messageCleanupTiming: document.getElementById('messageCleanupTiming'),
       lastDeliverySummaryMode: document.getElementById('lastDeliverySummaryMode'),
+      messageRetentionDays: document.getElementById('messageRetentionDays'),
       tomorrowReminderEnabled: document.getElementById('tomorrowReminderEnabled'),
       tomorrowReminderHoursInput: document.getElementById('tomorrowReminderHoursInput'),
       tomorrowReminderOnlyIfEvents: document.getElementById('tomorrowReminderOnlyIfEvents'),
       tomorrowReminderMaxItems: document.getElementById('tomorrowReminderMaxItems'),
       saveGlobalBtn: document.getElementById('saveGlobalBtn'),
       globalMeta: document.getElementById('globalMeta'),
+      storageUsageSummary: document.getElementById('storageUsageSummary'),
+      storageUsageDetails: document.getElementById('storageUsageDetails'),
       roomTableBody: document.getElementById('roomTableBody'),
       logTableBody: document.getElementById('logTableBody'),
       newRoomId: document.getElementById('newRoomId'),
@@ -604,6 +626,7 @@ const html = String.raw`<!doctype html>
       newRoomEnabled: document.getElementById('newRoomEnabled'),
       newRoomSendSummary: document.getElementById('newRoomSendSummary'),
       newRoomTomorrowReminder: document.getElementById('newRoomTomorrowReminder'),
+      newRoomMessageSearchEnabled: document.getElementById('newRoomMessageSearchEnabled'),
       newRoomCleanupTiming: document.getElementById('newRoomCleanupTiming'),
       newRoomSummaryMode: document.getElementById('newRoomSummaryMode'),
       addRoomBtn: document.getElementById('addRoomBtn'),
@@ -668,6 +691,15 @@ const html = String.raw`<!doctype html>
       const dt = new Date(iso);
       if (Number.isNaN(dt.getTime())) return '-';
       return dt.toLocaleString('ja-JP', { hour12: false });
+    }
+
+    function formatBytes(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) return '-';
+      if (n < 1024) return Math.floor(n) + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB';
+      return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
     }
 
     function statusTag(status) {
@@ -784,6 +816,10 @@ const html = String.raw`<!doctype html>
       dom.lastDeliverySummaryMode.value = settings.last_delivery_summary_mode === 'daily_rollup'
         ? 'daily_rollup'
         : 'independent';
+      const retentionDays = Number(settings.message_retention_days);
+      dom.messageRetentionDays.value = (retentionDays === 60 || retentionDays === 120 || retentionDays === 180)
+        ? String(retentionDays)
+        : '60';
       dom.tomorrowReminderEnabled.checked = settings.calendar_tomorrow_reminder_enabled !== false;
       dom.tomorrowReminderHoursInput.value = Array.isArray(settings.calendar_tomorrow_reminder_hours)
         ? settings.calendar_tomorrow_reminder_hours.join(',')
@@ -801,6 +837,7 @@ const html = String.raw`<!doctype html>
         '配信回数: ' + count + '回/日'
         + '  |  消去: ' + cleanupTimingLabel(dom.messageCleanupTiming.value)
         + '  |  最終回: ' + summaryModeLabel(dom.lastDeliverySummaryMode.value)
+        + '  |  会話保持: ' + dom.messageRetentionDays.value + '日'
         + '  |  翌日予定通知: '
         + (dom.tomorrowReminderEnabled.checked ? ('ON (' + reminderHours + '時)') : 'OFF')
         + '  |  予定なし時: '
@@ -830,6 +867,41 @@ const html = String.raw`<!doctype html>
       }
     }
 
+    function renderStorageUsage(storageUsage, storageUsageError, generatedAt) {
+      if (storageUsageError) {
+        dom.storageUsageSummary.textContent = 'DB使用容量: 取得失敗';
+        dom.storageUsageDetails.textContent = storageUsageError;
+        return;
+      }
+
+      if (!storageUsage || typeof storageUsage !== 'object') {
+        dom.storageUsageSummary.textContent = 'DB使用容量: 取得待ち';
+        dom.storageUsageDetails.textContent = '';
+        return;
+      }
+
+      const managedPretty = storageUsage.managed_tables_total_pretty || formatBytes(storageUsage.managed_tables_total_bytes);
+      const dbPretty = storageUsage.database_size_pretty || formatBytes(storageUsage.database_size_bytes);
+      dom.storageUsageSummary.textContent =
+        'DB使用容量（対象テーブル合計）: ' + managedPretty + ' / DB全体: ' + dbPretty;
+
+      const tableRows = Array.isArray(storageUsage.managed_tables) ? storageUsage.managed_tables : [];
+      if (tableRows.length === 0) {
+        dom.storageUsageDetails.textContent = 'テーブル内訳: なし | 更新: ' + formatDate(generatedAt);
+        return;
+      }
+
+      const detailText = tableRows
+        .slice(0, 8)
+        .map(function(row) {
+          const name = row && row.table_name ? String(row.table_name) : '-';
+          const size = row && row.size_pretty ? String(row.size_pretty) : formatBytes(row ? row.size_bytes : 0);
+          return name + ': ' + size;
+        })
+        .join(' | ');
+      dom.storageUsageDetails.textContent = 'テーブル内訳: ' + detailText + ' | 更新: ' + formatDate(generatedAt);
+    }
+
     function renderRooms(roomOverview, roomSettings) {
       const settingsMap = new Map();
       if (Array.isArray(roomSettings)) {
@@ -839,7 +911,7 @@ const html = String.raw`<!doctype html>
       dom.roomTableBody.innerHTML = '';
       const rooms = Array.isArray(roomOverview) ? roomOverview : [];
       if (rooms.length === 0) {
-        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="11">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
+        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="12">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
         return;
       }
 
@@ -855,11 +927,12 @@ const html = String.raw`<!doctype html>
           '<td><input class="room-enabled room-check" type="checkbox" aria-label="有効" ' + (((setting ? setting.is_enabled : room.settings_enabled) !== false) ? 'checked' : '') + '></td>' +
           '<td><input class="room-send-summary room-check" type="checkbox" aria-label="ルーム要約配信" ' + ((setting && setting.send_room_summary === true) ? 'checked' : '') + '></td>' +
           '<td><input class="room-tomorrow-reminder room-check" type="checkbox" aria-label="明日予定配信" ' + ((setting && setting.calendar_tomorrow_reminder_enabled === true) ? 'checked' : '') + '></td>' +
+          '<td><input class="room-message-search-enabled room-check" type="checkbox" aria-label="会話検索応答" ' + (((setting && setting.message_search_enabled) !== false) ? 'checked' : '') + '></td>' +
           '<td><input class="input room-hours" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : ROOM_DEFAULT_HOURS) + '"></td>' +
           '<td><select class="select room-cleanup-timing">' +
           '<option value="" ' + (((setting && setting.message_cleanup_timing) ? '' : 'selected')) + '>継承</option>' +
-          '<option value="after_each_delivery" ' + ((setting && setting.message_cleanup_timing === 'after_each_delivery') ? 'selected' : '') + '>配信ごと</option>' +
-          '<option value="end_of_day" ' + ((setting && setting.message_cleanup_timing === 'end_of_day') ? 'selected' : '') + '>最終配信後</option>' +
+          '<option value="after_each_delivery" ' + ((setting && setting.message_cleanup_timing === 'after_each_delivery') ? 'selected' : '') + '>配信ごとに処理</option>' +
+          '<option value="end_of_day" ' + ((setting && setting.message_cleanup_timing === 'end_of_day') ? 'selected' : '') + '>最終配信後に処理</option>' +
           '</select></td>' +
           '<td><select class="select room-summary-mode">' +
           '<option value="" ' + (((setting && setting.last_delivery_summary_mode) ? '' : 'selected')) + '>継承</option>' +
@@ -916,6 +989,7 @@ const html = String.raw`<!doctype html>
       renderGlobal(state.global_settings || {});
       renderLogs(state.delivery_logs || []);
       renderRooms(state.room_overview || [], state.room_settings || []);
+      renderStorageUsage(state.storage_usage, state.storage_usage_error, state.generated_at);
       dom.lastRefresh.textContent = '最終更新: ' + formatDate(state.generated_at);
     }
 
@@ -930,6 +1004,7 @@ const html = String.raw`<!doctype html>
         delivery_hours: parseHoursInput(dom.globalHoursInput.value, false),
         message_cleanup_timing: dom.messageCleanupTiming.value,
         last_delivery_summary_mode: dom.lastDeliverySummaryMode.value,
+        message_retention_days: Number(dom.messageRetentionDays.value),
         calendar_tomorrow_reminder_enabled: !!dom.tomorrowReminderEnabled.checked,
         calendar_tomorrow_reminder_hours: parseHoursInput(dom.tomorrowReminderHoursInput.value, false),
         calendar_tomorrow_reminder_only_if_events: dom.tomorrowReminderOnlyIfEvents.value === 'true',
@@ -945,12 +1020,12 @@ const html = String.raw`<!doctype html>
 
     function validateGlobalModeCombination() {
       if (dom.lastDeliverySummaryMode.value === 'daily_rollup' && dom.messageCleanupTiming.value !== 'end_of_day') {
-        throw new Error('「最終配信のみ1日まとめ」を使う場合、消去タイミングは「1日の最終配信後に消去」を選択してください。');
+        throw new Error('「最終配信のみ1日まとめ」を使う場合、処理タイミングは「1日の最終配信後に処理済み化」を選択してください。');
       }
     }
 
     function cleanupTimingLabel(value) {
-      return value === 'end_of_day' ? '1日の最終配信後' : '配信成功ごと';
+      return value === 'end_of_day' ? '1日の最終配信後に処理' : '配信成功ごとに処理';
     }
 
     function summaryModeLabel(value) {
@@ -963,6 +1038,7 @@ const html = String.raw`<!doctype html>
       const enabledInput = tr.querySelector('.room-enabled');
       const sendSummaryInput = tr.querySelector('.room-send-summary');
       const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
+      const messageSearchEnabledInput = tr.querySelector('.room-message-search-enabled');
       const hoursInput = tr.querySelector('.room-hours');
       const cleanupTimingInput = tr.querySelector('.room-cleanup-timing');
       const summaryModeInput = tr.querySelector('.room-summary-mode');
@@ -975,6 +1051,7 @@ const html = String.raw`<!doctype html>
         is_enabled: !!(enabledInput && enabledInput.checked),
         send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
         calendar_tomorrow_reminder_enabled: !!(tomorrowReminderInput && tomorrowReminderInput.checked),
+        message_search_enabled: !!(messageSearchEnabledInput && messageSearchEnabledInput.checked),
         delivery_hours: parseHoursInput(hoursInput ? hoursInput.value : '', true),
         message_cleanup_timing: roomCleanupTiming,
         last_delivery_summary_mode: roomSummaryMode,
@@ -1019,6 +1096,7 @@ const html = String.raw`<!doctype html>
         is_enabled: !!dom.newRoomEnabled.checked,
         send_room_summary: !!dom.newRoomSendSummary.checked,
         calendar_tomorrow_reminder_enabled: !!dom.newRoomTomorrowReminder.checked,
+        message_search_enabled: !!dom.newRoomMessageSearchEnabled.checked,
         delivery_hours: parseHoursInput(dom.newRoomHours.value, true),
         message_cleanup_timing: normalizeOptionalSelectValue(dom.newRoomCleanupTiming.value),
         last_delivery_summary_mode: normalizeOptionalSelectValue(dom.newRoomSummaryMode.value),
@@ -1035,6 +1113,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomEnabled.checked = true;
       dom.newRoomSendSummary.checked = false;
       dom.newRoomTomorrowReminder.checked = false;
+      dom.newRoomMessageSearchEnabled.checked = true;
       dom.newRoomCleanupTiming.value = '';
       dom.newRoomSummaryMode.value = '';
       await safeLoadState();
@@ -1052,7 +1131,7 @@ const html = String.raw`<!doctype html>
         || 'after_each_delivery';
       const effectiveCleanup = roomCleanupTiming || fallbackCleanup;
       if (effectiveCleanup !== 'end_of_day') {
-        throw new Error('ルーム設定で「最終回: 1日まとめ」を使う場合、消去タイミングは「1日の最終配信後」または「継承（全体が最終配信後）」を選択してください。');
+        throw new Error('ルーム設定で「最終回: 1日まとめ」を使う場合、処理タイミングは「1日の最終配信後」または「継承（全体が最終配信後）」を選択してください。');
       }
     }
 
@@ -1098,6 +1177,8 @@ const html = String.raw`<!doctype html>
       dom.logTableBody.innerHTML = '';
       dom.roomTableBody.innerHTML = '';
       dom.globalMeta.textContent = '';
+      dom.storageUsageSummary.textContent = '';
+      dom.storageUsageDetails.textContent = '';
       dom.lastRefresh.textContent = '最終更新: なし';
     });
 
@@ -1184,6 +1265,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomEnabled,
       dom.newRoomSendSummary,
       dom.newRoomTomorrowReminder,
+      dom.newRoomMessageSearchEnabled,
       dom.newRoomCleanupTiming,
       dom.newRoomSummaryMode,
     ].forEach(function(el) {

@@ -95,6 +95,26 @@ type CalendarCreateResult =
   | { ok: true; summary: string; startDate: Date; endDate: Date }
   | { ok: false; error: string }
 
+type MessageRetentionDays = 60 | 120 | 180
+
+type MessageSearchCommand = {
+  kind: 'search_messages'
+  keyword: string
+  days: MessageRetentionDays
+}
+
+type MessageSearchParseResult = {
+  matched: boolean
+  command: MessageSearchCommand | null
+  error: string | null
+}
+
+type SearchMessageRow = {
+  content: string
+  created_at: string
+  user_id: string | null
+}
+
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 const DEFAULT_DURATION_MIN = 60
 const MAX_DURATION_MIN = 720
@@ -108,6 +128,10 @@ const PENDING_CONFIRMATION_TTL_MIN = 30
 const CALENDAR_PENDING_TABLE = 'calendar_pending_confirmations'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
 const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
+const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 60
+const SEARCH_MAX_FETCH_ROWS = 800
+const SEARCH_MAX_SUMMARY_ROWS = 120
+const SEARCH_MAX_PREVIEW_ROWS = 5
 const KEYWORD_SYNONYM_GROUPS = [
   ['ミーティング', 'meeting', 'mtg', '会議', '打ち合わせ', '打合せ', '商談'],
   ['試飲会', '試飲', 'テイスティング', 'tasting'],
@@ -168,6 +192,8 @@ Deno.serve(async (req) => {
     const aiAutoCreateEnabled = parseBooleanEnv(Deno.env.get('CALENDAR_AI_AUTO_CREATE_ENABLED'))
     const calendarEnvState = loadCalendarEnv()
     const roomNameSyncDone = new Set<string>()
+    const roomMessageSearchEnabledCache = new Map<string, boolean>()
+    const messageRetentionDays = await loadMessageRetentionDays(supabase)
 
     for (const event of events) {
       if (event.type !== 'message') continue
@@ -209,6 +235,40 @@ Deno.serve(async (req) => {
             }
             continue
           }
+        }
+
+        const messageSearchParse = parseMessageSearchCommand(text, messageRetentionDays)
+        if (messageSearchParse.matched) {
+          const messageSearchEnabled = await loadRoomMessageSearchEnabled(
+            supabase,
+            roomId,
+            roomMessageSearchEnabledCache,
+          )
+          if (!messageSearchEnabled) {
+            continue
+          }
+
+          const replyMessage = await buildMessageSearchReply(
+            messageSearchParse,
+            supabase,
+            roomId,
+            messageRetentionDays,
+            groqApiKey,
+          )
+
+          if (!lineAccessToken) {
+            console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search.')
+            continue
+          }
+          if (!replyToken) {
+            console.error('Missing replyToken for message search.')
+            continue
+          }
+          const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
+          if (!replyResult.ok) {
+            console.error('Failed to reply message search:', replyResult.error)
+          }
+          continue
         }
 
         const commandParse = parseCalendarCommand(text)
@@ -521,6 +581,286 @@ async function fetchLineJson(url: string, lineAccessToken: string): Promise<any 
 function normalizeDisplayName(value: unknown): string | null {
   const normalized = String(value ?? '').replace(/\u3000/g, ' ').replace(/\s+/g, ' ').trim()
   return normalized || null
+}
+
+async function loadMessageRetentionDays(
+  supabase: ReturnType<typeof createClient>,
+): Promise<MessageRetentionDays> {
+  try {
+    const { data, error } = await supabase
+      .from('summary_settings')
+      .select('message_retention_days')
+      .eq('id', 1)
+      .maybeSingle()
+    if (error) {
+      console.error('Failed to load message_retention_days:', error.message)
+      return DEFAULT_MESSAGE_RETENTION_DAYS
+    }
+    return normalizeMessageRetentionDays(data?.message_retention_days)
+  } catch (err) {
+    console.error('Unexpected error while loading message_retention_days:', err)
+    return DEFAULT_MESSAGE_RETENTION_DAYS
+  }
+}
+
+function normalizeMessageRetentionDays(value: unknown): MessageRetentionDays {
+  const days = Number(value)
+  if (days === 60 || days === 120 || days === 180) return days
+  return DEFAULT_MESSAGE_RETENTION_DAYS
+}
+
+async function loadRoomMessageSearchEnabled(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  cache: Map<string, boolean>,
+): Promise<boolean> {
+  const normalizedRoomId = String(roomId ?? '').trim()
+  if (!normalizedRoomId || normalizedRoomId === 'unknown') return true
+  if (cache.has(normalizedRoomId)) return cache.get(normalizedRoomId) !== false
+
+  try {
+    const { data, error } = await supabase
+      .from('room_summary_settings')
+      .select('message_search_enabled')
+      .eq('room_id', normalizedRoomId)
+      .maybeSingle()
+
+    if (error) {
+      console.error(`Failed to load message_search_enabled for ${normalizedRoomId}:`, error.message)
+      cache.set(normalizedRoomId, true)
+      return true
+    }
+
+    const enabled = data?.message_search_enabled !== false
+    cache.set(normalizedRoomId, enabled)
+    return enabled
+  } catch (err) {
+    console.error(`Unexpected error while loading message_search_enabled for ${normalizedRoomId}:`, err)
+    cache.set(normalizedRoomId, true)
+    return true
+  }
+}
+
+function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentionDays): MessageSearchParseResult {
+  const text = normalizeSpaces(rawText)
+  if (!text) return { matched: false, command: null, error: null }
+
+  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
+  const hasExplicitPrefix = /^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)
+  const hasConversationHint = /(会話|トーク|履歴|チャット)/.test(compact)
+  const hasQueryIntent = /(検索|探し|探して|探す|要約|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい)/.test(compact)
+  if (!hasExplicitPrefix && !(hasConversationHint && hasQueryIntent)) {
+    return { matched: false, command: null, error: null }
+  }
+
+  const requestedDays = detectMessageSearchDays(compact) ?? defaultDays
+  const keyword = extractMessageSearchKeyword(text)
+  if (!keyword) {
+    return {
+      matched: true,
+      command: null,
+      error: [
+        '会話検索のキーワードを指定してください。',
+        '例: 会話検索 試飲会',
+        '例: 会話検索 120日 発注',
+      ].join('\n'),
+    }
+  }
+
+  return {
+    matched: true,
+    command: {
+      kind: 'search_messages',
+      keyword,
+      days: requestedDays,
+    },
+    error: null,
+  }
+}
+
+function detectMessageSearchDays(compactText: string): MessageRetentionDays | null {
+  if (/(180日|半年|6ヶ月|6か月|六ヶ月)/.test(compactText)) return 180
+  if (/(120日|4ヶ月|4か月|四ヶ月)/.test(compactText)) return 120
+  if (/(60日|2ヶ月|2か月|二ヶ月)/.test(compactText)) return 60
+  return null
+}
+
+function extractMessageSearchKeyword(rawText: string): string {
+  const stripped = normalizeForRuleParsing(rawText)
+    .replace(/(180日|120日|60日|半年|6ヶ月|6か月|六ヶ月|4ヶ月|4か月|四ヶ月|2ヶ月|2か月|二ヶ月)/g, ' ')
+    .replace(/(過去|最近|直近|以内|分|間)/g, ' ')
+    .replace(/(会話|トーク|履歴|チャット)/g, ' ')
+    .replace(/(検索|探し|探して|探す|要約|まとめ|教えて|見せて|みせて|確認|表示|表示して|出して|だして)/g, ' ')
+    .replace(/(を|は|が|に|で|の|から|だけ|について|して|ください|下さい|お願いします|お願い)/g, ' ')
+    .replace(/[?？!！。．、,]/g, ' ')
+  return normalizeKeywordForFilter(stripped)
+}
+
+async function buildMessageSearchReply(
+  parseResult: MessageSearchParseResult,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  configuredRetentionDays: MessageRetentionDays,
+  groqApiKey: string,
+): Promise<string> {
+  if (parseResult.error) return parseResult.error
+  if (!parseResult.command) return '会話検索コマンドを解釈できませんでした。'
+
+  const command = parseResult.command
+  const effectiveDays = command.days > configuredRetentionDays ? configuredRetentionDays : command.days
+  const sinceIso = new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
+
+  const { data, error } = await supabase
+    .from('line_messages')
+    .select('content, created_at, user_id')
+    .eq('room_id', roomId)
+    .gte('created_at', sinceIso)
+    .order('created_at', { ascending: false })
+    .limit(SEARCH_MAX_FETCH_ROWS)
+
+  if (error) {
+    return `会話検索に失敗しました。${error.message}`
+  }
+
+  const rows: SearchMessageRow[] = Array.isArray(data)
+    ? data.map((row: any) => ({
+        content: String(row?.content ?? ''),
+        created_at: String(row?.created_at ?? ''),
+        user_id: row?.user_id == null ? null : String(row.user_id),
+      }))
+    : []
+
+  const hits = rows.filter((row) => messageMatchesKeyword(row.content, command.keyword))
+  if (hits.length === 0) {
+    const lines = [`「${command.keyword}」に一致する会話はありません（過去${effectiveDays}日）`]
+    if (effectiveDays !== command.days) {
+      lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
+    }
+    return lines.join('\n')
+  }
+
+  const summary = await summarizeMessageSearchHitsWithGroq(
+    hits.slice(0, SEARCH_MAX_SUMMARY_ROWS),
+    command.keyword,
+    effectiveDays,
+    groqApiKey,
+  )
+
+  const previewRows = hits.slice(0, SEARCH_MAX_PREVIEW_ROWS)
+  const lines: string[] = [
+    `会話検索結果（過去${effectiveDays}日 / キーワード: ${command.keyword}）`,
+    `一致: ${hits.length}件`,
+  ]
+  if (effectiveDays !== command.days) {
+    lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
+  }
+  if (rows.length >= SEARCH_MAX_FETCH_ROWS) {
+    lines.push(`※検索対象が多いため、新しい順で先頭${SEARCH_MAX_FETCH_ROWS}件を対象にしています。`)
+  }
+  if (summary) {
+    lines.push('')
+    lines.push('要約:')
+    lines.push(summary)
+  }
+  lines.push('')
+  lines.push('一致メッセージ（新しい順）:')
+  for (let i = 0; i < previewRows.length; i += 1) {
+    lines.push(`${i + 1}. ${formatMessageSearchPreview(previewRows[i])}`)
+  }
+  if (hits.length > previewRows.length) {
+    lines.push(`…ほか ${hits.length - previewRows.length}件`)
+  }
+  return lines.join('\n')
+}
+
+function formatMessageSearchPreview(row: SearchMessageRow): string {
+  const date = formatSearchDateTime(row.created_at)
+  const content = normalizeInlineText(String(row.content ?? ''))
+  const compact = content.length > 90 ? `${content.slice(0, 90)}...` : (content || '（内容なし）')
+  return `${date} ${compact}`
+}
+
+function formatSearchDateTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '(時刻不明)'
+  return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(date)
+}
+
+async function summarizeMessageSearchHitsWithGroq(
+  rows: SearchMessageRow[],
+  keyword: string,
+  days: number,
+  groqApiKey: string,
+): Promise<string | null> {
+  if (!groqApiKey || rows.length === 0) return null
+
+  try {
+    const chronologicalRows = [...rows].reverse()
+    const transcript = chronologicalRows
+      .map((row, index) => {
+        const content = normalizeInlineText(String(row.content ?? '')).replace(/\s+/g, ' ')
+        const short = content.length > 180 ? `${content.slice(0, 180)}...` : content
+        return `[${index + 1}] ${formatSearchDateTime(row.created_at)} ${short}`
+      })
+      .join('\n')
+
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${groqApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0.2,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'あなたはLINE会話検索結果の要約アシスタントです。',
+              '入力はキーワード一致した発言のみです。',
+              '日本語で、3〜5行で簡潔に要点を要約してください。',
+              '日時や依頼事項、結論があれば必ず含めてください。',
+            ].join('\n'),
+          },
+          {
+            role: 'user',
+            content: [
+              `検索キーワード: ${keyword}`,
+              `検索範囲: 過去${days}日`,
+              '以下を要約してください:',
+              transcript,
+            ].join('\n\n'),
+          },
+        ],
+      }),
+    })
+
+    if (!response.ok) {
+      const err = await response.text()
+      console.error('Groq message-search summary failed:', response.status, err)
+      return null
+    }
+
+    const json = await response.json()
+    const content = normalizeInlineText(String(json?.choices?.[0]?.message?.content ?? ''))
+    if (!content) return null
+    return content.length > 900 ? `${content.slice(0, 900)}...` : content
+  } catch (err) {
+    console.error('Failed to summarize message search hits with Groq:', err)
+    return null
+  }
+}
+
+function messageMatchesKeyword(content: string, keyword: string): boolean {
+  return keywordMatchesHaystacks(keyword, [String(content ?? '')])
 }
 
 function looksLikeCalendarCandidate(text: string): boolean {
@@ -2039,9 +2379,6 @@ function formatTimeOnlyForLine(date: Date, timezone: string): string {
 }
 
 function eventMatchesKeyword(event: GoogleCalendarEvent, keyword: string): boolean {
-  const normalizedKeyword = normalizeKeywordForSearch(keyword)
-  if (!normalizedKeyword) return true
-
   const haystacks: string[] = []
   haystacks.push(String(event.summary ?? ''))
   haystacks.push(String(event.description ?? ''))
@@ -2053,6 +2390,12 @@ function eventMatchesKeyword(event: GoogleCalendarEvent, keyword: string): boole
       haystacks.push(String(attendee?.email ?? ''))
     }
   }
+  return keywordMatchesHaystacks(keyword, haystacks)
+}
+
+function keywordMatchesHaystacks(keyword: string, haystacks: string[]): boolean {
+  const normalizedKeyword = normalizeKeywordForSearch(keyword)
+  if (!normalizedKeyword) return true
 
   const target = normalizeKeywordForSearch(haystacks.join('\n'))
   const compactTarget = compactSearchText(target)

@@ -4,6 +4,7 @@ import { Groq } from "https://esm.sh/groq-sdk@0.5.0"
 
 type MessageCleanupTiming = 'after_each_delivery' | 'end_of_day'
 type LastDeliverySummaryMode = 'independent' | 'daily_rollup'
+type MessageRetentionDays = 60 | 120 | 180
 type MessageUpdateResult = { affectedCount: number; error: Error | null }
 type LineMessageRow = { id: string; room_id: string; content: string; created_at: string }
 type RoomRuntimeSetting = {
@@ -17,10 +18,6 @@ type RoomRuntimeSetting = {
 }
 type RoomExecutionContext = {
   messageIds: string[]
-  cleanupTiming: MessageCleanupTiming
-  summaryMode: LastDeliverySummaryMode
-  isDailyRollup: boolean
-  isEndOfDayCleanup: boolean
 }
 
 type TomorrowReminderSettings = {
@@ -53,6 +50,7 @@ const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar'
 const DEFAULT_TOMORROW_REMINDER_HOURS = [19]
 const DEFAULT_TOMORROW_REMINDER_MAX_ITEMS = 20
+const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 60
 
 Deno.serve(async (req) => {
   let supabase: ReturnType<typeof createClient> | null = null
@@ -82,7 +80,7 @@ Deno.serve(async (req) => {
     // Fetch global settings
     const { data: globalSettings, error: globalSettingsError } = await supabase
       .from('summary_settings')
-      .select('delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items')
+      .select('delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items')
       .eq('id', 1)
       .single();
 
@@ -94,6 +92,7 @@ Deno.serve(async (req) => {
     const globalHours = globalSettings?.delivery_hours ?? [12, 17, 23]
     const messageCleanupTiming = normalizeMessageCleanupTiming(globalSettings?.message_cleanup_timing)
     const lastDeliverySummaryMode = normalizeLastDeliverySummaryMode(globalSettings?.last_delivery_summary_mode)
+    const messageRetentionDays = normalizeMessageRetentionDays(globalSettings?.message_retention_days)
     const tomorrowReminderSettings = normalizeTomorrowReminderSettings(globalSettings)
     const shouldSendOverall = globalEnabled && (forceRun || globalHours.includes(jstHour))
     const lastGlobalHour = getLastScheduledHour(globalHours)
@@ -108,6 +107,17 @@ Deno.serve(async (req) => {
       console.warn(
         'Invalid summary_settings combination detected. daily_rollup requires message_cleanup_timing=end_of_day. Falling back to independent mode.',
       )
+    }
+
+    try {
+      const pruneResult = await pruneMessagesByRetentionDays(supabase, messageRetentionDays, now)
+      if (pruneResult.error) {
+        console.error(`Failed to prune by retention (${messageRetentionDays} days):`, pruneResult.error.message)
+      } else if (pruneResult.affectedCount > 0) {
+        console.log(`Pruned ${pruneResult.affectedCount} LINE messages older than ${messageRetentionDays} days.`)
+      }
+    } catch (pruneErr) {
+      console.error('Unexpected retention-prune error:', pruneErr)
     }
 
     try {
@@ -173,15 +183,6 @@ Deno.serve(async (req) => {
     const dayMessageCount = todayMessages?.length ?? 0
 
     if (queueCount === 0 && dayMessageCount === 0) {
-      let endOfDayPrunedCount = 0
-      if (messageCleanupTiming === 'end_of_day' && shouldSendOverall && isLastGlobalDeliverySlot) {
-        const pruneResult = await pruneProcessedMessagesForDay(supabase, jstDayRange.startIso, jstDayRange.endIso)
-        if (pruneResult.error) {
-          throw new Error(`Error pruning processed messages: ${pruneResult.error.message}`)
-        }
-        endOfDayPrunedCount = pruneResult.affectedCount
-      }
-
       await writeDeliveryLog(supabase, {
         jst_hour: jstHour,
         status: 'no_messages',
@@ -196,9 +197,9 @@ Deno.serve(async (req) => {
         details: {
           force_run: forceRun,
           message_cleanup_timing: messageCleanupTiming,
+          message_retention_days: messageRetentionDays,
           last_delivery_summary_mode: lastDeliverySummaryMode,
           using_daily_rollup_scope: shouldUseOverallDailyRollup,
-          end_of_day_pruned_count: endOfDayPrunedCount,
         },
       })
 
@@ -256,10 +257,6 @@ Deno.serve(async (req) => {
       messagesByRoom[roomId] = sourceMessages.map((msg) => msg.content)
       roomContexts.set(roomId, {
         messageIds: sourceMessages.map((msg) => msg.id),
-        cleanupTiming: effectiveCleanupTiming,
-        summaryMode: effectiveSummaryMode,
-        isDailyRollup: shouldUseRoomDailyRollup,
-        isEndOfDayCleanup: effectiveCleanupTiming === 'end_of_day' && isRoomLastSlot,
       })
     }
 
@@ -577,30 +574,16 @@ Deno.serve(async (req) => {
     const deliveredRoomIds = shouldSendOverall ? roomsToSummarize : successfulRoomDeliveries
     const targetRoomId = (shouldSendOverall ? overallRoomId : roomDeliveryTargets[0]) || null
 
-    const deleteMessageIds = new Set<string>()
     const markProcessedMessageIds = new Set<string>()
-    const endOfDayDeleteRoomIds = new Set<string>()
 
     for (const roomId of deliveredRoomIds) {
       const context = roomContexts.get(roomId)
       if (!context) continue
-
-      if (context.cleanupTiming === 'after_each_delivery') {
-        for (const id of context.messageIds) deleteMessageIds.add(id)
-        continue
-      }
-
-      if (context.isEndOfDayCleanup) {
-        endOfDayDeleteRoomIds.add(roomId)
-      } else {
-        for (const id of context.messageIds) markProcessedMessageIds.add(id)
-      }
+      for (const id of context.messageIds) markProcessedMessageIds.add(id)
     }
 
     let affectedCount = 0
-    let deletedCount = 0
     let markedProcessedCount = 0
-    let endOfDayDeletedCount = 0
     let cleanupAction: 'deleted' | 'marked_processed' | 'end_of_day_deleted' | 'mixed' | 'none' = 'none'
 
     const writeDbUpdateFailure = async (reason: string) => {
@@ -626,22 +609,11 @@ Deno.serve(async (req) => {
           last_delivery_summary_mode: lastDeliverySummaryMode,
           using_daily_rollup_scope: shouldUseOverallDailyRollup,
           room_cleanup_breakdown: {
-            delete_message_ids: deleteMessageIds.size,
             mark_processed_message_ids: markProcessedMessageIds.size,
-            end_of_day_room_ids: endOfDayDeleteRoomIds.size,
+            message_retention_days: messageRetentionDays,
           },
         },
       })
-    }
-
-    if (deleteMessageIds.size > 0) {
-      const result = await deleteMessagesByIds(supabase, Array.from(deleteMessageIds))
-      if (result.error) {
-        await writeDbUpdateFailure(result.error.message)
-        throw new Error(`Error deleting delivered messages: ${result.error.message}`)
-      }
-      deletedCount = result.affectedCount
-      affectedCount += result.affectedCount
     }
 
     if (markProcessedMessageIds.size > 0) {
@@ -654,47 +626,14 @@ Deno.serve(async (req) => {
       affectedCount += result.affectedCount
     }
 
-    if (endOfDayDeleteRoomIds.size > 0) {
-      const result = await deleteMessagesForDayByRooms(
-        supabase,
-        Array.from(endOfDayDeleteRoomIds),
-        jstDayRange.startIso,
-        jstDayRange.endIso,
-      )
-      if (result.error) {
-        await writeDbUpdateFailure(result.error.message)
-        throw new Error(`Error deleting end-of-day messages: ${result.error.message}`)
-      }
-      endOfDayDeletedCount = result.affectedCount
-      affectedCount += result.affectedCount
-    }
-
-    const actionKinds = [
-      deleteMessageIds.size > 0 ? 'deleted' : null,
-      markProcessedMessageIds.size > 0 ? 'marked_processed' : null,
-      endOfDayDeleteRoomIds.size > 0 ? 'end_of_day_deleted' : null,
-    ].filter((value): value is 'deleted' | 'marked_processed' | 'end_of_day_deleted' => value != null)
-
-    if (actionKinds.length === 0) {
-      cleanupAction = 'none'
-    } else if (actionKinds.length === 1) {
-      cleanupAction = actionKinds[0]
-    } else {
-      cleanupAction = 'mixed'
-    }
+    cleanupAction = markProcessedMessageIds.size > 0 ? 'marked_processed' : 'none'
 
     const hasRoomFailures = failedRoomDeliveries.length > 0
     const successReason = hasRoomFailures
       ? 'Overall delivery succeeded, but some room-summary deliveries failed.'
-      : cleanupAction === 'deleted'
-        ? 'Scheduled deliveries succeeded and delivered messages were deleted.'
-        : cleanupAction === 'marked_processed'
-          ? 'Scheduled deliveries succeeded and delivered messages were marked as processed.'
-          : cleanupAction === 'end_of_day_deleted'
-            ? 'Scheduled deliveries succeeded and day-end messages were deleted.'
-            : cleanupAction === 'mixed'
-              ? 'Scheduled deliveries succeeded and room-specific cleanup actions were applied.'
-            : 'Deliveries succeeded but there were no message rows to update.'
+      : cleanupAction === 'marked_processed'
+        ? 'Scheduled deliveries succeeded and delivered messages were marked as processed.'
+        : 'Deliveries succeeded but there were no message rows to update.'
 
     await writeDeliveryLog(supabase, {
       jst_hour: jstHour,
@@ -715,10 +654,9 @@ Deno.serve(async (req) => {
         room_delivery_failed: failedRoomDeliveries,
         force_run: forceRun,
         cleanup_action: cleanupAction,
-        cleanup_deleted_count: deletedCount,
         cleanup_marked_processed_count: markedProcessedCount,
-        cleanup_end_of_day_deleted_count: endOfDayDeletedCount,
         message_cleanup_timing: messageCleanupTiming,
+        message_retention_days: messageRetentionDays,
         last_delivery_summary_mode: lastDeliverySummaryMode,
         using_daily_rollup_scope: shouldUseOverallDailyRollup,
       },
@@ -1348,6 +1286,12 @@ function normalizeLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMo
   return value === 'daily_rollup' ? 'daily_rollup' : 'independent'
 }
 
+function normalizeMessageRetentionDays(value: unknown): MessageRetentionDays {
+  const days = Number(value)
+  if (days === 60 || days === 120 || days === 180) return days
+  return DEFAULT_MESSAGE_RETENTION_DAYS
+}
+
 function normalizeTomorrowReminderSettings(value: any): TomorrowReminderSettings {
   const enabled = value?.calendar_tomorrow_reminder_enabled !== false
   const rawHours = Array.isArray(value?.calendar_tomorrow_reminder_hours)
@@ -1440,17 +1384,25 @@ function getJstDayRange(base: Date): { startIso: string; endIso: string } {
   }
 }
 
-async function deleteMessagesByIds(
+async function pruneMessagesByRetentionDays(
   supabase: ReturnType<typeof createClient>,
-  messageIds: string[],
+  retentionDays: MessageRetentionDays,
+  now = new Date(),
 ): Promise<MessageUpdateResult> {
-  if (messageIds.length === 0) return { affectedCount: 0, error: null }
-  const { error } = await supabase
+  const cutoffIso = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000).toISOString()
+  const { count, error: countError } = await supabase
+    .from('line_messages')
+    .select('id', { head: true, count: 'exact' })
+    .lt('created_at', cutoffIso)
+  if (countError) return { affectedCount: 0, error: new Error(countError.message) }
+  if (!count || count <= 0) return { affectedCount: 0, error: null }
+
+  const { error: deleteError } = await supabase
     .from('line_messages')
     .delete()
-    .in('id', messageIds)
-  if (error) return { affectedCount: 0, error: new Error(error.message) }
-  return { affectedCount: messageIds.length, error: null }
+    .lt('created_at', cutoffIso)
+  if (deleteError) return { affectedCount: 0, error: new Error(deleteError.message) }
+  return { affectedCount: count, error: null }
 }
 
 async function markMessagesProcessedByIds(
@@ -1464,55 +1416,4 @@ async function markMessagesProcessedByIds(
     .in('id', messageIds)
   if (error) return { affectedCount: 0, error: new Error(error.message) }
   return { affectedCount: messageIds.length, error: null }
-}
-
-async function deleteMessagesForDayByRooms(
-  supabase: ReturnType<typeof createClient>,
-  roomIds: string[],
-  dayStartIso: string,
-  dayEndIso: string,
-): Promise<MessageUpdateResult> {
-  if (roomIds.length === 0) return { affectedCount: 0, error: null }
-
-  const { count, error: countError } = await supabase
-    .from('line_messages')
-    .select('id', { head: true, count: 'exact' })
-    .in('room_id', roomIds)
-    .gte('created_at', dayStartIso)
-    .lt('created_at', dayEndIso)
-  if (countError) return { affectedCount: 0, error: new Error(countError.message) }
-  if (!count || count <= 0) return { affectedCount: 0, error: null }
-
-  const { error: deleteError } = await supabase
-    .from('line_messages')
-    .delete()
-    .in('room_id', roomIds)
-    .gte('created_at', dayStartIso)
-    .lt('created_at', dayEndIso)
-  if (deleteError) return { affectedCount: 0, error: new Error(deleteError.message) }
-  return { affectedCount: count, error: null }
-}
-
-async function pruneProcessedMessagesForDay(
-  supabase: ReturnType<typeof createClient>,
-  dayStartIso: string,
-  dayEndIso: string,
-): Promise<MessageUpdateResult> {
-  const { count, error: countError } = await supabase
-    .from('line_messages')
-    .select('id', { head: true, count: 'exact' })
-    .eq('processed', true)
-    .gte('created_at', dayStartIso)
-    .lt('created_at', dayEndIso)
-  if (countError) return { affectedCount: 0, error: new Error(countError.message) }
-  if (!count || count <= 0) return { affectedCount: 0, error: null }
-
-  const { error: deleteError } = await supabase
-    .from('line_messages')
-    .delete()
-    .eq('processed', true)
-    .gte('created_at', dayStartIso)
-    .lt('created_at', dayEndIso)
-  if (deleteError) return { affectedCount: 0, error: new Error(deleteError.message) }
-  return { affectedCount: count, error: null }
 }
