@@ -1089,10 +1089,13 @@ function detectMessageSearchDays(compactText: string): MessageRetentionDays | nu
 }
 
 function detectMessageSearchScope(compactText: string): MessageSearchScope {
+  if (/(このルーム|このグループ|当ルーム|当グループ|このトーク|この会話)/.test(compactText)) {
+    return 'current_room'
+  }
   if (/(全ルーム|他ルーム|他のルーム|別ルーム|別のルーム|全グループ|他グループ|別グループ|別のグループ)/.test(compactText)) {
     return 'all_rooms'
   }
-  return 'current_room'
+  return 'all_rooms'
 }
 
 function extractMessageSearchKeyword(rawText: string): string {
@@ -1144,7 +1147,9 @@ async function extractMessageSearchIntentWithGroq(
               'JSONのみ返してください。説明文やコードブロックは禁止です。',
               `days は 60/120/180 のいずれか。未指定時は ${defaultDays}。`,
               'scope は current_room または all_rooms。',
+              'scopeが明示されない場合は all_rooms を返してください。',
               '「他のルーム」「全ルーム」「別グループ」等の意図がある場合は all_rooms。',
+              '「このルーム」「このグループ」等の意図がある場合は current_room。',
               'keyword は検索に使う短い語句のみ。',
               '返却JSONスキーマ:',
               '{"should_search":boolean,"keyword":string,"days":60|120|180,"scope":"current_room|all_rooms","confidence":number(0-1)}',
@@ -1198,10 +1203,13 @@ async function extractMessageSearchIntentWithGroq(
 
 function normalizeAiMessageSearchScope(raw: string): MessageSearchScope {
   const value = String(raw ?? '').trim().toLowerCase()
+  if (value === 'current_room' || value === 'current' || value === 'this_room' || value === 'local' || value === 'room_only') {
+    return 'current_room'
+  }
   if (value === 'all_rooms' || value === 'all' || value === 'global' || value === 'cross_room') {
     return 'all_rooms'
   }
-  return 'current_room'
+  return 'all_rooms'
 }
 
 function isAcceptableAiMessageSearchIntent(intent: AiMessageSearchIntent): boolean {
@@ -1300,7 +1308,7 @@ async function buildMessageSearchReply(
   lines.push('')
   lines.push('一致メッセージ（新しい順）:')
   for (let i = 0; i < previewRows.length; i += 1) {
-    lines.push(`${i + 1}. ${formatMessageSearchPreview(previewRows[i])}`)
+    lines.push(`${i + 1}. ${formatMessageSearchPreview(previewRows[i], command.scope === 'all_rooms')}`)
   }
   if (hits.length > previewRows.length) {
     lines.push(`…ほか ${hits.length - previewRows.length}件`)
@@ -1335,12 +1343,15 @@ async function loadRoomLabelsForHits(
   return map
 }
 
-function formatMessageSearchPreview(row: SearchMessageRow): string {
+function formatMessageSearchPreview(row: SearchMessageRow, includeRoomLabel = false): string {
   const date = formatSearchDateTime(row.created_at)
   const content = normalizeInlineText(String(row.content ?? ''))
   const compact = content.length > 90 ? `${content.slice(0, 90)}...` : (content || '（内容なし）')
-  const roomPrefix = row.room_label ? `[${row.room_label}] ` : ''
-  return `${roomPrefix}${date} ${compact}`
+  if (includeRoomLabel) {
+    const roomLabel = normalizeInlineText(String(row.room_label ?? '')) || '（ルーム不明）'
+    return `ルーム:${roomLabel} / ${date} / ${compact}`
+  }
+  return `${date} ${compact}`
 }
 
 function formatSearchDateTime(iso: string): string {
