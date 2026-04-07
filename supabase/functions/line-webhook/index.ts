@@ -97,10 +97,13 @@ type CalendarCreateResult =
 
 type MessageRetentionDays = 60 | 120 | 180
 
+type MessageSearchScope = 'current_room' | 'all_rooms'
+
 type MessageSearchCommand = {
   kind: 'search_messages'
   keyword: string
   days: MessageRetentionDays
+  scope: MessageSearchScope
 }
 
 type MessageSearchParseResult = {
@@ -109,7 +112,17 @@ type MessageSearchParseResult = {
   error: string | null
 }
 
+type AiMessageSearchIntent = {
+  shouldSearch: boolean
+  keyword: string
+  days: MessageRetentionDays
+  scope: MessageSearchScope
+  confidence: number
+}
+
 type SearchMessageRow = {
+  room_id: string
+  room_label?: string | null
   content: string
   created_at: string
   user_id: string | null
@@ -124,6 +137,7 @@ const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar'
 const AI_MIN_CONFIDENCE = 0.82
 const AI_CONFIRMATION_MIN_CONFIDENCE = 0.68
 const AI_LIST_MIN_CONFIDENCE = 0.72
+const AI_MESSAGE_SEARCH_MIN_CONFIDENCE = 0.72
 const AI_AUTO_CREATE_MAX_EVENTS = 5
 const PAST_EVENT_GRACE_MS = 5 * 60 * 1000
 const PENDING_CONFIRMATION_TTL_MIN = 30
@@ -134,6 +148,7 @@ const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 60
 const SEARCH_MAX_FETCH_ROWS = 800
 const SEARCH_MAX_SUMMARY_ROWS = 120
 const SEARCH_MAX_PREVIEW_ROWS = 5
+const SEARCH_AI_SUMMARY_MAX_HITS = 80
 const LINE_MEDIA_BUCKET = 'line-media'
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 500 * 1024 * 1024
@@ -247,7 +262,25 @@ Deno.serve(async (req) => {
         }
 
         const messageSearchParse = parseMessageSearchCommand(text, messageRetentionDays)
+        let messageSearchCommand: MessageSearchCommand | null = null
+        let messageSearchError: string | null = null
+
         if (messageSearchParse.matched) {
+          messageSearchCommand = messageSearchParse.command
+          messageSearchError = messageSearchParse.error
+        } else if (!!groqApiKey && looksLikeMessageSearchQuestion(text)) {
+          const aiSearchIntent = await extractMessageSearchIntentWithGroq(text, messageRetentionDays, groqApiKey)
+          if (aiSearchIntent && isAcceptableAiMessageSearchIntent(aiSearchIntent)) {
+            messageSearchCommand = {
+              kind: 'search_messages',
+              keyword: aiSearchIntent.keyword,
+              days: aiSearchIntent.days,
+              scope: aiSearchIntent.scope,
+            }
+          }
+        }
+
+        if (messageSearchCommand || messageSearchError) {
           const messageSearchEnabled = await loadRoomMessageSearchEnabled(
             supabase,
             roomId,
@@ -258,7 +291,8 @@ Deno.serve(async (req) => {
           }
 
           const replyMessage = await buildMessageSearchReply(
-            messageSearchParse,
+            messageSearchCommand,
+            messageSearchError,
             supabase,
             roomId,
             messageRetentionDays,
@@ -1020,6 +1054,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
   }
 
   const requestedDays = detectMessageSearchDays(compact) ?? defaultDays
+  const scope = detectMessageSearchScope(compact)
   const keyword = extractMessageSearchKeyword(text)
   if (!keyword) {
     return {
@@ -1039,6 +1074,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
       kind: 'search_messages',
       keyword,
       days: requestedDays,
+      scope,
     },
     error: null,
   }
@@ -1049,6 +1085,13 @@ function detectMessageSearchDays(compactText: string): MessageRetentionDays | nu
   if (/(120日|4ヶ月|4か月|四ヶ月)/.test(compactText)) return 120
   if (/(60日|2ヶ月|2か月|二ヶ月)/.test(compactText)) return 60
   return null
+}
+
+function detectMessageSearchScope(compactText: string): MessageSearchScope {
+  if (/(全ルーム|他ルーム|他のルーム|別ルーム|別のルーム|全グループ|他グループ|別グループ|別のグループ)/.test(compactText)) {
+    return 'all_rooms'
+  }
+  return 'current_room'
 }
 
 function extractMessageSearchKeyword(rawText: string): string {
@@ -1062,27 +1105,136 @@ function extractMessageSearchKeyword(rawText: string): string {
   return normalizeKeywordForFilter(stripped)
 }
 
+function looksLikeMessageSearchQuestion(text: string): boolean {
+  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
+  if (!compact) return false
+  if (/^予定(?:確認|一覧|報告|登録|追加)/.test(compact)) return false
+
+  const hasSearchIntent = /(検索|探し|探して|探す|教えて|表示|表示して|見せて|みせて|確認|知りたい|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた)/.test(compact)
+  if (!hasSearchIntent) return false
+
+  const hasConversationHint = /(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|他ルーム|他のルーム|別ルーム|別のルーム|全ルーム)/.test(compact)
+  return hasConversationHint
+}
+
+async function extractMessageSearchIntentWithGroq(
+  text: string,
+  defaultDays: MessageRetentionDays,
+  groqApiKey: string,
+): Promise<AiMessageSearchIntent | null> {
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${groqApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'あなたはLINE会話検索コマンド抽出用のJSON抽出器です。',
+              '会話・履歴・メッセージ検索の意図がある場合のみ should_search=true にしてください。',
+              '予定照会（予定・会議などのカレンダー検索）は should_search=false にしてください。',
+              'JSONのみ返してください。説明文やコードブロックは禁止です。',
+              `days は 60/120/180 のいずれか。未指定時は ${defaultDays}。`,
+              'scope は current_room または all_rooms。',
+              '「他のルーム」「全ルーム」「別グループ」等の意図がある場合は all_rooms。',
+              'keyword は検索に使う短い語句のみ。',
+              '返却JSONスキーマ:',
+              '{"should_search":boolean,"keyword":string,"days":60|120|180,"scope":"current_room|all_rooms","confidence":number(0-1)}',
+            ].join('\n'),
+          },
+          { role: 'user', content: text },
+        ],
+      }),
+    })
+
+    if (!response.ok) {
+      const err = await response.text()
+      console.error('Groq message-search extraction failed:', response.status, err)
+      return null
+    }
+
+    const json = await response.json()
+    const content = String(json?.choices?.[0]?.message?.content ?? '').trim()
+    if (!content) return null
+
+    const extracted = parseFirstJsonObject(content)
+    if (!extracted || typeof extracted !== 'object') return null
+
+    const raw = extracted as Record<string, unknown>
+    const shouldSearch = Boolean(raw.should_search ?? raw.shouldSearch ?? false)
+    const keyword = normalizeKeywordForFilter(String(raw.keyword ?? ''))
+    const confidenceNum = Number(raw.confidence ?? 0)
+    const confidence = Number.isFinite(confidenceNum)
+      ? Math.max(0, Math.min(1, confidenceNum))
+      : 0
+
+    const rawDays = Number(raw.days)
+    const days = rawDays === 60 || rawDays === 120 || rawDays === 180
+      ? rawDays
+      : defaultDays
+
+    const scope = normalizeAiMessageSearchScope(String(raw.scope ?? ''))
+
+    return {
+      shouldSearch,
+      keyword,
+      days,
+      scope,
+      confidence,
+    }
+  } catch (err) {
+    console.error('Failed to extract message search intent with Groq:', err)
+    return null
+  }
+}
+
+function normalizeAiMessageSearchScope(raw: string): MessageSearchScope {
+  const value = String(raw ?? '').trim().toLowerCase()
+  if (value === 'all_rooms' || value === 'all' || value === 'global' || value === 'cross_room') {
+    return 'all_rooms'
+  }
+  return 'current_room'
+}
+
+function isAcceptableAiMessageSearchIntent(intent: AiMessageSearchIntent): boolean {
+  if (!intent.shouldSearch) return false
+  if (intent.confidence < AI_MESSAGE_SEARCH_MIN_CONFIDENCE) return false
+  if (!intent.keyword) return false
+  return true
+}
+
 async function buildMessageSearchReply(
-  parseResult: MessageSearchParseResult,
+  command: MessageSearchCommand | null,
+  parseError: string | null,
   supabase: ReturnType<typeof createClient>,
   roomId: string,
   configuredRetentionDays: MessageRetentionDays,
   groqApiKey: string,
 ): Promise<string> {
-  if (parseResult.error) return parseResult.error
-  if (!parseResult.command) return '会話検索コマンドを解釈できませんでした。'
+  if (parseError) return parseError
+  if (!command) return '会話検索の意図を解釈できませんでした。'
 
-  const command = parseResult.command
   const effectiveDays = command.days > configuredRetentionDays ? configuredRetentionDays : command.days
   const sinceIso = new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
 
-  const { data, error } = await supabase
+  let query = supabase
     .from('line_messages')
-    .select('content, created_at, user_id')
-    .eq('room_id', roomId)
+    .select('room_id, content, created_at, user_id')
     .gte('created_at', sinceIso)
     .order('created_at', { ascending: false })
     .limit(SEARCH_MAX_FETCH_ROWS)
+
+  if (command.scope !== 'all_rooms') {
+    query = query.eq('room_id', roomId)
+  }
+
+  const { data, error } = await query
 
   if (error) {
     return `会話検索に失敗しました。${error.message}`
@@ -1090,14 +1242,15 @@ async function buildMessageSearchReply(
 
   const rows: SearchMessageRow[] = Array.isArray(data)
     ? data.map((row: any) => ({
+        room_id: String(row?.room_id ?? ''),
         content: String(row?.content ?? ''),
         created_at: String(row?.created_at ?? ''),
         user_id: row?.user_id == null ? null : String(row.user_id),
       }))
     : []
 
-  const hits = rows.filter((row) => messageMatchesKeyword(row.content, command.keyword))
-  if (hits.length === 0) {
+  const hitsRaw = rows.filter((row) => messageMatchesKeyword(row.content, command.keyword))
+  if (hitsRaw.length === 0) {
     const lines = [`「${command.keyword}」に一致する会話はありません（過去${effectiveDays}日）`]
     if (effectiveDays !== command.days) {
       lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
@@ -1105,16 +1258,28 @@ async function buildMessageSearchReply(
     return lines.join('\n')
   }
 
+  const roomLabels = command.scope === 'all_rooms'
+    ? await loadRoomLabelsForHits(supabase, hitsRaw)
+    : new Map<string, string>()
+  const hits = hitsRaw.map((row) => ({
+    ...row,
+    room_label: command.scope === 'all_rooms'
+      ? (roomLabels.get(row.room_id) ?? row.room_id)
+      : null,
+  }))
+
+  const shouldSummarize = !!groqApiKey && hits.length <= SEARCH_AI_SUMMARY_MAX_HITS
   const summary = await summarizeMessageSearchHitsWithGroq(
-    hits.slice(0, SEARCH_MAX_SUMMARY_ROWS),
+    shouldSummarize ? hits.slice(0, SEARCH_MAX_SUMMARY_ROWS) : [],
     command.keyword,
     effectiveDays,
     groqApiKey,
   )
 
   const previewRows = hits.slice(0, SEARCH_MAX_PREVIEW_ROWS)
+  const scopeLabel = command.scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
   const lines: string[] = [
-    `会話検索結果（過去${effectiveDays}日 / キーワード: ${command.keyword}）`,
+    `会話検索結果（${scopeLabel} / 過去${effectiveDays}日 / キーワード: ${command.keyword}）`,
     `一致: ${hits.length}件`,
   ]
   if (effectiveDays !== command.days) {
@@ -1127,6 +1292,8 @@ async function buildMessageSearchReply(
     lines.push('')
     lines.push('要約:')
     lines.push(summary)
+  } else if (!!groqApiKey && hits.length > SEARCH_AI_SUMMARY_MAX_HITS) {
+    lines.push(`※一致件数が多いため、AI要約は省略しています（${SEARCH_AI_SUMMARY_MAX_HITS}件超）。`)
   }
   lines.push('')
   lines.push('一致メッセージ（新しい順）:')
@@ -1139,11 +1306,39 @@ async function buildMessageSearchReply(
   return lines.join('\n')
 }
 
+async function loadRoomLabelsForHits(
+  supabase: ReturnType<typeof createClient>,
+  rows: SearchMessageRow[],
+): Promise<Map<string, string>> {
+  const roomIds = Array.from(new Set(rows.map((row) => String(row.room_id ?? '').trim()).filter((id) => id.length > 0)))
+  if (roomIds.length === 0) return new Map<string, string>()
+
+  const { data, error } = await supabase
+    .from('room_summary_settings')
+    .select('room_id, room_name')
+    .in('room_id', roomIds)
+
+  if (error) {
+    console.error('Failed to load room labels for message search:', error.message)
+    return new Map<string, string>()
+  }
+
+  const map = new Map<string, string>()
+  for (const row of Array.isArray(data) ? data : []) {
+    const id = String((row as any)?.room_id ?? '').trim()
+    if (!id) continue
+    const name = normalizeInlineText(String((row as any)?.room_name ?? ''))
+    map.set(id, name || id)
+  }
+  return map
+}
+
 function formatMessageSearchPreview(row: SearchMessageRow): string {
   const date = formatSearchDateTime(row.created_at)
   const content = normalizeInlineText(String(row.content ?? ''))
   const compact = content.length > 90 ? `${content.slice(0, 90)}...` : (content || '（内容なし）')
-  return `${date} ${compact}`
+  const roomPrefix = row.room_label ? `[${row.room_label}] ` : ''
+  return `${roomPrefix}${date} ${compact}`
 }
 
 function formatSearchDateTime(iso: string): string {
@@ -1173,7 +1368,8 @@ async function summarizeMessageSearchHitsWithGroq(
       .map((row, index) => {
         const content = normalizeInlineText(String(row.content ?? '')).replace(/\s+/g, ' ')
         const short = content.length > 180 ? `${content.slice(0, 180)}...` : content
-        return `[${index + 1}] ${formatSearchDateTime(row.created_at)} ${short}`
+        const room = row.room_label ? ` [${row.room_label}]` : ''
+        return `[${index + 1}] ${formatSearchDateTime(row.created_at)}${room} ${short}`
       })
       .join('\n')
 
