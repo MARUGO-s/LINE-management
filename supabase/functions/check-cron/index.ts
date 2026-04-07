@@ -12,8 +12,15 @@ Deno.serve(async (_req) => {
   
   try {
     const verifyResult = await sql`
-      SELECT 
-        pg_get_functiondef('public.invoke_summary_cron'::regproc) as func_def
+      SELECT
+        CASE
+          WHEN to_regprocedure('public.invoke_summary_cron()') IS NULL THEN NULL
+          ELSE pg_get_functiondef(to_regprocedure('public.invoke_summary_cron()'))
+        END AS summary_func_def,
+        CASE
+          WHEN to_regprocedure('public.invoke_gmail_alert_cron()') IS NULL THEN NULL
+          ELSE pg_get_functiondef(to_regprocedure('public.invoke_gmail_alert_cron()'))
+        END AS gmail_func_def
     `
 
     const cronStatus = await sql`
@@ -52,7 +59,12 @@ Deno.serve(async (_req) => {
       settings: settingStatus[0]?.settings ?? {},
       summarySettings: summarySettings[0] ?? null,
       cronJobs: cronStatus,
-      funcDefPreview: verifyResult[0]?.func_def?.substring(0, 300) + '...',
+      funcDefPreviewSummary: verifyResult[0]?.summary_func_def
+        ? verifyResult[0].summary_func_def.substring(0, 300) + '...'
+        : null,
+      funcDefPreviewGmail: verifyResult[0]?.gmail_func_def
+        ? verifyResult[0].gmail_func_def.substring(0, 300) + '...'
+        : null,
     }, null, 2), {
       headers: { 'Content-Type': 'application/json' },
       status: 200,

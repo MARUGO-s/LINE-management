@@ -409,6 +409,12 @@ entrypoint = "./functions/summary-cron/index.ts"
 # For example, if you want to serve static HTML pages in your function:
 # static_files = [ "./functions/summary-cron/*.html" ]
 
+[functions.gmail-alert-cron]
+enabled = true
+verify_jwt = true
+import_map = "./functions/gmail-alert-cron/deno.json"
+entrypoint = "./functions/gmail-alert-cron/index.ts"
+
 [functions.admin-api]
 enabled = true
 verify_jwt = false

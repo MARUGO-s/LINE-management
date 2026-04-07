@@ -161,17 +161,8 @@ Deno.serve(async (req) => {
       console.error('Failed to process tomorrow calendar reminder:', reminderErr)
     }
 
-    try {
-      await maybeSendGmailReservationAlerts({
-        supabase,
-        now,
-        jstHour,
-        lineAccessToken,
-        fallbackOverallRoomId: overallRoomId,
-      })
-    } catch (gmailErr) {
-      console.error('Failed to process Gmail reservation alerts:', gmailErr)
-    }
+    // Gmail reservation alerts are handled by the dedicated gmail-alert-cron function
+    // (scheduled every minute) to provide near real-time delivery.
 
     // Fetch per-room settings
     const { data: roomSettingsList, error: roomSettingsError } = await supabase
