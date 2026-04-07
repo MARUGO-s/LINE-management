@@ -159,6 +159,7 @@ const KEYWORD_SYNONYM_GROUPS = [
   ['ミーティング', 'meeting', 'mtg', '会議', '打ち合わせ', '打合せ', '商談'],
   ['試飲会', '試飲', 'テイスティング', 'tasting'],
   ['予定', 'スケジュール', 'schedule'],
+  ['いくら', '幾ら', '値段', '価格', '金額', '料金', '費用', '円', 'yen'],
 ] as const
 
 Deno.serve(async (req) => {
@@ -1047,7 +1048,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
 
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   const hasExplicitPrefix = /^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)
-  const hasConversationHint = /(会話|トーク|履歴|チャット)/.test(compact)
+  const hasConversationHint = /(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|他ルーム|他のルーム|別ルーム|全ルーム)/.test(compact)
   const hasQueryIntent = /(検索|探し|探して|探す|要約|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい)/.test(compact)
   if (!hasExplicitPrefix && !(hasConversationHint && hasQueryIntent)) {
     return { matched: false, command: null, error: null }
@@ -1098,9 +1099,10 @@ function extractMessageSearchKeyword(rawText: string): string {
   const stripped = normalizeForRuleParsing(rawText)
     .replace(/(180日|120日|60日|半年|6ヶ月|6か月|六ヶ月|4ヶ月|4か月|四ヶ月|2ヶ月|2か月|二ヶ月)/g, ' ')
     .replace(/(過去|最近|直近|以内|分|間)/g, ' ')
-    .replace(/(会話|トーク|履歴|チャット)/g, ' ')
-    .replace(/(検索|探し|探して|探す|要約|まとめ|教えて|見せて|みせて|確認|表示|表示して|出して|だして)/g, ' ')
-    .replace(/(を|は|が|に|で|の|から|だけ|について|して|ください|下さい|お願いします|お願い)/g, ' ')
+    .replace(/(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|全ルーム|他ルーム|他のルーム|別ルーム|別のルーム)/g, ' ')
+    .replace(/(検索|探し|探して|探す|要約|まとめ|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい|記述|言及)/g, ' ')
+    .replace(/(ありますか|あるか|あります|ある|でしたか|ですか|ますか|でしょうか|だったっけ|だっけ|っけ|かな|です|ます)/g, ' ')
+    .replace(/(を|は|が|に|で|の|から|だけ|について|して|ください|下さい|お願いします|お願い|とか|って|こと|もの|やつ)/g, ' ')
     .replace(/[?？!！。．、,]/g, ' ')
   return normalizeKeywordForFilter(stripped)
 }
@@ -2963,11 +2965,13 @@ function keywordMatchesHaystacks(keyword: string, haystacks: string[]): boolean 
   const compactTarget = compactSearchText(target)
   if (!target && !compactTarget) return false
 
-  const tokens = normalizedKeyword
+  const rawTokens = normalizedKeyword
     .replace(/[、,，/／|｜]+/g, ' ')
     .split(/\s+/)
     .filter((token) => token.length > 0)
-  if (tokens.length === 0) return true
+  if (rawTokens.length === 0) return true
+  const filteredTokens = rawTokens.filter((token) => !isIgnorableMessageSearchToken(token))
+  const tokens = filteredTokens.length > 0 ? filteredTokens : rawTokens
   return tokens.every((token) => {
     const variants = expandKeywordVariants(token)
     return variants.some((variant) => {
@@ -2978,6 +2982,19 @@ function keywordMatchesHaystacks(keyword: string, haystacks: string[]): boolean 
       return false
     })
   })
+}
+
+function isIgnorableMessageSearchToken(token: string): boolean {
+  const normalized = normalizeKeywordForSearch(token)
+  if (!normalized) return true
+  if (/^(です|ます|ですか|ますか|すか|でしょうか|か|かな|だっけ|っけ|ありますか|あるか|あります|ある)$/.test(normalized)) {
+    return true
+  }
+  if (/^(こと|もの|やつ|内容|情報|記述|言及|会話|トーク|履歴|メッセージ|発言|ルーム|グループ)$/.test(normalized)) {
+    return true
+  }
+  if (normalized.length <= 1 && /^[ぁ-んー]+$/.test(normalized)) return true
+  return false
 }
 
 function normalizeKeywordForSearch(raw: string): string {
