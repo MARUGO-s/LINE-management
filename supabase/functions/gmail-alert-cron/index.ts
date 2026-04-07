@@ -27,6 +27,21 @@ type GmailMessageAlert = {
   from: string
   snippet: string
   internalDateIso: string | null
+  reservation: ReservationMailDetails | null
+}
+
+type ReservationMailDetails = {
+  reservationSite: string | null
+  reservationNo: string | null
+  notificationNo: string | null
+  visitDateTime: string | null
+  partySize: string | null
+  plan: string | null
+  paymentMethod: string | null
+  totalAmount: string | null
+  seatName: string | null
+  representativeName: string | null
+  representativePhone: string | null
 }
 
 const DEFAULT_GMAIL_ALERT_QUERY = "is:inbox is:unread newer_than:7d (予約 OR reservation OR booking)"
@@ -405,7 +420,7 @@ async function fetchGmailMessageAlert(
   }
 
   const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(normalizedMessageId)}`)
-  url.searchParams.set("format", "metadata")
+  url.searchParams.set("format", "full")
   url.searchParams.append("metadataHeaders", "Subject")
   url.searchParams.append("metadataHeaders", "From")
   url.searchParams.append("metadataHeaders", "Date")
@@ -427,11 +442,13 @@ async function fetchGmailMessageAlert(
   const payloadHeaders = Array.isArray(data?.payload?.headers) ? data.payload.headers : []
   const subject = normalizeInlineText(extractGmailHeader(payloadHeaders, "subject")) || "(件名なし)"
   const from = normalizeInlineText(extractGmailHeader(payloadHeaders, "from")) || "(送信元不明)"
+  const bodyText = extractGmailBodyText(data?.payload)
   const snippet = normalizeInlineText(String(data?.snippet ?? ""))
   const internalDateMs = Number(data?.internalDate)
   const internalDateIso = Number.isFinite(internalDateMs) && internalDateMs > 0
     ? new Date(internalDateMs).toISOString()
     : null
+  const reservation = extractReservationMailDetails(subject, bodyText)
 
   return {
     id: String(data?.id ?? normalizedMessageId),
@@ -440,6 +457,7 @@ async function fetchGmailMessageAlert(
     from,
     snippet,
     internalDateIso,
+    reservation,
   }
 }
 
@@ -460,11 +478,36 @@ function buildGmailReservationAlertMessage(alerts: GmailMessageAlert[]): string 
   const lines: string[] = [`【予約メール通知】新着${alerts.length}件`]
   for (let i = 0; i < alerts.length; i += 1) {
     const alert = alerts[i]
+    const reservation = alert.reservation
+    const hasStructured =
+      !!reservation &&
+      !!(
+        reservation.visitDateTime ||
+        reservation.partySize ||
+        reservation.plan ||
+        reservation.reservationNo ||
+        reservation.notificationNo ||
+        reservation.totalAmount
+      )
+
     lines.push(`${i + 1}.`)
     lines.push(`  受信: ${formatGmailAlertReceivedAt(alert.internalDateIso)}`)
-    lines.push(`  件名: ${alert.subject || "(件名なし)"}`)
-    lines.push(`  送信元: ${alert.from || "(送信元不明)"}`)
-    lines.push(`  内容: ${formatGmailAlertSnippet(alert.snippet)}`)
+    if (reservation?.visitDateTime) lines.push(`  来店日時: ${truncateForLine(reservation.visitDateTime, 80)}`)
+    if (reservation?.partySize) lines.push(`  人数: ${truncateForLine(reservation.partySize, 40)}`)
+    if (reservation?.plan) lines.push(`  プラン: ${truncateForLine(reservation.plan, 110)}`)
+    if (reservation?.reservationNo) lines.push(`  予約番号: ${truncateForLine(reservation.reservationNo, 50)}`)
+    if (reservation?.notificationNo) lines.push(`  通知番号: ${truncateForLine(reservation.notificationNo, 50)}`)
+    if (reservation?.paymentMethod) lines.push(`  決済方法: ${truncateForLine(reservation.paymentMethod, 60)}`)
+    if (reservation?.totalAmount) lines.push(`  支払金額: ${truncateForLine(reservation.totalAmount, 60)}`)
+    if (reservation?.seatName) lines.push(`  席: ${truncateForLine(reservation.seatName, 70)}`)
+    if (reservation?.representativeName) lines.push(`  代表者: ${truncateForLine(reservation.representativeName, 50)}`)
+    if (reservation?.representativePhone) lines.push(`  連絡先: ${truncateForLine(reservation.representativePhone, 40)}`)
+    if (reservation?.reservationSite) lines.push(`  予約サイト: ${truncateForLine(reservation.reservationSite, 60)}`)
+    lines.push(`  件名: ${truncateForLine(alert.subject || "(件名なし)", 120)}`)
+    lines.push(`  送信元: ${truncateForLine(alert.from || "(送信元不明)", 100)}`)
+    if (!hasStructured) {
+      lines.push(`  内容: ${formatGmailAlertSnippet(alert.snippet)}`)
+    }
     if (i < alerts.length - 1) {
       lines.push("")
     }
@@ -484,6 +527,184 @@ function formatGmailAlertSnippet(snippet: string): string {
   if (!normalized) return "（本文プレビューなし）"
   if (normalized.length <= 120) return normalized
   return `${normalized.slice(0, 120)}...`
+}
+
+function extractGmailBodyText(payload: any): string {
+  const plainParts: string[] = []
+  const htmlParts: string[] = []
+  collectGmailBodyParts(payload, plainParts, htmlParts)
+
+  const plain = normalizeMultilineText(plainParts.join("\n"))
+  if (plain) return plain
+
+  const htmlJoined = normalizeMultilineText(htmlParts.join("\n"))
+  if (!htmlJoined) return ""
+  return normalizeMultilineText(stripHtmlTags(htmlJoined))
+}
+
+function collectGmailBodyParts(
+  node: any,
+  plainParts: string[],
+  htmlParts: string[],
+): void {
+  if (!node || typeof node !== "object") return
+
+  const mimeType = String(node?.mimeType ?? "").toLowerCase()
+  const bodyData = String(node?.body?.data ?? "")
+  if (bodyData) {
+    const decoded = decodeBase64UrlUtf8(bodyData)
+    if (decoded) {
+      if (mimeType.includes("text/plain")) {
+        plainParts.push(decoded)
+      } else if (mimeType.includes("text/html")) {
+        htmlParts.push(decoded)
+      } else if (!mimeType) {
+        plainParts.push(decoded)
+      }
+    }
+  }
+
+  const parts = Array.isArray(node?.parts) ? node.parts : []
+  for (const part of parts) {
+    collectGmailBodyParts(part, plainParts, htmlParts)
+  }
+}
+
+function decodeBase64UrlUtf8(raw: string): string {
+  const normalized = String(raw ?? "").replace(/-/g, "+").replace(/_/g, "/")
+  if (!normalized) return ""
+  const padding = (4 - (normalized.length % 4)) % 4
+  const padded = normalized + "=".repeat(padding)
+  try {
+    const binary = atob(padded)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i)
+    }
+    return new TextDecoder().decode(bytes)
+  } catch (_e) {
+    return ""
+  }
+}
+
+function stripHtmlTags(raw: string): string {
+  return String(raw ?? "")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+}
+
+function normalizeMultilineText(raw: string): string {
+  return String(raw ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .replace(/\u3000/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+}
+
+function extractReservationMailDetails(subject: string, bodyText: string): ReservationMailDetails | null {
+  const lineMap = parseColonSeparatedLines(bodyText)
+
+  const reservationSite = pickLineValue(lineMap, ["予約サイト"])
+  const reservationNo = pickLineValue(lineMap, ["予約番号"]) ??
+    captureFirstMatch([subject, bodyText], [
+      /予約(?:番号|NO|No)\s*[：:]\s*([A-Z0-9-]+)/i,
+      /\[予約NO[：:]\s*([A-Z0-9-]+)\]/i,
+    ])
+  const notificationNo = captureFirstMatch([subject, bodyText], [
+    /通知\s*NO\s*[：:]\s*([A-Z0-9-]+)/i,
+    /通知NO[：:]\s*([A-Z0-9-]+)/i,
+  ])
+  const visitDateTime = pickLineValue(lineMap, ["来店日時"])
+  const partySizeRaw = pickLineValue(lineMap, ["来店人数"])
+  const partySize = partySizeRaw
+    ? (captureFirstMatch([partySizeRaw], [/\d+\s*人/]) ?? partySizeRaw)
+    : null
+  const plan = pickLineValue(lineMap, ["プラン"])
+  const paymentMethod = pickLineValue(lineMap, ["決済方法"])
+  const totalAmount = pickLineValue(lineMap, ["お支払い金額"]) ?? pickLineValue(lineMap, ["プラン料金"])
+  const seatName = pickLineValue(lineMap, ["席管理名称"]) ?? pickLineValue(lineMap, ["席No"])
+  const representativeName = pickLineValue(lineMap, ["来店代表者氏名"]) ?? pickLineValue(lineMap, ["予約者氏名(会員)"])
+  const representativePhone = pickLineValue(lineMap, ["来店代表者連絡先"])
+
+  const details: ReservationMailDetails = {
+    reservationSite,
+    reservationNo,
+    notificationNo,
+    visitDateTime,
+    partySize,
+    plan,
+    paymentMethod,
+    totalAmount,
+    seatName,
+    representativeName,
+    representativePhone,
+  }
+
+  const hasAny = Object.values(details).some((value) => typeof value === "string" && value.trim().length > 0)
+  return hasAny ? details : null
+}
+
+function parseColonSeparatedLines(text: string): Map<string, string> {
+  const map = new Map<string, string>()
+  const lines = String(text ?? "").split(/\n/)
+  for (const line of lines) {
+    const match = line.match(/^\s*[●◆■・]?\s*([^:：]{1,40}?)\s*[：:]\s*(.+)\s*$/)
+    if (!match) continue
+    const label = normalizeLabelKey(match[1])
+    const value = normalizeInlineText(match[2])
+    if (!label || !value) continue
+    if (!map.has(label)) {
+      map.set(label, value)
+    }
+  }
+  return map
+}
+
+function pickLineValue(map: Map<string, string>, labels: string[]): string | null {
+  for (const label of labels) {
+    const value = map.get(normalizeLabelKey(label))
+    if (value && value.trim()) return value.trim()
+  }
+  return null
+}
+
+function normalizeLabelKey(label: string): string {
+  return String(label ?? "")
+    .replace(/\u3000/g, " ")
+    .replace(/\s+/g, "")
+    .trim()
+    .toLowerCase()
+}
+
+function captureFirstMatch(texts: string[], patterns: RegExp[]): string | null {
+  for (const text of texts) {
+    const source = String(text ?? "")
+    if (!source) continue
+    for (const pattern of patterns) {
+      const match = source.match(pattern)
+      if (match && typeof match[1] === "string" && match[1].trim()) {
+        return normalizeInlineText(match[1])
+      }
+    }
+  }
+  return null
+}
+
+function truncateForLine(value: string, maxLength: number): string {
+  const normalized = normalizeInlineText(value)
+  if (!normalized) return ""
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength)}...`
 }
 
 async function saveGmailReservationAlertLogs(
