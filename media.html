@@ -395,7 +395,9 @@
           <option value="audio">音声</option>
           <option value="file">ファイル</option>
         </select>
-        <input id="roomFilter" class="input" type="text" placeholder="room_id で絞り込み">
+        <select id="roomFilter" class="select" aria-label="ルームで絞り込み" style="min-width:240px">
+          <option value="">全ルーム</option>
+        </select>
         <select id="limitSelect" class="select" aria-label="表示件数">
           <option value="12">12件</option>
           <option value="24" selected>24件</option>
@@ -582,6 +584,88 @@
       return '/media?' + params.toString();
     }
 
+    function setRoomFilterOptions(options) {
+      const prevValue = String(dom.roomFilter.value || '');
+      dom.roomFilter.innerHTML = '';
+
+      const allOption = document.createElement('option');
+      allOption.value = '';
+      allOption.textContent = '全ルーム';
+      dom.roomFilter.appendChild(allOption);
+
+      for (const option of options) {
+        const roomId = String(option && option.room_id || '').trim();
+        const roomLabel = String(option && option.label || '').trim();
+        if (!roomId || !roomLabel) continue;
+        const el = document.createElement('option');
+        el.value = roomId;
+        el.textContent = roomLabel;
+        dom.roomFilter.appendChild(el);
+      }
+
+      if (prevValue && Array.from(dom.roomFilter.options).some(function(opt) { return opt.value === prevValue; })) {
+        dom.roomFilter.value = prevValue;
+      } else {
+        dom.roomFilter.value = '';
+      }
+    }
+
+    function collectRoomFilterOptions(stateBody) {
+      const nameByRoomId = new Map();
+
+      function upsertRoom(roomIdValue, roomNameValue) {
+        const roomId = String(roomIdValue || '').trim();
+        if (!roomId) return;
+        const roomName = String(roomNameValue || '').trim();
+        const existing = nameByRoomId.get(roomId);
+        if (existing) return;
+        nameByRoomId.set(roomId, roomName || roomId);
+      }
+
+      const roomSettings = Array.isArray(stateBody && stateBody.room_settings) ? stateBody.room_settings : [];
+      for (const row of roomSettings) {
+        upsertRoom(row && row.room_id, row && row.room_name);
+      }
+
+      const roomOverview = Array.isArray(stateBody && stateBody.room_overview) ? stateBody.room_overview : [];
+      for (const row of roomOverview) {
+        upsertRoom(row && row.room_id, row && row.room_name);
+      }
+
+      const baseList = Array.from(nameByRoomId.entries()).map(function(entry) {
+        return { room_id: entry[0], room_name: entry[1] };
+      });
+      baseList.sort(function(a, b) {
+        return String(a.room_name || '').localeCompare(String(b.room_name || ''), 'ja');
+      });
+
+      const nameCount = new Map();
+      for (const row of baseList) {
+        const key = String(row.room_name || '').trim();
+        nameCount.set(key, (nameCount.get(key) || 0) + 1);
+      }
+
+      return baseList.map(function(row) {
+        const roomId = String(row.room_id || '').trim();
+        const roomName = String(row.room_name || '').trim() || roomId;
+        const duplicate = (nameCount.get(roomName) || 0) > 1;
+        const shortId = roomId.length > 8 ? (roomId.slice(0, 8) + '…') : roomId;
+        const label = duplicate ? (roomName + ' [' + shortId + ']') : roomName;
+        return { room_id: roomId, label: label };
+      });
+    }
+
+    async function loadRoomFilterOptions() {
+      try {
+        const stateBody = await api('/state?logs_limit=10');
+        const options = collectRoomFilterOptions(stateBody);
+        setRoomFilterOptions(options);
+      } catch (error) {
+        console.warn('ルーム一覧の取得に失敗しました:', error);
+        setRoomFilterOptions([]);
+      }
+    }
+
     function renderMediaItem(item) {
       const type = String(item.media_type || 'file');
       const signedUrl = String(item.signed_url || '');
@@ -735,6 +819,7 @@
       setToken(String(dom.tokenInput.value || '').trim());
       dom.tokenInput.value = '';
       try {
+        await loadRoomFilterOptions();
         await loadFirstPage();
       } catch (error) {
         alert(error.message || String(error));
@@ -746,6 +831,7 @@
       dom.mediaList.innerHTML = '';
       dom.summary.textContent = '未取得';
       dom.mediaUploadLimitMeta.textContent = '';
+      setRoomFilterOptions([]);
       renderUsageBar(0, MEDIA_CAP_DEFAULT_BYTES);
       dom.lastRefresh.textContent = '最終更新: なし';
       updatePager();
@@ -811,11 +897,12 @@
       dom.projectUrlInput.value = FIXED_PROJECT_URL;
       updateAuthState();
       updatePager();
+      setRoomFilterOptions([]);
       dom.mediaUploadMaxMbInput.value = '10';
       dom.mediaUploadLimitMeta.textContent = '現在: 10MB未満';
       renderUsageBar(0, MEDIA_CAP_DEFAULT_BYTES);
       if (getToken()) {
-        loadFirstPage().catch(function(error) {
+        Promise.all([loadRoomFilterOptions(), loadFirstPage()]).catch(function(error) {
           alert(error.message || String(error));
         });
       }
