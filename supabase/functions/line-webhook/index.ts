@@ -164,7 +164,7 @@ const AI_CONFIRMATION_MIN_CONFIDENCE = 0.68
 const AI_LIST_MIN_CONFIDENCE = 0.72
 const AI_MESSAGE_SEARCH_MIN_CONFIDENCE = 0.72
 const AI_PRIMARY_INTENT_MIN_CONFIDENCE = 0.72
-const AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE = 0.52
+const AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE = 0.60
 const AI_AUTO_CREATE_MAX_EVENTS = 5
 const PAST_EVENT_GRACE_MS = 5 * 60 * 1000
 const PENDING_CONFIRMATION_TTL_MIN = 30
@@ -1225,11 +1225,19 @@ async function extractPrimaryIntentWithGroq(
             role: 'system',
             content: [
               'あなたはLINEメッセージの一次振り分け用JSON分類器です。',
+              'このチャットは店舗運営連絡が中心で、ほとんどはBotが返信不要です。基本方針は「必要時のみ反応・それ以外は none」です。',
               'intent を次の4つから1つだけ返してください: create_calendar, list_calendar, search_messages, none',
-              'create_calendar: 予定を登録/追加すべき文（例: 5/10 14時 試飲会）',
-              'list_calendar: 予定の有無・日時を確認する質問（例: 5月の会議はいつ？）',
-              'search_messages: 過去会話検索の質問（例: 人参の値段の記述ある？）',
-              'none: 上記以外（雑談・告知・反応不要）',
+              'create_calendar: 予定登録すべき文。未来の日時が明確で、単発の予定として登録意図が明瞭な場合のみ。',
+              'list_calendar: カレンダー予定の有無・日時を尋ねる質問（例: 5月の会議はいつ？）。',
+              'search_messages: 過去会話ログを検索したい質問（例: 人参の値段の記述ある？）。',
+              'none: 上記以外（雑談・業務連絡・周知・依頼・添付共有・反応不要）。',
+              '重要ルール:',
+              '1) 「質問」ではない業務連絡・周知・案内・提出依頼・在庫/発注/納品/欠品連絡は基本 none。',
+              '2) @All を含む全体周知、長文の通達、資料共有（画像/PDF/動画/ファイル）は基本 none。',
+              '3) create_calendar は、本文の主目的が「1件の予定告知/設定」である時だけ。会議資料の文脈や提出期限連絡は none。',
+              '4) list_calendar は、予定を尋ねる明確な質問語（いつ/ある/ありますか/教えて/確認）を伴う時のみ。',
+              '5) search_messages は、会話・履歴・過去発言の検索意図が明確な時のみ。',
+              '6) 少しでも迷う場合は none を選び、confidence を低めにする（0.55以下）。',
               `会話検索の日数指定が曖昧なら ${defaultDays} を想定し、分類だけを行うこと。`,
               `現在時刻基準の解釈タイムゾーンは ${timezone}。`,
               'JSONのみ返してください。説明文やコードブロックは禁止です。',
