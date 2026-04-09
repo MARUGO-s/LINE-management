@@ -2474,6 +2474,37 @@ function parseCalendarListScope(bodyRaw: string): Omit<Extract<CalendarCommand, 
   if (/^(今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月)$/.test(canonical)) {
     return { scope: 'upcoming_30d' }
   }
+  const ymdSlashDate = canonical.match(/^(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})$/)
+  if (ymdSlashDate) {
+    const year = Number(ymdSlashDate[1])
+    const month = Number(ymdSlashDate[2])
+    const day = Number(ymdSlashDate[3])
+    const date = toIsoDateStringSafe(year, month, day)
+    if (date) return { scope: 'date', date }
+  }
+  const ymdJaDate = canonical.match(/^(\d{4})年(\d{1,2})月(\d{1,2})日$/)
+  if (ymdJaDate) {
+    const year = Number(ymdJaDate[1])
+    const month = Number(ymdJaDate[2])
+    const day = Number(ymdJaDate[3])
+    const date = toIsoDateStringSafe(year, month, day)
+    if (date) return { scope: 'date', date }
+  }
+  const monthDay = canonical.match(/^(\d{1,2})月(?:の)?(\d{1,2})日$/)
+  if (monthDay) {
+    const { year: currentYear } = getJstYearMonth()
+    const month = Number(monthDay[1])
+    const day = Number(monthDay[2])
+    const date = toIsoDateStringSafe(currentYear, month, day)
+    if (date) return { scope: 'date', date }
+  }
+  const dayOnly = canonical.match(/^(\d{1,2})日$/)
+  if (dayOnly) {
+    const { year: currentYear, month: currentMonth } = getJstYearMonth()
+    const day = Number(dayOnly[1])
+    const date = toIsoDateStringSafe(currentYear, currentMonth, day)
+    if (date) return { scope: 'date', date }
+  }
   if (isValidDate(canonical)) {
     return { scope: 'date', date: canonical }
   }
@@ -2539,6 +2570,11 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
     .replace(/[?？!！。．、,]/g, ' ')
     .replace(/^の+/, ' ')
 
+  if (scope.scope === 'date') {
+    residue = residue
+      .replace(/(?:\d{4}[\/.-]\d{1,2}[\/.-]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月(?:の)?\d{1,2}日|\d{1,2}日|\d{1,2}月)/g, ' ')
+  }
+
   const keyword = normalizeKeywordForFilter(residue)
   return keyword ? { ...scope, keyword } : scope
 }
@@ -2565,11 +2601,15 @@ function looksLikeExplicitCalendarQuestion(compactText: string): boolean {
 
 function detectRangeToken(compactText: string): string | null {
   const patterns = [
+    /(\d{4}年\d{1,2}月\d{1,2}日)/,
+    /(\d{4}[\/.-]\d{1,2}[\/.-]\d{1,2})/,
+    /(\d{1,2}月(?:の)?\d{1,2}日)/,
     /(\d{4}年\d{1,2}月)/,
     /(\d{4}[\/.-]\d{1,2})/,
     /(\d{4}年)/,
     /(今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月)/,
     /(今月中|来月中|今月|来月|今週|来週|今日|明日|当月)/,
+    /(\d{1,2}日)/,
     /(\d{1,2}月)/,
   ]
   for (const pattern of patterns) {
@@ -2904,6 +2944,12 @@ function dayRangeFromJstDate(date: string): { start: Date; end: Date } {
   const startUtc = new Date(Date.UTC(y, m - 1, d, -9, 0, 0, 0))
   const endUtc = new Date(startUtc.getTime() + 24 * 60 * 60 * 1000)
   return { start: startUtc, end: endUtc }
+}
+
+function toIsoDateStringSafe(year: number, month: number, day: number): string | null {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null
+  const iso = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+  return isValidDate(iso) ? iso : null
 }
 
 function parseJstDateTime(date: string, time: string): Date | null {
