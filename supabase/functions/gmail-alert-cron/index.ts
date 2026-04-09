@@ -9,6 +9,9 @@ type GmailAlertEnv = {
   query: string
   maxMessages: number
   fallbackTargetRoomId: string
+  aiEnabled: boolean
+  aiApiKey: string
+  aiMaxBodyChars: number
 }
 
 type GmailAlertEnvState =
@@ -28,6 +31,7 @@ type GmailMessageAlert = {
   snippet: string
   internalDateIso: string | null
   reservation: ReservationMailDetails | null
+  reservationExtractSource: "rule" | "ai" | "rule_plus_ai" | "none"
 }
 
 type ReservationMailDetails = {
@@ -47,6 +51,23 @@ type ReservationMailDetails = {
 const DEFAULT_GMAIL_ALERT_QUERY = "is:inbox is:unread newer_than:7d (予約 OR reservation OR booking)"
 const DEFAULT_GMAIL_ALERT_MAX_MESSAGES = 5
 const MAX_GMAIL_ALERT_MAX_MESSAGES = 20
+const DEFAULT_GMAIL_ALERT_AI_MAX_BODY_CHARS = 6000
+const MIN_GMAIL_ALERT_AI_MAX_BODY_CHARS = 1500
+const MAX_GMAIL_ALERT_AI_MAX_BODY_CHARS = 12000
+const GMAIL_ALERT_AI_MIN_CONFIDENCE = 0.55
+const RESERVATION_DETAIL_KEYS: Array<keyof ReservationMailDetails> = [
+  "reservationSite",
+  "reservationNo",
+  "notificationNo",
+  "visitDateTime",
+  "partySize",
+  "plan",
+  "paymentMethod",
+  "totalAmount",
+  "seatName",
+  "representativeName",
+  "representativePhone",
+]
 
 Deno.serve(async () => {
   const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? ""
@@ -149,11 +170,18 @@ async function maybeSendGmailReservationAlerts(params: {
   const unnotifiedSet = new Set(unnotifiedMessageIds)
   const messagesToFetch = listedMessages.filter((message) => unnotifiedSet.has(message.id))
   const alerts: GmailMessageAlert[] = []
+  const extractSourceCounts: Record<string, number> = {
+    rule: 0,
+    ai: 0,
+    rule_plus_ai: 0,
+    none: 0,
+  }
 
   for (const message of messagesToFetch) {
-    const detail = await fetchGmailMessageAlert(accessToken, message.id)
+    const detail = await fetchGmailMessageAlert(accessToken, message.id, env)
     if (!detail) continue
     alerts.push(detail)
+    extractSourceCounts[detail.reservationExtractSource] = (extractSourceCounts[detail.reservationExtractSource] ?? 0) + 1
   }
 
   if (alerts.length === 0) {
@@ -183,6 +211,8 @@ async function maybeSendGmailReservationAlerts(params: {
           listed_count: listedMessages.length,
           unnotified_count: alerts.length,
           target_room_count: targetRoomIds.length,
+          reservation_extract_counts: extractSourceCounts,
+          gmail_ai_enabled: env.aiEnabled,
           source: "gmail-alert-cron",
         },
       })
@@ -207,6 +237,8 @@ async function maybeSendGmailReservationAlerts(params: {
         listed_count: listedMessages.length,
         unnotified_count: alerts.length,
         target_room_count: targetRoomIds.length,
+        reservation_extract_counts: extractSourceCounts,
+        gmail_ai_enabled: env.aiEnabled,
         source: "gmail-alert-cron",
       },
     })
@@ -270,6 +302,14 @@ function loadGmailAlertEnv(fallbackOverallRoomId: string): GmailAlertEnvState {
   const query = String(Deno.env.get("GMAIL_ALERT_QUERY") ?? "").trim() || DEFAULT_GMAIL_ALERT_QUERY
   const fallbackTargetRoomId = String(Deno.env.get("LINE_GMAIL_ALERT_ROOM_ID") ?? "").trim() ||
     String(fallbackOverallRoomId ?? "").trim()
+  const aiApiKey = String(Deno.env.get("GROQ_API_KEY") ?? "").trim()
+  const aiEnabled = parseBooleanEnv(Deno.env.get("GMAIL_ALERT_AI_ENABLED"), !!aiApiKey)
+  const rawAiMaxChars = Number(Deno.env.get("GMAIL_ALERT_AI_MAX_BODY_CHARS") ?? DEFAULT_GMAIL_ALERT_AI_MAX_BODY_CHARS)
+  const aiMaxBodyChars = Number.isInteger(rawAiMaxChars) &&
+      rawAiMaxChars >= MIN_GMAIL_ALERT_AI_MAX_BODY_CHARS &&
+      rawAiMaxChars <= MAX_GMAIL_ALERT_AI_MAX_BODY_CHARS
+    ? rawAiMaxChars
+    : DEFAULT_GMAIL_ALERT_AI_MAX_BODY_CHARS
 
   const hasAnyCredential = !!clientId || !!clientSecret || !!refreshToken
   const enabled = parseBooleanEnv(Deno.env.get("GMAIL_ALERT_ENABLED"), hasAnyCredential)
@@ -291,6 +331,9 @@ function loadGmailAlertEnv(fallbackOverallRoomId: string): GmailAlertEnvState {
         query,
         maxMessages,
         fallbackTargetRoomId,
+        aiEnabled,
+        aiApiKey,
+        aiMaxBodyChars,
       },
     }
   }
@@ -313,6 +356,9 @@ function loadGmailAlertEnv(fallbackOverallRoomId: string): GmailAlertEnvState {
       query,
       maxMessages,
       fallbackTargetRoomId,
+      aiEnabled,
+      aiApiKey,
+      aiMaxBodyChars,
     },
   }
 }
@@ -413,6 +459,7 @@ async function filterUnnotifiedGmailMessageIds(
 async function fetchGmailMessageAlert(
   accessToken: string,
   messageId: string,
+  env: GmailAlertEnv,
 ): Promise<GmailMessageAlert | null> {
   const normalizedMessageId = String(messageId ?? "").trim()
   if (!normalizedMessageId) {
@@ -448,7 +495,28 @@ async function fetchGmailMessageAlert(
   const internalDateIso = Number.isFinite(internalDateMs) && internalDateMs > 0
     ? new Date(internalDateMs).toISOString()
     : null
-  const reservation = extractReservationMailDetails(subject, bodyText)
+  const reservationByRule = extractReservationMailDetails(subject, bodyText)
+  let reservation = reservationByRule
+  let reservationExtractSource: GmailMessageAlert["reservationExtractSource"] = reservationByRule ? "rule" : "none"
+
+  if (env.aiEnabled && env.aiApiKey && shouldUseAiReservationExtraction(reservationByRule)) {
+    const reservationByAi = await extractReservationMailDetailsWithGroq({
+      subject,
+      bodyText,
+      apiKey: env.aiApiKey,
+      maxBodyChars: env.aiMaxBodyChars,
+    })
+    if (reservationByAi) {
+      if (reservationByRule) {
+        const merged = mergeReservationMailDetails(reservationByRule, reservationByAi)
+        reservation = merged ?? reservationByRule
+        reservationExtractSource = "rule_plus_ai"
+      } else {
+        reservation = reservationByAi
+        reservationExtractSource = "ai"
+      }
+    }
+  }
 
   return {
     id: String(data?.id ?? normalizedMessageId),
@@ -458,6 +526,7 @@ async function fetchGmailMessageAlert(
     snippet,
     internalDateIso,
     reservation,
+    reservationExtractSource,
   }
 }
 
@@ -654,6 +723,159 @@ function extractReservationMailDetails(subject: string, bodyText: string): Reser
   return hasAny ? details : null
 }
 
+function hasAnyReservationMailDetails(details: ReservationMailDetails | null): boolean {
+  if (!details) return false
+  for (const key of RESERVATION_DETAIL_KEYS) {
+    const value = details[key]
+    if (typeof value === "string" && value.trim().length > 0) return true
+  }
+  return false
+}
+
+function normalizeReservationField(raw: unknown, maxLength: number): string | null {
+  if (raw == null) return null
+  const normalized = normalizeInlineText(String(raw))
+  if (!normalized) return null
+  if (normalized.length > maxLength) return `${normalized.slice(0, maxLength)}...`
+  return normalized
+}
+
+function normalizeReservationMailDetails(raw: Partial<ReservationMailDetails>): ReservationMailDetails | null {
+  const details: ReservationMailDetails = {
+    reservationSite: normalizeReservationField(raw.reservationSite, 80),
+    reservationNo: normalizeReservationField(raw.reservationNo, 60),
+    notificationNo: normalizeReservationField(raw.notificationNo, 60),
+    visitDateTime: normalizeReservationField(raw.visitDateTime, 100),
+    partySize: normalizeReservationField(raw.partySize, 50),
+    plan: normalizeReservationField(raw.plan, 140),
+    paymentMethod: normalizeReservationField(raw.paymentMethod, 80),
+    totalAmount: normalizeReservationField(raw.totalAmount, 80),
+    seatName: normalizeReservationField(raw.seatName, 90),
+    representativeName: normalizeReservationField(raw.representativeName, 80),
+    representativePhone: normalizeReservationField(raw.representativePhone, 50),
+  }
+  return hasAnyReservationMailDetails(details) ? details : null
+}
+
+function countReservationCoreFields(details: ReservationMailDetails | null): number {
+  if (!details) return 0
+  const coreKeys: Array<keyof ReservationMailDetails> = [
+    "visitDateTime",
+    "partySize",
+    "plan",
+    "reservationNo",
+    "notificationNo",
+    "totalAmount",
+  ]
+  return coreKeys.reduce((count, key) => count + (details[key] ? 1 : 0), 0)
+}
+
+function shouldUseAiReservationExtraction(details: ReservationMailDetails | null): boolean {
+  if (!details) return true
+  return countReservationCoreFields(details) < 4
+}
+
+function mergeReservationMailDetails(
+  base: ReservationMailDetails | null,
+  fallback: ReservationMailDetails | null,
+): ReservationMailDetails | null {
+  if (!base) return fallback
+  if (!fallback) return base
+  const merged: Partial<ReservationMailDetails> = {}
+  for (const key of RESERVATION_DETAIL_KEYS) {
+    merged[key] = base[key] ?? fallback[key] ?? null
+  }
+  return normalizeReservationMailDetails(merged)
+}
+
+async function extractReservationMailDetailsWithGroq(params: {
+  subject: string
+  bodyText: string
+  apiKey: string
+  maxBodyChars: number
+}): Promise<ReservationMailDetails | null> {
+  const { subject, bodyText, apiKey, maxBodyChars } = params
+  if (!apiKey) return null
+
+  const normalizedSubject = normalizeInlineText(subject).slice(0, 200)
+  const normalizedBody = normalizeMultilineText(bodyText || "")
+  if (!normalizedSubject && !normalizedBody) return null
+  const clippedBody = normalizedBody.length > maxBodyChars ? `${normalizedBody.slice(0, maxBodyChars)}\n...(truncated)...` : normalizedBody
+
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        temperature: 0,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "あなたは予約メールの構造化抽出器です。",
+              "出力はJSONのみ。説明文・コードブロックは禁止。",
+              "不明な項目は null。",
+              "抽出対象: reservationSite, reservationNo, notificationNo, visitDateTime, partySize, plan, paymentMethod, totalAmount, seatName, representativeName, representativePhone, confidence。",
+              "confidence は 0 から 1 の数値。",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: [
+              "以下のメール情報から予約情報を抽出してください。",
+              "件名:",
+              normalizedSubject || "(none)",
+              "",
+              "本文:",
+              clippedBody || "(none)",
+            ].join("\n"),
+          },
+        ],
+      }),
+    })
+
+    if (!response.ok) {
+      const err = await response.text()
+      console.error("Groq reservation extraction failed:", response.status, err)
+      return null
+    }
+
+    const data = await response.json()
+    const content = String(data?.choices?.[0]?.message?.content ?? "").trim()
+    if (!content) return null
+
+    const parsed = parseFirstJsonObject(content)
+    if (!parsed || typeof parsed !== "object") return null
+    const raw = parsed as Record<string, unknown>
+
+    const confidenceRaw = Number(raw.confidence)
+    if (Number.isFinite(confidenceRaw) && confidenceRaw < GMAIL_ALERT_AI_MIN_CONFIDENCE) {
+      return null
+    }
+
+    return normalizeReservationMailDetails({
+      reservationSite: raw.reservationSite ?? raw.reservation_site ?? null,
+      reservationNo: raw.reservationNo ?? raw.reservation_no ?? null,
+      notificationNo: raw.notificationNo ?? raw.notification_no ?? null,
+      visitDateTime: raw.visitDateTime ?? raw.visit_datetime ?? null,
+      partySize: raw.partySize ?? raw.party_size ?? null,
+      plan: raw.plan ?? null,
+      paymentMethod: raw.paymentMethod ?? raw.payment_method ?? null,
+      totalAmount: raw.totalAmount ?? raw.total_amount ?? null,
+      seatName: raw.seatName ?? raw.seat_name ?? null,
+      representativeName: raw.representativeName ?? raw.representative_name ?? null,
+      representativePhone: raw.representativePhone ?? raw.representative_phone ?? null,
+    })
+  } catch (err) {
+    console.error("Failed to extract reservation details with Groq:", err)
+    return null
+  }
+}
+
 function parseColonSeparatedLines(text: string): Map<string, string> {
   const map = new Map<string, string>()
   const lines = String(text ?? "").split(/\n/)
@@ -698,6 +920,54 @@ function captureFirstMatch(texts: string[], patterns: RegExp[]): string | null {
     }
   }
   return null
+}
+
+function parseFirstJsonObject(raw: string): unknown | null {
+  const text = String(raw ?? "")
+  const start = text.indexOf("{")
+  if (start < 0) return null
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (ch === "\\") {
+        escaped = true
+      } else if (ch === "\"") {
+        inString = false
+      }
+      continue
+    }
+    if (ch === "\"") {
+      inString = true
+      continue
+    }
+    if (ch === "{") {
+      depth += 1
+      continue
+    }
+    if (ch === "}") {
+      depth -= 1
+      if (depth === 0) {
+        const candidate = text.slice(start, i + 1)
+        try {
+          return JSON.parse(candidate)
+        } catch {
+          return null
+        }
+      }
+    }
+  }
+
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
 function truncateForLine(value: string, maxLength: number): string {
