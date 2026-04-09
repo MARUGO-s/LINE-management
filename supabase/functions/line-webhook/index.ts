@@ -2818,8 +2818,8 @@ async function createCalendarEvent(
   }
   const endDate = new Date(startDate.getTime() + command.durationMin * 60 * 1000)
   const accessToken = providedAccessToken || await fetchGoogleAccessToken(env)
-  const startDateTimeJst = `${command.date}T${normalizedStartTime}:00+09:00`
-  const endDateTimeJst = `${endLocal.date}T${endLocal.time}:00+09:00`
+  const startDateTimeLocal = `${command.date}T${normalizedStartTime}:00`
+  const endDateTimeLocal = `${endLocal.date}T${endLocal.time}:00`
 
   const calendarPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`
   const response = await fetch(calendarPath, {
@@ -2832,10 +2832,12 @@ async function createCalendarEvent(
       summary: command.title,
       description: `LINE room_id: ${roomId}\nLINE user_id: ${userId ?? 'unknown'}\nsource: line-webhook`,
       start: {
-        dateTime: startDateTimeJst,
+        dateTime: startDateTimeLocal,
+        timeZone: env.timezone,
       },
       end: {
-        dateTime: endDateTimeJst,
+        dateTime: endDateTimeLocal,
+        timeZone: env.timezone,
       },
     }),
   })
