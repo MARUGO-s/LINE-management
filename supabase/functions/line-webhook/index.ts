@@ -2545,10 +2545,22 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
 
 function looksLikeAnnouncementText(compactText: string): boolean {
   if (!compactText) return false
+  if (looksLikeExplicitCalendarQuestion(compactText)) return false
   const hasBroadcastMarker = /(@all|各位|周知|共有|協力|お願い致します|お願いいたします|お願いします|よろしくお願いします|よろしくお願いいたします|引き続き)/.test(compactText)
   if (!hasBroadcastMarker) return false
   if (compactText.length >= 60) return true
   return /確認をお願い|共有をお願い|周知をお願い/.test(compactText)
+}
+
+function looksLikeExplicitCalendarQuestion(compactText: string): boolean {
+  if (!compactText) return false
+  if (/^予定(?:確認|一覧|報告)/.test(compactText)) return true
+
+  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compactText)
+  if (!hasQuestionIntent) return false
+
+  const hasCalendarHint = /(\d{4}[\/.\-]\d{1,2}|\d{4}年\d{1,2}月|\d{1,2}月|今日|明日|今週|来週|今月|来月|今後|これから|予定|会議|打ち合わせ|打合せ|ミーティング|mtg|meeting|予約|アポ|面談|イベント)/.test(compactText)
+  return hasCalendarHint
 }
 
 function detectRangeToken(compactText: string): string | null {
