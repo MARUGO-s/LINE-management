@@ -2726,14 +2726,23 @@ async function createCalendarEvent(
   userId: string | null,
   providedAccessToken?: string,
 ): Promise<CalendarCreateResult> {
+  const normalizedStartTime = normalizeTimeToHhMm(command.time)
+  if (!normalizedStartTime) {
+    return { ok: false, error: '時刻の解釈に失敗しました。' }
+  }
+  const endLocal = addMinutesToLocalDateTime(command.date, normalizedStartTime, command.durationMin)
+  if (!endLocal) {
+    return { ok: false, error: '終了時刻の解釈に失敗しました。' }
+  }
+
   const startDate = parseJstDateTime(command.date, command.time)
   if (!startDate) {
     return { ok: false, error: '日時の解釈に失敗しました。' }
   }
   const endDate = new Date(startDate.getTime() + command.durationMin * 60 * 1000)
   const accessToken = providedAccessToken || await fetchGoogleAccessToken(env)
-  const startDateTimeLocal = formatGoogleCalendarDateTimeWithOffset(startDate, env.timezone)
-  const endDateTimeLocal = formatGoogleCalendarDateTimeWithOffset(endDate, env.timezone)
+  const startDateTimeLocal = `${command.date}T${normalizedStartTime}:00`
+  const endDateTimeLocal = `${endLocal.date}T${endLocal.time}:00`
 
   const calendarPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`
   const response = await fetch(calendarPath, {
@@ -2747,9 +2756,11 @@ async function createCalendarEvent(
       description: `LINE room_id: ${roomId}\nLINE user_id: ${userId ?? 'unknown'}\nsource: line-webhook`,
       start: {
         dateTime: startDateTimeLocal,
+        timeZone: env.timezone,
       },
       end: {
         dateTime: endDateTimeLocal,
+        timeZone: env.timezone,
       },
     }),
   })
@@ -2762,6 +2773,30 @@ async function createCalendarEvent(
   const created = await response.json()
   const summary = String(created?.summary ?? command.title)
   return { ok: true, summary, startDate, endDate }
+}
+
+function normalizeTimeToHhMm(time: string): string | null {
+  if (!isValidTime(time)) return null
+  const [hour, minute] = time.split(':').map(Number)
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+}
+
+function addMinutesToLocalDateTime(
+  date: string,
+  time: string,
+  minutes: number,
+): { date: string; time: string } | null {
+  if (!isValidDate(date) || !isValidTime(time)) return null
+  const [year, month, day] = date.split('-').map(Number)
+  const [hour, minute] = time.split(':').map(Number)
+  const base = new Date(Date.UTC(year, month - 1, day, hour, minute, 0, 0))
+  const next = new Date(base.getTime() + minutes * 60 * 1000)
+  const yy = String(next.getUTCFullYear()).padStart(4, '0')
+  const mm = String(next.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(next.getUTCDate()).padStart(2, '0')
+  const hh = String(next.getUTCHours()).padStart(2, '0')
+  const min = String(next.getUTCMinutes()).padStart(2, '0')
+  return { date: `${yy}-${mm}-${dd}`, time: `${hh}:${min}` }
 }
 
 function formatGoogleCalendarDateTimeLocal(date: Date, timezone: string): {
