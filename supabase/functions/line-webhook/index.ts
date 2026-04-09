@@ -2594,9 +2594,6 @@ async function autoCreateCalendarEventsFromCommands(
   const successes: Array<{
     summary: string
     startDate: Date
-    savedStartRaw?: string
-    savedStartTimeZone?: string
-    eventLink?: string
   }> = []
   const failures: string[] = []
 
@@ -2606,9 +2603,6 @@ async function autoCreateCalendarEventsFromCommands(
       successes.push({
         summary: result.summary,
         startDate: result.startDate,
-        savedStartRaw: result.savedStartRaw,
-        savedStartTimeZone: result.savedStartTimeZone,
-        eventLink: result.eventLink,
       })
     } else {
       failures.push(result.error)
@@ -2642,14 +2636,6 @@ async function autoCreateCalendarEventsFromCommands(
   }
   if (failures.length > 0) {
     lines.push(`登録失敗 ${failures.length} 件`)
-  }
-  const first = successes[0]
-  if (first?.savedStartRaw) {
-    lines.push(`保存確認(start): ${first.savedStartRaw}${first.savedStartTimeZone ? ` [${first.savedStartTimeZone}]` : ''}`)
-    lines.push(`保存確認(tz): create=${CALENDAR_CREATE_TIMEZONE}, env=${env.timezone}`)
-    if (first.eventLink) {
-      lines.push(`確認URL: ${first.eventLink}`)
-    }
   }
   return lines.join('\n')
 }
@@ -2995,19 +2981,12 @@ async function createCalendarEventReply(
   }
   const startText = formatDateTimeForLine(result.startDate, env.timezone)
   const endText = formatDateTimeForLine(result.endDate, env.timezone)
-  const debugLines = [
-    `保存確認(start): ${result.savedStartRaw ?? 'n/a'}${result.savedStartTimeZone ? ` [${result.savedStartTimeZone}]` : ''}`,
-    `保存確認(end): ${result.savedEndRaw ?? 'n/a'}${result.savedEndTimeZone ? ` [${result.savedEndTimeZone}]` : ''}`,
-    `保存確認(tz): create=${CALENDAR_CREATE_TIMEZONE}, env=${env.timezone}`,
-    ...(result.eventLink ? [`確認URL: ${result.eventLink}`] : []),
-  ]
 
   return [
     '予定を登録しました。',
     `件名: ${result.summary}`,
     `開始: ${startText}`,
     `終了: ${endText}`,
-    ...debugLines,
   ].join('\n')
 }
 
