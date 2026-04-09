@@ -2834,17 +2834,55 @@ async function createCalendarEvent(
   }
 
   const created = await response.json() as GoogleCalendarEvent
-  const summary = String(created?.summary ?? command.title)
+  let finalized = created
+  if (created?.id) {
+    const patched = await patchCalendarEventTime(created.id, env, accessToken, startDate, endDate)
+    if (patched) finalized = patched
+  }
+  const summary = String(finalized?.summary ?? command.title)
   return {
     ok: true,
     summary,
     startDate,
     endDate,
-    savedStartRaw: created?.start?.dateTime ?? created?.start?.date,
-    savedStartTimeZone: created?.start?.timeZone,
-    savedEndRaw: created?.end?.dateTime ?? created?.end?.date,
-    savedEndTimeZone: created?.end?.timeZone,
+    savedStartRaw: finalized?.start?.dateTime ?? finalized?.start?.date,
+    savedStartTimeZone: finalized?.start?.timeZone,
+    savedEndRaw: finalized?.end?.dateTime ?? finalized?.end?.date,
+    savedEndTimeZone: finalized?.end?.timeZone,
   }
+}
+
+async function patchCalendarEventTime(
+  eventId: string,
+  env: CalendarEnv,
+  accessToken: string,
+  startDate: Date,
+  endDate: Date,
+): Promise<GoogleCalendarEvent | null> {
+  const eventPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events/${encodeURIComponent(eventId)}`
+  const patchResponse = await fetch(eventPath, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      start: {
+        dateTime: startDate.toISOString(),
+        timeZone: 'UTC',
+      },
+      end: {
+        dateTime: endDate.toISOString(),
+        timeZone: 'UTC',
+      },
+    }),
+  })
+  if (!patchResponse.ok) {
+    const text = await patchResponse.text()
+    console.error(`Google Calendar PATCH error (${patchResponse.status}): ${text}`)
+    return null
+  }
+  return await patchResponse.json() as GoogleCalendarEvent
 }
 
 function normalizeTimeToHhMm(time: string): string | null {
