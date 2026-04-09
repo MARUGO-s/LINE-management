@@ -508,7 +508,7 @@
         '<div class="item-body">',
         '<span class="tag">' + escapeHtml(type) + '</span>',
         '<div class="item-line" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</div>',
-        '<div class="item-line sub" title="room_id: ' + escapeHtml(item.room_id || '-') + '">room_id: ' + escapeHtml(item.room_id || '-') + '</div>',
+        '<div class="item-line sub" title="ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '">ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '</div>',
         '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item.created_at)) + '</div>',
         '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(mime) + '">MIME: ' + escapeHtml(mime) + '</div>',
