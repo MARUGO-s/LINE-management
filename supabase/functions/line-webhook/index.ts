@@ -2546,22 +2546,23 @@ function parseCalendarListScope(bodyRaw: string): Omit<Extract<CalendarCommand, 
 
 function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCommand, { kind: 'list' }>, 'kind'> | null {
   const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
-  if (!compact) return null
-  if (/^予定(?:確認|一覧|報告)/.test(compact)) return null
-  if (looksLikeAnnouncementText(compact)) return null
+  const compactNoPunct = compact.replace(/[?？!！。．、,]+/g, '')
+  if (!compactNoPunct) return null
+  if (/^予定(?:確認|一覧|報告)/.test(compactNoPunct)) return null
+  if (looksLikeAnnouncementText(compactNoPunct)) return null
 
-  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compact)
-  const hasShortListIntent = /(?:今日|明日|今週|来週|今月|来月|当月|今月中|来月中|今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月|\d{1,2}月|\d{4}年\d{1,2}月|\d{4}[\/.-]\d{1,2}|\d{4}年)(?:の)?予定(?:一覧|確認|報告)?(?:だけ)?$/.test(compact)
+  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compactNoPunct)
+  const hasShortListIntent = /(?:今日|明日|今週|来週|今月|来月|当月|今月中|来月中|今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月|\d{1,2}月|\d{4}年\d{1,2}月|\d{4}[\/.-]\d{1,2}|\d{4}年)(?:の)?予定(?:一覧|確認|報告)?(?:だけ)?(?:は|って)?$/.test(compactNoPunct)
   if (!hasQuestionIntent && !hasShortListIntent) return null
 
-  const hasScheduleHint = /(予定|会議|打ち合わせ|打合せ|ミーティング|meeting|mtg|予約|アポ|面談|イベント)/.test(compact)
+  const hasScheduleHint = /(予定|会議|打ち合わせ|打合せ|ミーティング|meeting|mtg|予約|アポ|面談|イベント)/.test(compactNoPunct)
   if (!hasScheduleHint) return null
 
-  const scopeToken = detectRangeToken(compact)
+  const scopeToken = detectRangeToken(compactNoPunct)
   const scope = scopeToken ? parseCalendarListScope(scopeToken) : { scope: 'upcoming_30d' as CalendarListScope }
   if (!scope) return null
 
-  let residue = scopeToken ? compact.replace(scopeToken, '') : compact
+  let residue = scopeToken ? compactNoPunct.replace(scopeToken, '') : compactNoPunct
   residue = residue
     .replace(/(?:の)?予定(?:一覧|確認|報告)?/g, ' ')
     .replace(/(?:は|を|に|で|が|って|とは)/g, ' ')
