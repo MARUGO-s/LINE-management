@@ -163,6 +163,7 @@ const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 500 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
 const MAX_MEDIA_UPLOAD_MAX_MB = 20
+const CALENDAR_CREATE_TIMEZONE = 'Asia/Tokyo'
 const STORABLE_LINE_MEDIA_TYPES = new Set<StorableLineMediaType>(['image', 'video', 'audio', 'file'])
 const KEYWORD_SYNONYM_GROUPS = [
   ['ミーティング', 'meeting', 'mtg', '会議', '打ち合わせ', '打合せ', '商談'],
@@ -2440,6 +2441,7 @@ async function autoCreateCalendarEventsFromCommands(
   const first = successes[0]
   if (first?.savedStartRaw) {
     lines.push(`保存確認(start): ${first.savedStartRaw}${first.savedStartTimeZone ? ` [${first.savedStartTimeZone}]` : ''}`)
+    lines.push(`保存確認(tz): create=${CALENDAR_CREATE_TIMEZONE}, env=${env.timezone}`)
   }
   return lines.join('\n')
 }
@@ -2785,6 +2787,7 @@ async function createCalendarEventReply(
   const debugLines = [
     `保存確認(start): ${result.savedStartRaw ?? 'n/a'}${result.savedStartTimeZone ? ` [${result.savedStartTimeZone}]` : ''}`,
     `保存確認(end): ${result.savedEndRaw ?? 'n/a'}${result.savedEndTimeZone ? ` [${result.savedEndTimeZone}]` : ''}`,
+    `保存確認(tz): create=${CALENDAR_CREATE_TIMEZONE}, env=${env.timezone}`,
   ]
 
   return [
@@ -2833,11 +2836,11 @@ async function createCalendarEvent(
       description: `LINE room_id: ${roomId}\nLINE user_id: ${userId ?? 'unknown'}\nsource: line-webhook`,
       start: {
         dateTime: startDateTimeLocal,
-        timeZone: env.timezone,
+        timeZone: CALENDAR_CREATE_TIMEZONE,
       },
       end: {
         dateTime: endDateTimeLocal,
-        timeZone: env.timezone,
+        timeZone: CALENDAR_CREATE_TIMEZONE,
       },
     }),
   })
