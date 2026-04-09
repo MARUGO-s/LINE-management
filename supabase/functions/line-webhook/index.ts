@@ -83,6 +83,7 @@ type AiListIntent = {
 
 type GoogleCalendarEvent = {
   id?: string
+  htmlLink?: string
   summary?: string
   description?: string
   location?: string
@@ -101,6 +102,8 @@ type CalendarCreateResult =
       savedStartTimeZone?: string
       savedEndRaw?: string
       savedEndTimeZone?: string
+      eventId?: string
+      eventLink?: string
     }
   | { ok: false; error: string }
 
@@ -2393,6 +2396,7 @@ async function autoCreateCalendarEventsFromCommands(
     startDate: Date
     savedStartRaw?: string
     savedStartTimeZone?: string
+    eventLink?: string
   }> = []
   const failures: string[] = []
 
@@ -2404,6 +2408,7 @@ async function autoCreateCalendarEventsFromCommands(
         startDate: result.startDate,
         savedStartRaw: result.savedStartRaw,
         savedStartTimeZone: result.savedStartTimeZone,
+        eventLink: result.eventLink,
       })
     } else {
       failures.push(result.error)
@@ -2442,6 +2447,9 @@ async function autoCreateCalendarEventsFromCommands(
   if (first?.savedStartRaw) {
     lines.push(`保存確認(start): ${first.savedStartRaw}${first.savedStartTimeZone ? ` [${first.savedStartTimeZone}]` : ''}`)
     lines.push(`保存確認(tz): create=${CALENDAR_CREATE_TIMEZONE}, env=${env.timezone}`)
+    if (first.eventLink) {
+      lines.push(`確認URL: ${first.eventLink}`)
+    }
   }
   return lines.join('\n')
 }
@@ -2788,6 +2796,7 @@ async function createCalendarEventReply(
     `保存確認(start): ${result.savedStartRaw ?? 'n/a'}${result.savedStartTimeZone ? ` [${result.savedStartTimeZone}]` : ''}`,
     `保存確認(end): ${result.savedEndRaw ?? 'n/a'}${result.savedEndTimeZone ? ` [${result.savedEndTimeZone}]` : ''}`,
     `保存確認(tz): create=${CALENDAR_CREATE_TIMEZONE}, env=${env.timezone}`,
+    ...(result.eventLink ? [`確認URL: ${result.eventLink}`] : []),
   ]
 
   return [
@@ -2861,6 +2870,8 @@ async function createCalendarEvent(
     savedStartTimeZone: finalized?.start?.timeZone,
     savedEndRaw: finalized?.end?.dateTime ?? finalized?.end?.date,
     savedEndTimeZone: finalized?.end?.timeZone,
+    eventId: finalized?.id,
+    eventLink: finalized?.htmlLink,
   }
 }
 
