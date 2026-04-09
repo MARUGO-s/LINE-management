@@ -2387,13 +2387,23 @@ async function autoCreateCalendarEventsFromCommands(
 
   const targets = validFutureCommands.slice(0, AI_AUTO_CREATE_MAX_EVENTS)
   const accessToken = await fetchGoogleAccessToken(env)
-  const successes: Array<{ summary: string; startDate: Date }> = []
+  const successes: Array<{
+    summary: string
+    startDate: Date
+    savedStartRaw?: string
+    savedStartTimeZone?: string
+  }> = []
   const failures: string[] = []
 
   for (const cmd of targets) {
     const result = await createCalendarEvent(cmd, env, roomId, userId, accessToken)
     if (result.ok) {
-      successes.push({ summary: result.summary, startDate: result.startDate })
+      successes.push({
+        summary: result.summary,
+        startDate: result.startDate,
+        savedStartRaw: result.savedStartRaw,
+        savedStartTimeZone: result.savedStartTimeZone,
+      })
     } else {
       failures.push(result.error)
     }
@@ -2426,6 +2436,10 @@ async function autoCreateCalendarEventsFromCommands(
   }
   if (failures.length > 0) {
     lines.push(`登録失敗 ${failures.length} 件`)
+  }
+  const first = successes[0]
+  if (first?.savedStartRaw) {
+    lines.push(`保存確認(start): ${first.savedStartRaw}${first.savedStartTimeZone ? ` [${first.savedStartTimeZone}]` : ''}`)
   }
   return lines.join('\n')
 }
