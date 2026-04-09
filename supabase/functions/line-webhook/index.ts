@@ -264,229 +264,226 @@ Deno.serve(async (req) => {
       }
 
       if (event.message?.type === 'text') {
+        const roomReplyPolicy = await loadRoomReplyPolicy(
+          supabase,
+          roomId,
+          roomReplyPolicyCache,
+        )
         const text = String(event.message.text ?? '').trim()
-        let forceAiMessageSearch = false
-        let forceAiCalendarList = false
-        let forceAiCalendarCreate = false
+        if (isRoomBotReplyEnabled(roomReplyPolicy)) {
+          let forceAiMessageSearch = false
+          let forceAiCalendarList = false
+          let forceAiCalendarCreate = false
 
-        if (calendarEnvState.ok) {
-          const confirmationReply = await tryHandlePendingCalendarConfirmation(
-            text,
-            supabase,
-            calendarEnvState.env,
-            roomId,
-            userId,
-          )
-          if (confirmationReply) {
-            if (!lineAccessToken) {
-              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply pending confirmation.')
+          if (calendarEnvState.ok) {
+            const confirmationReply = await tryHandlePendingCalendarConfirmation(
+              text,
+              supabase,
+              calendarEnvState.env,
+              roomId,
+              userId,
+            )
+            if (confirmationReply) {
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply pending confirmation.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for pending confirmation.')
+                continue
+              }
+              const replyResult = await replyLineMessage(replyToken, confirmationReply, lineAccessToken)
+              if (!replyResult.ok) {
+                console.error('Failed to reply pending confirmation:', replyResult.error)
+              }
               continue
             }
-            if (!replyToken) {
-              console.error('Missing replyToken for pending confirmation.')
-              continue
-            }
-            const replyResult = await replyLineMessage(replyToken, confirmationReply, lineAccessToken)
-            if (!replyResult.ok) {
-              console.error('Failed to reply pending confirmation:', replyResult.error)
-            }
-            continue
           }
-        }
 
-        if (!!groqApiKey && text) {
-          const primaryIntent = await extractPrimaryIntentWithGroq(
-            text,
-            messageRetentionDays,
-            calendarEnvState.ok ? calendarEnvState.env.timezone : CALENDAR_CREATE_TIMEZONE,
-            groqApiKey,
-          )
-          if (primaryIntent && primaryIntent.intent !== 'none') {
-            if (primaryIntent.confidence >= AI_PRIMARY_INTENT_MIN_CONFIDENCE) {
-              forceAiMessageSearch = primaryIntent.intent === 'search_messages'
-              forceAiCalendarList = primaryIntent.intent === 'list_calendar'
-              forceAiCalendarCreate = primaryIntent.intent === 'create_calendar'
-            } else if (primaryIntent.confidence >= AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE) {
-              const roomReplyPolicy = await loadRoomReplyPolicy(
-                supabase,
-                roomId,
-                roomReplyPolicyCache,
-              )
-              if (isRoomInteractiveReplyEnabled(roomReplyPolicy)) {
-                const confirmPrompt = buildPrimaryIntentConfirmationPrompt(primaryIntent)
-                if (confirmPrompt) {
-                  if (!lineAccessToken) {
-                    console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI primary-intent confirmation.')
+          if (!!groqApiKey && text) {
+            const primaryIntent = await extractPrimaryIntentWithGroq(
+              text,
+              messageRetentionDays,
+              calendarEnvState.ok ? calendarEnvState.env.timezone : CALENDAR_CREATE_TIMEZONE,
+              groqApiKey,
+            )
+            if (primaryIntent && primaryIntent.intent !== 'none') {
+              if (primaryIntent.confidence >= AI_PRIMARY_INTENT_MIN_CONFIDENCE) {
+                forceAiMessageSearch = primaryIntent.intent === 'search_messages'
+                forceAiCalendarList = primaryIntent.intent === 'list_calendar'
+                forceAiCalendarCreate = primaryIntent.intent === 'create_calendar'
+              } else if (primaryIntent.confidence >= AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE) {
+                if (isRoomInteractiveReplyEnabled(roomReplyPolicy)) {
+                  const confirmPrompt = buildPrimaryIntentConfirmationPrompt(primaryIntent)
+                  if (confirmPrompt) {
+                    if (!lineAccessToken) {
+                      console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI primary-intent confirmation.')
+                      continue
+                    }
+                    if (!replyToken) {
+                      console.error('Missing replyToken for AI primary-intent confirmation.')
+                      continue
+                    }
+                    const replyResult = await replyLineMessage(replyToken, confirmPrompt, lineAccessToken)
+                    if (!replyResult.ok) {
+                      console.error('Failed to reply AI primary-intent confirmation:', replyResult.error)
+                    }
                     continue
                   }
-                  if (!replyToken) {
-                    console.error('Missing replyToken for AI primary-intent confirmation.')
-                    continue
-                  }
-                  const replyResult = await replyLineMessage(replyToken, confirmPrompt, lineAccessToken)
-                  if (!replyResult.ok) {
-                    console.error('Failed to reply AI primary-intent confirmation:', replyResult.error)
-                  }
-                  continue
                 }
               }
             }
           }
-        }
 
-        const messageSearchParse = parseMessageSearchCommand(text, messageRetentionDays)
-        let messageSearchCommand: MessageSearchCommand | null = null
-        let messageSearchError: string | null = null
+          const messageSearchParse = parseMessageSearchCommand(text, messageRetentionDays)
+          let messageSearchCommand: MessageSearchCommand | null = null
+          let messageSearchError: string | null = null
 
-        if (messageSearchParse.matched) {
-          messageSearchCommand = messageSearchParse.command
-          messageSearchError = messageSearchParse.error
-        } else if (!!groqApiKey && (looksLikeMessageSearchQuestion(text) || forceAiMessageSearch)) {
-          const aiSearchIntent = await extractMessageSearchIntentWithGroq(text, messageRetentionDays, groqApiKey)
-          if (aiSearchIntent && isAcceptableAiMessageSearchIntent(aiSearchIntent)) {
-            messageSearchCommand = {
-              kind: 'search_messages',
-              keyword: aiSearchIntent.keyword,
-              days: aiSearchIntent.days,
-              scope: aiSearchIntent.scope,
+          if (messageSearchParse.matched) {
+            messageSearchCommand = messageSearchParse.command
+            messageSearchError = messageSearchParse.error
+          } else if (!!groqApiKey && (looksLikeMessageSearchQuestion(text) || forceAiMessageSearch)) {
+            const aiSearchIntent = await extractMessageSearchIntentWithGroq(text, messageRetentionDays, groqApiKey)
+            if (aiSearchIntent && isAcceptableAiMessageSearchIntent(aiSearchIntent)) {
+              messageSearchCommand = {
+                kind: 'search_messages',
+                keyword: aiSearchIntent.keyword,
+                days: aiSearchIntent.days,
+                scope: aiSearchIntent.scope,
+              }
             }
           }
-        }
 
-        if (messageSearchCommand || messageSearchError) {
-          const messageSearchEnabled = await loadRoomMessageSearchEnabled(
-            supabase,
-            roomId,
-            roomReplyPolicyCache,
-          )
-          if (!messageSearchEnabled) {
-            continue
-          }
-
-          const replyMessage = await buildMessageSearchReply(
-            messageSearchCommand,
-            messageSearchError,
-            supabase,
-            roomId,
-            messageRetentionDays,
-            groqApiKey,
-          )
-
-          if (!lineAccessToken) {
-            console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search.')
-            continue
-          }
-          if (!replyToken) {
-            console.error('Missing replyToken for message search.')
-            continue
-          }
-          const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
-          if (!replyResult.ok) {
-            console.error('Failed to reply message search:', replyResult.error)
-          }
-          continue
-        }
-
-        const commandParse = parseCalendarCommand(text)
-        if (commandParse.matched) {
-          const replyMessage = await buildCalendarReplyMessage(
-            commandParse,
-            calendarEnvState,
-            roomId,
-            userId,
-          )
-
-          if (!lineAccessToken) {
-            console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply to command.')
-            continue
-          }
-          if (!replyToken) {
-            console.error('Missing replyToken for calendar command.')
-            continue
-          }
-
-          const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
-          if (!replyResult.ok) {
-            console.error('Failed to reply calendar command:', replyResult.error)
-          }
-          continue
-        }
-
-        if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && (looksLikeCalendarListQuestion(text) || forceAiCalendarList)) {
-          const aiListIntent = await extractCalendarListIntentWithGroq(
-            text,
-            calendarEnvState.env.timezone,
-            groqApiKey,
-          )
-          if (aiListIntent && isAcceptableAiListIntent(aiListIntent)) {
-            const aiCommand: Extract<CalendarCommand, { kind: 'list' }> = {
-              kind: 'list',
-              scope: aiListIntent.scope,
-              ...(aiListIntent.date ? { date: aiListIntent.date } : {}),
-              ...(typeof aiListIntent.month === 'number' ? { month: aiListIntent.month } : {}),
-              ...(typeof aiListIntent.year === 'number' ? { year: aiListIntent.year } : {}),
-              ...(aiListIntent.keyword ? { keyword: aiListIntent.keyword } : {}),
+          if (messageSearchCommand || messageSearchError) {
+            if (!roomReplyPolicy.messageSearchEnabled) {
+              continue
             }
-            const replyMessage = await listCalendarEventsReply(aiCommand, calendarEnvState.env)
+
+            const replyMessage = await buildMessageSearchReply(
+              messageSearchCommand,
+              messageSearchError,
+              supabase,
+              roomId,
+              messageRetentionDays,
+              groqApiKey,
+            )
 
             if (!lineAccessToken) {
-              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI list intent.')
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search.')
               continue
             }
             if (!replyToken) {
-              console.error('Missing replyToken for AI list intent.')
+              console.error('Missing replyToken for message search.')
               continue
             }
             const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
             if (!replyResult.ok) {
-              console.error('Failed to reply AI list intent:', replyResult.error)
+              console.error('Failed to reply message search:', replyResult.error)
             }
             continue
           }
-        }
 
-        if (aiAutoCreateEnabled && calendarEnvState.ok) {
-          const ruleCommands = extractCalendarCommandsFromText(text)
-          if (ruleCommands.length > 0) {
-            aiAutoCreateReply = await autoCreateCalendarEventsFromCommands(
-              ruleCommands,
-              calendarEnvState.env,
+          const commandParse = parseCalendarCommand(text)
+          if (commandParse.matched) {
+            const replyMessage = await buildCalendarReplyMessage(
+              commandParse,
+              calendarEnvState,
               roomId,
               userId,
-              'ルール抽出',
             )
-          } else if (!!groqApiKey && (looksLikeCalendarCandidate(text) || forceAiCalendarCreate)) {
-            const aiIntent = await extractCalendarIntentWithGroq(
+
+            if (!lineAccessToken) {
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply to command.')
+              continue
+            }
+            if (!replyToken) {
+              console.error('Missing replyToken for calendar command.')
+              continue
+            }
+
+            const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
+            if (!replyResult.ok) {
+              console.error('Failed to reply calendar command:', replyResult.error)
+            }
+            continue
+          }
+
+          if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && (looksLikeCalendarListQuestion(text) || forceAiCalendarList)) {
+            const aiListIntent = await extractCalendarListIntentWithGroq(
               text,
               calendarEnvState.env.timezone,
               groqApiKey,
             )
-            if (aiIntent && isHighConfidenceAiCalendarIntent(aiIntent)) {
-              const reply = await createCalendarEventReply(
-                {
-                  kind: 'create',
-                  date: aiIntent.date,
-                  time: aiIntent.time,
-                  durationMin: aiIntent.durationMin,
-                  title: aiIntent.title,
-                },
+            if (aiListIntent && isAcceptableAiListIntent(aiListIntent)) {
+              const aiCommand: Extract<CalendarCommand, { kind: 'list' }> = {
+                kind: 'list',
+                scope: aiListIntent.scope,
+                ...(aiListIntent.date ? { date: aiListIntent.date } : {}),
+                ...(typeof aiListIntent.month === 'number' ? { month: aiListIntent.month } : {}),
+                ...(typeof aiListIntent.year === 'number' ? { year: aiListIntent.year } : {}),
+                ...(aiListIntent.keyword ? { keyword: aiListIntent.keyword } : {}),
+              }
+              const replyMessage = await listCalendarEventsReply(aiCommand, calendarEnvState.env)
+
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI list intent.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for AI list intent.')
+                continue
+              }
+              const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
+              if (!replyResult.ok) {
+                console.error('Failed to reply AI list intent:', replyResult.error)
+              }
+              continue
+            }
+          }
+
+          if (aiAutoCreateEnabled && calendarEnvState.ok) {
+            const ruleCommands = extractCalendarCommandsFromText(text)
+            if (ruleCommands.length > 0) {
+              aiAutoCreateReply = await autoCreateCalendarEventsFromCommands(
+                ruleCommands,
                 calendarEnvState.env,
                 roomId,
                 userId,
+                'ルール抽出',
               )
-              aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(aiIntent.confidence * 100)}%）。\n${reply}`
-            } else if (aiIntent && isConfirmableAiCalendarIntent(aiIntent)) {
-              const pendingSaved = await savePendingCalendarConfirmation(
-                supabase,
-                roomId,
-                userId,
+            } else if (!!groqApiKey && (looksLikeCalendarCandidate(text) || forceAiCalendarCreate)) {
+              const aiIntent = await extractCalendarIntentWithGroq(
                 text,
-                aiIntent,
+                calendarEnvState.env.timezone,
+                groqApiKey,
               )
-              if (pendingSaved) {
-                aiAutoCreateReply = buildPendingCalendarConfirmationPrompt(aiIntent, calendarEnvState.env.timezone)
-              } else {
-                aiAutoCreateReply = '予定候補を解釈しましたが、確認待ちの保存に失敗しました。もう一度送ってください。'
+              if (aiIntent && isHighConfidenceAiCalendarIntent(aiIntent)) {
+                const reply = await createCalendarEventReply(
+                  {
+                    kind: 'create',
+                    date: aiIntent.date,
+                    time: aiIntent.time,
+                    durationMin: aiIntent.durationMin,
+                    title: aiIntent.title,
+                  },
+                  calendarEnvState.env,
+                  roomId,
+                  userId,
+                )
+                aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(aiIntent.confidence * 100)}%）。\n${reply}`
+              } else if (aiIntent && isConfirmableAiCalendarIntent(aiIntent)) {
+                const pendingSaved = await savePendingCalendarConfirmation(
+                  supabase,
+                  roomId,
+                  userId,
+                  text,
+                  aiIntent,
+                )
+                if (pendingSaved) {
+                  aiAutoCreateReply = buildPendingCalendarConfirmationPrompt(aiIntent, calendarEnvState.env.timezone)
+                } else {
+                  aiAutoCreateReply = '予定候補を解釈しましたが、確認待ちの保存に失敗しました。もう一度送ってください。'
+                }
               }
             }
           }
@@ -1123,17 +1120,12 @@ async function loadRoomReplyPolicy(
   }
 }
 
-async function loadRoomMessageSearchEnabled(
-  supabase: ReturnType<typeof createClient>,
-  roomId: string,
-  cache: Map<string, RoomReplyPolicy>,
-): Promise<boolean> {
-  const policy = await loadRoomReplyPolicy(supabase, roomId, cache)
-  return policy.messageSearchEnabled
-}
-
 function isRoomInteractiveReplyEnabled(policy: RoomReplyPolicy): boolean {
   return policy.isEnabled && policy.messageSearchEnabled
+}
+
+function isRoomBotReplyEnabled(policy: RoomReplyPolicy): boolean {
+  return policy.isEnabled
 }
 
 function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentionDays): MessageSearchParseResult {
