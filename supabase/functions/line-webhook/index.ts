@@ -2747,11 +2747,9 @@ async function createCalendarEvent(
       description: `LINE room_id: ${roomId}\nLINE user_id: ${userId ?? 'unknown'}\nsource: line-webhook`,
       start: {
         dateTime: startDateTimeLocal,
-        timeZone: env.timezone,
       },
       end: {
         dateTime: endDateTimeLocal,
-        timeZone: env.timezone,
       },
     }),
   })
