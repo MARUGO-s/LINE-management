@@ -2147,6 +2147,27 @@ function parseDateTimeSlotFromLine(line: string, baseDate = new Date()): { date:
     )
   }
 
+  const monthDaySlashRangeRegex = /(?:^|[^\d])(\d{1,2})[\/.\-](\d{1,2})(?:日)?(?:\s*[（(][^）)]*[）)])?\s*(?:の|に)?\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))\s*(?:から|[-~〜～‐‑‒–—―ー－])\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))/
+  const monthDaySlashRange = normalized.match(monthDaySlashRangeRegex)
+  if (monthDaySlashRange) {
+    const month = Number(monthDaySlashRange[1])
+    const day = Number(monthDaySlashRange[2])
+    const start = parseFlexibleTimeToken(monthDaySlashRange[3])
+    const end = parseFlexibleTimeToken(monthDaySlashRange[4])
+    if (!start || !end) return null
+    return buildSlotFromDateAndTime(currentYear, month, day, start, end)
+  }
+
+  const monthDaySlashSingleRegex = /(?:^|[^\d])(\d{1,2})[\/.\-](\d{1,2})(?:日)?(?:\s*[（(][^）)]*[）)])?\s*(?:の|に)?\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))(?:\s*から)?/
+  const monthDaySlashSingle = normalized.match(monthDaySlashSingleRegex)
+  if (monthDaySlashSingle) {
+    const month = Number(monthDaySlashSingle[1])
+    const day = Number(monthDaySlashSingle[2])
+    const start = parseFlexibleTimeToken(monthDaySlashSingle[3])
+    if (!start) return null
+    return buildSlotFromDateAndTime(currentYear, month, day, start, null)
+  }
+
   const monthDayRangeRegex = /(\d{1,2})月(\d{1,2})日(?:\s*[（(][^）)]*[）)])?\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))\s*(?:から|[-~〜～‐‑‒–—―ー－])\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))/
   const monthDayRange = normalized.match(monthDayRangeRegex)
   if (monthDayRange) {
@@ -2166,6 +2187,34 @@ function parseDateTimeSlotFromLine(line: string, baseDate = new Date()): { date:
     const start = parseFlexibleTimeToken(monthDaySingle[3])
     if (!start) return null
     return buildSlotFromDateAndTime(currentYear, month, day, start, null)
+  }
+
+  const monthDayJaLoose = normalized.match(/(\d{1,2})月(\d{1,2})日/)
+  if (monthDayJaLoose) {
+    const month = Number(monthDayJaLoose[1])
+    const day = Number(monthDayJaLoose[2])
+    const tail = normalized.slice((monthDayJaLoose.index ?? 0) + monthDayJaLoose[0].length)
+    const looseTimeMatch = tail.match(/([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))(?:\s*(?:から|[-~〜～‐‑‒–—―ー－])\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?)))?/)
+    if (looseTimeMatch) {
+      const start = parseFlexibleTimeToken(looseTimeMatch[1])
+      if (!start) return null
+      const end = looseTimeMatch[2] ? parseFlexibleTimeToken(looseTimeMatch[2]) : null
+      return buildSlotFromDateAndTime(currentYear, month, day, start, end)
+    }
+  }
+
+  const monthDaySlashLoose = normalized.match(/(?:^|[^\d])(\d{1,2})[\/.\-](\d{1,2})(?:日)?/)
+  if (monthDaySlashLoose) {
+    const month = Number(monthDaySlashLoose[1])
+    const day = Number(monthDaySlashLoose[2])
+    const tail = normalized.slice((monthDaySlashLoose.index ?? 0) + monthDaySlashLoose[0].length)
+    const looseTimeMatch = tail.match(/([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))(?:\s*(?:から|[-~〜～‐‑‒–—―ー－])\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?)))?/)
+    if (looseTimeMatch) {
+      const start = parseFlexibleTimeToken(looseTimeMatch[1])
+      if (!start) return null
+      const end = looseTimeMatch[2] ? parseFlexibleTimeToken(looseTimeMatch[2]) : null
+      return buildSlotFromDateAndTime(currentYear, month, day, start, end)
+    }
   }
 
   const dayRangeRegex = /(?:^|[^\d])(\d{1,2})日(?:\s*[（(][^）)]*[）)])?\s*(?:の|に)?\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))\s*(?:から|[-~〜～‐‑‒–—―ー－])\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))/
