@@ -30,6 +30,7 @@ type StorageUsageStats = {
 type MediaType = "image" | "video" | "audio" | "file"
 type MediaListRow = {
   id: number
+  message_id: string
   line_message_id: string
   room_id: string
   room_name: string | null
@@ -41,6 +42,12 @@ type MediaListRow = {
   mime_type: string | null
   file_size_bytes: number
   created_at: string
+}
+type MediaMessageContext = {
+  before_text: string | null
+  before_at: string | null
+  after_text: string | null
+  after_at: string | null
 }
 
 const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
@@ -652,7 +659,7 @@ async function fetchMediaState(
   let query = supabase
     .from("line_message_media")
     .select(
-      "id, line_message_id, room_id, user_id, media_type, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, created_at",
+      "id, message_id, line_message_id, room_id, user_id, media_type, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, created_at",
       { count: "exact" },
     )
     .order("created_at", { ascending: false })
@@ -685,11 +692,17 @@ async function fetchMediaState(
 
   const rows = Array.isArray(data) ? data.map((item) => normalizeMediaListRow(item)).filter((item): item is MediaListRow => item !== null) : []
   const roomNameMap = await fetchRoomNameMapForIds(supabase, rows.map((row) => row.room_id))
+  const mediaContextMap = await fetchMediaContextMap(supabase, rows)
   const items = await Promise.all(rows.map(async (row) => {
     const signedUrl = await createSignedMediaUrl(supabase, row.storage_bucket, row.storage_path)
+    const context = mediaContextMap.get(row.id) ?? null
     return {
       ...row,
       room_name: roomNameMap.get(row.room_id) ?? row.room_name ?? null,
+      context_before_text: context?.before_text ?? null,
+      context_before_at: context?.before_at ?? null,
+      context_after_text: context?.after_text ?? null,
+      context_after_at: context?.after_at ?? null,
       signed_url: signedUrl,
       line_message_tag: formatLineMediaTag(row.line_message_id),
     }
@@ -777,14 +790,16 @@ function normalizeMediaListRow(value: unknown): MediaListRow | null {
   const mediaType = normalizeMediaType(String(value.media_type ?? ""))
   if (!mediaType) return null
 
+  const messageId = toSafeString(value.message_id)
   const lineMessageId = toSafeString(value.line_message_id)
   const roomId = toSafeString(value.room_id)
   const storageBucket = toSafeString(value.storage_bucket)
   const storagePath = toSafeString(value.storage_path)
-  if (!lineMessageId || !roomId || !storageBucket || !storagePath) return null
+  if (!messageId || !lineMessageId || !roomId || !storageBucket || !storagePath) return null
 
   return {
     id: Math.floor(idNum),
+    message_id: messageId,
     line_message_id: lineMessageId,
     room_id: roomId,
     room_name: value.room_name == null ? null : String(value.room_name),
@@ -830,6 +845,132 @@ async function fetchRoomNameMapForIds(
     map.set(id, name)
   }
   return map
+}
+
+async function fetchMediaContextMap(
+  supabase: ReturnType<typeof createClient>,
+  rows: MediaListRow[],
+): Promise<Map<number, MediaMessageContext>> {
+  const contextMap = new Map<number, MediaMessageContext>()
+  if (rows.length === 0) return contextMap
+
+  const anchorMessageIds = Array.from(
+    new Set(rows.map((row) => row.message_id).filter((id) => id.length > 0)),
+  )
+  const anchorMap = new Map<string, { room_id: string; created_at: string }>()
+  if (anchorMessageIds.length > 0) {
+    const { data: anchorRows, error: anchorError } = await supabase
+      .from("line_messages")
+      .select("id, room_id, created_at")
+      .in("id", anchorMessageIds)
+    if (anchorError) {
+      console.error("Failed to fetch anchor line_messages for media context:", anchorError.message)
+    } else {
+      for (const row of Array.isArray(anchorRows) ? anchorRows : []) {
+        const id = toSafeString((row as any)?.id)
+        const roomId = toSafeString((row as any)?.room_id)
+        const createdAt = toSafeString((row as any)?.created_at)
+        if (!id || !roomId || !createdAt) continue
+        anchorMap.set(id, { room_id: roomId, created_at: createdAt })
+      }
+    }
+  }
+
+  const contextEntries = await Promise.all(rows.map(async (row) => {
+    const anchor = anchorMap.get(row.message_id)
+    const roomId = anchor?.room_id || row.room_id
+    const createdAt = anchor?.created_at || row.created_at
+    if (!roomId || !createdAt) {
+      return {
+        mediaId: row.id,
+        context: {
+          before_text: null,
+          before_at: null,
+          after_text: null,
+          after_at: null,
+        } satisfies MediaMessageContext,
+      }
+    }
+
+    const [beforeRes, afterRes] = await Promise.all([
+      supabase
+        .from("line_messages")
+        .select("content, created_at")
+        .eq("room_id", roomId)
+        .lt("created_at", createdAt)
+        .order("created_at", { ascending: false })
+        .limit(8),
+      supabase
+        .from("line_messages")
+        .select("content, created_at")
+        .eq("room_id", roomId)
+        .gt("created_at", createdAt)
+        .order("created_at", { ascending: true })
+        .limit(8),
+    ])
+
+    if (beforeRes.error) {
+      console.error(`Failed to fetch before-context for media ${row.id}:`, beforeRes.error.message)
+    }
+    if (afterRes.error) {
+      console.error(`Failed to fetch after-context for media ${row.id}:`, afterRes.error.message)
+    }
+
+    const before = pickMediaContextCandidate(beforeRes.data)
+    const after = pickMediaContextCandidate(afterRes.data)
+    return {
+      mediaId: row.id,
+      context: {
+        before_text: before?.text ?? null,
+        before_at: before?.created_at ?? null,
+        after_text: after?.text ?? null,
+        after_at: after?.created_at ?? null,
+      } satisfies MediaMessageContext,
+    }
+  }))
+
+  for (const entry of contextEntries) {
+    contextMap.set(entry.mediaId, entry.context)
+  }
+  return contextMap
+}
+
+function pickMediaContextCandidate(
+  rows: unknown,
+): { text: string; created_at: string | null } | null {
+  const list = Array.isArray(rows) ? rows : []
+  for (const row of list) {
+    const rawText = typeof (row as any)?.content === "string" ? String((row as any).content) : ""
+    const text = normalizeMediaContextText(rawText)
+    if (!text) continue
+    const createdAt = toSafeString((row as any)?.created_at) || null
+    return { text, created_at: createdAt }
+  }
+  return null
+}
+
+function normalizeMediaContextText(raw: string): string {
+  if (!raw) return ""
+  const withoutMetaLines = raw
+    .split(/\r?\n/)
+    .map((line) => String(line ?? "").trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !isInternalLineMessageMetaLine(line))
+    .join(" ")
+    .replace(/\[\[MEDIA:[^\]]+\]\]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!withoutMetaLines) return ""
+  return truncateForContext(withoutMetaLines, 120)
+}
+
+function isInternalLineMessageMetaLine(line: string): boolean {
+  return /^(LINE room_id:|LINE user_id:|source:\s*line-webhook)/i.test(line)
+}
+
+function truncateForContext(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, maxChars).trimEnd()}…`
 }
 
 async function createSignedMediaUrl(

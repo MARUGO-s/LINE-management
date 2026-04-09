@@ -268,6 +268,73 @@
       text-decoration: underline;
     }
 
+    .context-block {
+      margin-top: 2px;
+      border: 1px solid rgba(155, 220, 255, 0.18);
+      border-radius: 10px;
+      background: rgba(6, 24, 39, 0.58);
+      overflow: hidden;
+    }
+
+    .context-toggle {
+      cursor: pointer;
+      list-style: none;
+      font-size: 0.78rem;
+      color: #95c4dc;
+      padding: 7px 9px;
+      user-select: none;
+    }
+
+    .context-toggle::-webkit-details-marker {
+      display: none;
+    }
+
+    .context-toggle::before {
+      content: "▶";
+      display: inline-block;
+      margin-right: 6px;
+      font-size: 0.7rem;
+      transform: translateY(-1px);
+      transition: transform 120ms ease;
+    }
+
+    .context-block[open] .context-toggle::before {
+      transform: rotate(90deg) translateY(-1px);
+    }
+
+    .context-list {
+      display: grid;
+      gap: 7px;
+      padding: 0 9px 9px;
+    }
+
+    .context-row {
+      border-left: 2px solid rgba(87, 216, 255, 0.35);
+      padding-left: 7px;
+    }
+
+    .context-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #83b4cd;
+      font-size: 0.72rem;
+      margin-bottom: 2px;
+    }
+
+    .context-label {
+      display: inline-block;
+      min-width: 2.4em;
+      color: #a2dbff;
+    }
+
+    .context-text {
+      color: #d0ebfb;
+      font-size: 0.77rem;
+      line-height: 1.38;
+      word-break: break-word;
+    }
+
     .item-actions {
       margin-top: 4px;
       display: flex;
@@ -437,6 +504,29 @@
       return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
     }
 
+    function compactContextText(value, maxChars) {
+      const src = String(value || '').replace(/\s+/g, ' ').trim();
+      if (!src) return '';
+      const max = Number.isFinite(Number(maxChars)) && Number(maxChars) > 0 ? Number(maxChars) : 72;
+      if (src.length <= max) return src;
+      return src.slice(0, max).trimEnd() + '…';
+    }
+
+    function buildContextRowHtml(label, at, text) {
+      const normalizedText = compactContextText(text, 88);
+      if (!normalizedText) return '';
+      const ts = formatDate(at);
+      return [
+        '<div class="context-row">',
+        '<div class="context-meta">',
+        '<span class="context-label">', escapeHtml(label), '</span>',
+        '<span>', escapeHtml(ts), '</span>',
+        '</div>',
+        '<div class="context-text">', escapeHtml(normalizedText), '</div>',
+        '</div>',
+      ].join('');
+    }
+
     function updateAuthState() {
       const hasToken = !!getToken();
       dom.authState.textContent = hasToken ? '接続準備OK' : '未接続';
@@ -488,6 +578,19 @@
       const signedUrl = String(item.signed_url || '');
       const name = item.original_file_name ? String(item.original_file_name) : '(名称なし)';
       const mime = item.mime_type ? String(item.mime_type) : '-';
+      const beforeContext = buildContextRowHtml('直前', item.context_before_at, item.context_before_text);
+      const afterContext = buildContextRowHtml('直後', item.context_after_at, item.context_after_text);
+      const contextBlock = (beforeContext || afterContext)
+        ? [
+          '<details class="context-block">',
+          '<summary class="context-toggle">前後の会話</summary>',
+          '<div class="context-list">',
+          beforeContext,
+          afterContext,
+          '</div>',
+          '</details>',
+        ].join('')
+        : '';
 
       let preview = '<div class="empty">プレビュー不可</div>';
       if (!signedUrl) {
@@ -513,6 +616,7 @@
         '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(mime) + '">MIME: ' + escapeHtml(mime) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(String(item.line_message_tag || '')) + '">タグ: ' + escapeHtml(String(item.line_message_tag || '-')) + '</div>',
+        contextBlock,
         '<div class="item-actions"><button class="button danger media-delete-btn" type="button" data-media-id="' + escapeHtml(String(item.id || '')) + '">削除</button></div>',
         '</div>',
         '</article>',
