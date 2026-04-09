@@ -2821,8 +2821,8 @@ async function createCalendarEvent(
   }
   const endDate = new Date(startDate.getTime() + command.durationMin * 60 * 1000)
   const accessToken = providedAccessToken || await fetchGoogleAccessToken(env)
-  const startDateTimeLocal = `${command.date}T${normalizedStartTime}:00`
-  const endDateTimeLocal = `${endLocal.date}T${endLocal.time}:00`
+  const startDateTimeLocal = `${command.date}T${normalizedStartTime}:00+09:00`
+  const endDateTimeLocal = `${endLocal.date}T${endLocal.time}:00+09:00`
 
   const calendarPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`
   const response = await fetch(calendarPath, {
