@@ -1463,8 +1463,10 @@ function looksLikeCalendarListQuestion(text: string): boolean {
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   if (!compact) return false
   if (looksLikeAnnouncementText(compact)) return false
+  const hasRuleCreateCandidate = extractCalendarCommandsFromText(text).length > 0
+  if (hasRuleCreateCandidate && !looksLikeExplicitCalendarQuestion(compact)) return false
 
-  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compact)
+  const hasQuestionIntent = /(いつ|何件|ありますか|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compact)
   if (!hasQuestionIntent) return false
 
   const hasCalendarHint =
@@ -2632,8 +2634,10 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
   if (!compactNoPunct) return null
   if (/^予定(?:確認|一覧|報告)/.test(compactNoPunct)) return null
   if (looksLikeAnnouncementText(compactNoPunct)) return null
+  const hasRuleCreateCandidate = extractCalendarCommandsFromText(rawText).length > 0
+  if (hasRuleCreateCandidate && !looksLikeExplicitCalendarQuestion(compactNoPunct)) return null
 
-  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compactNoPunct)
+  const hasQuestionIntent = /(いつ|何件|ありますか|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compactNoPunct)
   const hasShortListIntent = /(?:今日|明日|今週|来週|今月|来月|当月|今月中|来月中|今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月|\d{1,2}月|\d{4}年\d{1,2}月|\d{4}[\/.-]\d{1,2}|\d{4}年)(?:の)?予定(?:一覧|確認|報告)?(?:だけ)?(?:は|って)?$/.test(compactNoPunct)
   if (!hasQuestionIntent && !hasShortListIntent) return null
 
@@ -2676,7 +2680,7 @@ function looksLikeExplicitCalendarQuestion(compactText: string): boolean {
   if (!compactText) return false
   if (/^予定(?:確認|一覧|報告)/.test(compactText)) return true
 
-  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compactText)
+  const hasQuestionIntent = /(いつ|何件|ありますか|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compactText)
   if (!hasQuestionIntent) return false
 
   const hasCalendarHint = /(\d{4}[\/.\-]\d{1,2}|\d{4}年\d{1,2}月|\d{1,2}月|今日|明日|今週|来週|今月|来月|今後|これから|予定|会議|打ち合わせ|打合せ|ミーティング|mtg|meeting|予約|アポ|面談|イベント)/.test(compactText)
