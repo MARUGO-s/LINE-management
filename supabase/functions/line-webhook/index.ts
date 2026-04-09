@@ -87,12 +87,21 @@ type GoogleCalendarEvent = {
   description?: string
   location?: string
   attendees?: Array<{ email?: string; displayName?: string }>
-  start?: { date?: string; dateTime?: string }
-  end?: { date?: string; dateTime?: string }
+  start?: { date?: string; dateTime?: string; timeZone?: string }
+  end?: { date?: string; dateTime?: string; timeZone?: string }
 }
 
 type CalendarCreateResult =
-  | { ok: true; summary: string; startDate: Date; endDate: Date }
+  | {
+      ok: true
+      summary: string
+      startDate: Date
+      endDate: Date
+      savedStartRaw?: string
+      savedStartTimeZone?: string
+      savedEndRaw?: string
+      savedEndTimeZone?: string
+    }
   | { ok: false; error: string }
 
 type MessageRetentionDays = 60 | 120 | 180
@@ -2759,12 +2768,17 @@ async function createCalendarEventReply(
   }
   const startText = formatDateTimeForLine(result.startDate, env.timezone)
   const endText = formatDateTimeForLine(result.endDate, env.timezone)
+  const debugLines = [
+    `保存確認(start): ${result.savedStartRaw ?? 'n/a'}${result.savedStartTimeZone ? ` [${result.savedStartTimeZone}]` : ''}`,
+    `保存確認(end): ${result.savedEndRaw ?? 'n/a'}${result.savedEndTimeZone ? ` [${result.savedEndTimeZone}]` : ''}`,
+  ]
 
   return [
     '予定を登録しました。',
     `件名: ${result.summary}`,
     `開始: ${startText}`,
     `終了: ${endText}`,
+    ...debugLines,
   ].join('\n')
 }
 
@@ -2819,9 +2833,18 @@ async function createCalendarEvent(
     return { ok: false, error: `Google Calendar API error (${response.status}): ${text}` }
   }
 
-  const created = await response.json()
+  const created = await response.json() as GoogleCalendarEvent
   const summary = String(created?.summary ?? command.title)
-  return { ok: true, summary, startDate, endDate }
+  return {
+    ok: true,
+    summary,
+    startDate,
+    endDate,
+    savedStartRaw: created?.start?.dateTime ?? created?.start?.date,
+    savedStartTimeZone: created?.start?.timeZone,
+    savedEndRaw: created?.end?.dateTime ?? created?.end?.date,
+    savedEndTimeZone: created?.end?.timeZone,
+  }
 }
 
 function normalizeTimeToHhMm(time: string): string | null {
