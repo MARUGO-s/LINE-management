@@ -2732,6 +2732,8 @@ async function createCalendarEvent(
   }
   const endDate = new Date(startDate.getTime() + command.durationMin * 60 * 1000)
   const accessToken = providedAccessToken || await fetchGoogleAccessToken(env)
+  const startDateTimeLocal = formatGoogleCalendarDateTimeLocal(startDate, env.timezone)
+  const endDateTimeLocal = formatGoogleCalendarDateTimeLocal(endDate, env.timezone)
 
   const calendarPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`
   const response = await fetch(calendarPath, {
@@ -2744,11 +2746,11 @@ async function createCalendarEvent(
       summary: command.title,
       description: `LINE room_id: ${roomId}\nLINE user_id: ${userId ?? 'unknown'}\nsource: line-webhook`,
       start: {
-        dateTime: startDate.toISOString(),
+        dateTime: startDateTimeLocal,
         timeZone: env.timezone,
       },
       end: {
-        dateTime: endDate.toISOString(),
+        dateTime: endDateTimeLocal,
         timeZone: env.timezone,
       },
     }),
@@ -2762,6 +2764,33 @@ async function createCalendarEvent(
   const created = await response.json()
   const summary = String(created?.summary ?? command.title)
   return { ok: true, summary, startDate, endDate }
+}
+
+function formatGoogleCalendarDateTimeLocal(date: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(date)
+
+  const partMap = new Map<string, string>()
+  for (const part of parts) {
+    if (part.type === 'literal') continue
+    partMap.set(part.type, part.value)
+  }
+
+  const year = partMap.get('year') ?? '1970'
+  const month = partMap.get('month') ?? '01'
+  const day = partMap.get('day') ?? '01'
+  const hour = partMap.get('hour') ?? '00'
+  const minute = partMap.get('minute') ?? '00'
+  const second = partMap.get('second') ?? '00'
+  return `${year}-${month}-${day}T${hour}:${minute}:${second}`
 }
 
 async function listCalendarEventsReply(
