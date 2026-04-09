@@ -132,6 +132,19 @@ type AiMessageSearchIntent = {
   confidence: number
 }
 
+type AiPrimaryIntent = 'create_calendar' | 'list_calendar' | 'search_messages' | 'none'
+
+type AiPrimaryIntentResult = {
+  intent: AiPrimaryIntent
+  confidence: number
+  reason: string
+}
+
+type RoomReplyPolicy = {
+  isEnabled: boolean
+  messageSearchEnabled: boolean
+}
+
 type SearchMessageRow = {
   room_id: string
   room_label?: string | null
@@ -150,6 +163,8 @@ const AI_MIN_CONFIDENCE = 0.82
 const AI_CONFIRMATION_MIN_CONFIDENCE = 0.68
 const AI_LIST_MIN_CONFIDENCE = 0.72
 const AI_MESSAGE_SEARCH_MIN_CONFIDENCE = 0.72
+const AI_PRIMARY_INTENT_MIN_CONFIDENCE = 0.72
+const AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE = 0.52
 const AI_AUTO_CREATE_MAX_EVENTS = 5
 const PAST_EVENT_GRACE_MS = 5 * 60 * 1000
 const PENDING_CONFIRMATION_TTL_MIN = 30
@@ -229,7 +244,7 @@ Deno.serve(async (req) => {
     const aiAutoCreateEnabled = parseBooleanEnv(Deno.env.get('CALENDAR_AI_AUTO_CREATE_ENABLED'))
     const calendarEnvState = loadCalendarEnv()
     const roomNameSyncDone = new Set<string>()
-    const roomMessageSearchEnabledCache = new Map<string, boolean>()
+    const roomReplyPolicyCache = new Map<string, RoomReplyPolicy>()
     const messageRetentionDays = await loadMessageRetentionDays(supabase)
     const mediaUploadMaxBytes = await loadMediaUploadMaxBytes(supabase)
 
@@ -250,6 +265,10 @@ Deno.serve(async (req) => {
 
       if (event.message?.type === 'text') {
         const text = String(event.message.text ?? '').trim()
+        let forceAiMessageSearch = false
+        let forceAiCalendarList = false
+        let forceAiCalendarCreate = false
+
         if (calendarEnvState.ok) {
           const confirmationReply = await tryHandlePendingCalendarConfirmation(
             text,
@@ -275,6 +294,46 @@ Deno.serve(async (req) => {
           }
         }
 
+        if (!!groqApiKey && text) {
+          const primaryIntent = await extractPrimaryIntentWithGroq(
+            text,
+            messageRetentionDays,
+            calendarEnvState.ok ? calendarEnvState.env.timezone : CALENDAR_CREATE_TIMEZONE,
+            groqApiKey,
+          )
+          if (primaryIntent && primaryIntent.intent !== 'none') {
+            if (primaryIntent.confidence >= AI_PRIMARY_INTENT_MIN_CONFIDENCE) {
+              forceAiMessageSearch = primaryIntent.intent === 'search_messages'
+              forceAiCalendarList = primaryIntent.intent === 'list_calendar'
+              forceAiCalendarCreate = primaryIntent.intent === 'create_calendar'
+            } else if (primaryIntent.confidence >= AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE) {
+              const roomReplyPolicy = await loadRoomReplyPolicy(
+                supabase,
+                roomId,
+                roomReplyPolicyCache,
+              )
+              if (isRoomInteractiveReplyEnabled(roomReplyPolicy)) {
+                const confirmPrompt = buildPrimaryIntentConfirmationPrompt(primaryIntent)
+                if (confirmPrompt) {
+                  if (!lineAccessToken) {
+                    console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI primary-intent confirmation.')
+                    continue
+                  }
+                  if (!replyToken) {
+                    console.error('Missing replyToken for AI primary-intent confirmation.')
+                    continue
+                  }
+                  const replyResult = await replyLineMessage(replyToken, confirmPrompt, lineAccessToken)
+                  if (!replyResult.ok) {
+                    console.error('Failed to reply AI primary-intent confirmation:', replyResult.error)
+                  }
+                  continue
+                }
+              }
+            }
+          }
+        }
+
         const messageSearchParse = parseMessageSearchCommand(text, messageRetentionDays)
         let messageSearchCommand: MessageSearchCommand | null = null
         let messageSearchError: string | null = null
@@ -282,7 +341,7 @@ Deno.serve(async (req) => {
         if (messageSearchParse.matched) {
           messageSearchCommand = messageSearchParse.command
           messageSearchError = messageSearchParse.error
-        } else if (!!groqApiKey && looksLikeMessageSearchQuestion(text)) {
+        } else if (!!groqApiKey && (looksLikeMessageSearchQuestion(text) || forceAiMessageSearch)) {
           const aiSearchIntent = await extractMessageSearchIntentWithGroq(text, messageRetentionDays, groqApiKey)
           if (aiSearchIntent && isAcceptableAiMessageSearchIntent(aiSearchIntent)) {
             messageSearchCommand = {
@@ -298,7 +357,7 @@ Deno.serve(async (req) => {
           const messageSearchEnabled = await loadRoomMessageSearchEnabled(
             supabase,
             roomId,
-            roomMessageSearchEnabledCache,
+            roomReplyPolicyCache,
           )
           if (!messageSearchEnabled) {
             continue
@@ -353,7 +412,7 @@ Deno.serve(async (req) => {
           continue
         }
 
-        if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && looksLikeCalendarListQuestion(text)) {
+        if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && (looksLikeCalendarListQuestion(text) || forceAiCalendarList)) {
           const aiListIntent = await extractCalendarListIntentWithGroq(
             text,
             calendarEnvState.env.timezone,
@@ -396,7 +455,7 @@ Deno.serve(async (req) => {
               userId,
               'ルール抽出',
             )
-          } else if (!!groqApiKey && looksLikeCalendarCandidate(text)) {
+          } else if (!!groqApiKey && (looksLikeCalendarCandidate(text) || forceAiCalendarCreate)) {
             const aiIntent = await extractCalendarIntentWithGroq(
               text,
               calendarEnvState.env.timezone,
@@ -1023,36 +1082,58 @@ function normalizeMessageRetentionDays(value: unknown): MessageRetentionDays {
   return DEFAULT_MESSAGE_RETENTION_DAYS
 }
 
-async function loadRoomMessageSearchEnabled(
+async function loadRoomReplyPolicy(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
-  cache: Map<string, boolean>,
-): Promise<boolean> {
+  cache: Map<string, RoomReplyPolicy>,
+): Promise<RoomReplyPolicy> {
   const normalizedRoomId = String(roomId ?? '').trim()
-  if (!normalizedRoomId || normalizedRoomId === 'unknown') return true
-  if (cache.has(normalizedRoomId)) return cache.get(normalizedRoomId) !== false
+  if (!normalizedRoomId || normalizedRoomId === 'unknown') {
+    return { isEnabled: true, messageSearchEnabled: true }
+  }
+  if (cache.has(normalizedRoomId)) {
+    return cache.get(normalizedRoomId) ?? { isEnabled: true, messageSearchEnabled: true }
+  }
 
   try {
     const { data, error } = await supabase
       .from('room_summary_settings')
-      .select('message_search_enabled')
+      .select('is_enabled, message_search_enabled')
       .eq('room_id', normalizedRoomId)
       .maybeSingle()
 
     if (error) {
-      console.error(`Failed to load message_search_enabled for ${normalizedRoomId}:`, error.message)
-      cache.set(normalizedRoomId, true)
-      return true
+      console.error(`Failed to load room reply policy for ${normalizedRoomId}:`, error.message)
+      const fallback = { isEnabled: true, messageSearchEnabled: true }
+      cache.set(normalizedRoomId, fallback)
+      return fallback
     }
 
-    const enabled = data?.message_search_enabled !== false
-    cache.set(normalizedRoomId, enabled)
-    return enabled
+    const policy: RoomReplyPolicy = {
+      isEnabled: data?.is_enabled !== false,
+      messageSearchEnabled: data?.message_search_enabled !== false,
+    }
+    cache.set(normalizedRoomId, policy)
+    return policy
   } catch (err) {
-    console.error(`Unexpected error while loading message_search_enabled for ${normalizedRoomId}:`, err)
-    cache.set(normalizedRoomId, true)
-    return true
+    console.error(`Unexpected error while loading room reply policy for ${normalizedRoomId}:`, err)
+    const fallback = { isEnabled: true, messageSearchEnabled: true }
+    cache.set(normalizedRoomId, fallback)
+    return fallback
   }
+}
+
+async function loadRoomMessageSearchEnabled(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  cache: Map<string, RoomReplyPolicy>,
+): Promise<boolean> {
+  const policy = await loadRoomReplyPolicy(supabase, roomId, cache)
+  return policy.messageSearchEnabled
+}
+
+function isRoomInteractiveReplyEnabled(policy: RoomReplyPolicy): boolean {
+  return policy.isEnabled && policy.messageSearchEnabled
 }
 
 function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentionDays): MessageSearchParseResult {
@@ -1121,6 +1202,114 @@ function extractMessageSearchKeyword(rawText: string): string {
     .replace(/(を|は|が|に|で|の|から|だけ|について|して|ください|下さい|お願いします|お願い|とか|って|こと|もの|やつ)/g, ' ')
     .replace(/[?？!！。．、,]/g, ' ')
   return normalizeKeywordForFilter(stripped)
+}
+
+async function extractPrimaryIntentWithGroq(
+  text: string,
+  defaultDays: MessageRetentionDays,
+  timezone: string,
+  groqApiKey: string,
+): Promise<AiPrimaryIntentResult | null> {
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${groqApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'あなたはLINEメッセージの一次振り分け用JSON分類器です。',
+              'intent を次の4つから1つだけ返してください: create_calendar, list_calendar, search_messages, none',
+              'create_calendar: 予定を登録/追加すべき文（例: 5/10 14時 試飲会）',
+              'list_calendar: 予定の有無・日時を確認する質問（例: 5月の会議はいつ？）',
+              'search_messages: 過去会話検索の質問（例: 人参の値段の記述ある？）',
+              'none: 上記以外（雑談・告知・反応不要）',
+              `会話検索の日数指定が曖昧なら ${defaultDays} を想定し、分類だけを行うこと。`,
+              `現在時刻基準の解釈タイムゾーンは ${timezone}。`,
+              'JSONのみ返してください。説明文やコードブロックは禁止です。',
+              '返却JSONスキーマ:',
+              '{"intent":"create_calendar|list_calendar|search_messages|none","confidence":number(0-1),"reason":string}',
+            ].join('\n'),
+          },
+          { role: 'user', content: text },
+        ],
+      }),
+    })
+
+    if (!response.ok) {
+      const err = await response.text()
+      console.error('Groq primary-intent extraction failed:', response.status, err)
+      return null
+    }
+
+    const json = await response.json()
+    const content = String(json?.choices?.[0]?.message?.content ?? '').trim()
+    if (!content) return null
+
+    const extracted = parseFirstJsonObject(content)
+    if (!extracted || typeof extracted !== 'object') return null
+
+    const raw = extracted as Record<string, unknown>
+    const intent = normalizeAiPrimaryIntent(String(raw.intent ?? ''))
+    if (!intent) return null
+
+    const confidenceNum = Number(raw.confidence ?? 0)
+    const confidence = Number.isFinite(confidenceNum)
+      ? Math.max(0, Math.min(1, confidenceNum))
+      : 0
+
+    const reason = normalizeInlineText(String(raw.reason ?? ''))
+    return { intent, confidence, reason }
+  } catch (err) {
+    console.error('Failed to extract primary intent with Groq:', err)
+    return null
+  }
+}
+
+function normalizeAiPrimaryIntent(raw: string): AiPrimaryIntent | null {
+  const value = String(raw ?? '').trim().toLowerCase()
+  if (value === 'create_calendar' || value === 'create') return 'create_calendar'
+  if (value === 'list_calendar' || value === 'list') return 'list_calendar'
+  if (value === 'search_messages' || value === 'message_search' || value === 'search') return 'search_messages'
+  if (value === 'none' || value === 'other' || value === 'unknown') return 'none'
+  return null
+}
+
+function buildPrimaryIntentConfirmationPrompt(intent: AiPrimaryIntentResult): string | null {
+  const score = Math.round(Math.max(0, Math.min(1, intent.confidence)) * 100)
+  if (intent.intent === 'create_calendar') {
+    return [
+      `判断があいまいです（信頼度 ${score}%）。`,
+      'このメッセージは「予定登録」で合っていますか？',
+      '登録する場合は、次のように送ってください。',
+      '例: 予定登録 2026-05-10 14:00 試飲会',
+    ].join('\n')
+  }
+  if (intent.intent === 'list_calendar') {
+    return [
+      `判断があいまいです（信頼度 ${score}%）。`,
+      'このメッセージは「予定確認」で合っていますか？',
+      '確認する場合は、次のように送ってください。',
+      '例: 予定確認 2026-05-10',
+      '例: 予定確認 5月 会議',
+    ].join('\n')
+  }
+  if (intent.intent === 'search_messages') {
+    return [
+      `判断があいまいです（信頼度 ${score}%）。`,
+      'このメッセージは「会話検索」で合っていますか？',
+      '検索する場合は、次のように送ってください。',
+      '例: 会話検索 人参 いくら',
+      '例: 会話検索 120日 発注',
+    ].join('\n')
+  }
+  return null
 }
 
 function looksLikeMessageSearchQuestion(text: string): boolean {
