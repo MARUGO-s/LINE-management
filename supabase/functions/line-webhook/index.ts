@@ -2647,8 +2647,9 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
   let residue = scopeToken ? compactNoPunct.replace(scopeToken, '') : compactNoPunct
   residue = residue
     .replace(/(?:の)?予定(?:一覧|確認|報告)?/g, ' ')
+    // Remove sentence endings first; otherwise "で" stripping can leave trailing "す".
+    .replace(/(?:いつ|ありますか|あります|ある|教えて|見せて|みせて|知りたい|確認|一覧|表示|表示して|出して|だして|見たい|確認したい|でしたか|でしょうか|ですか|ますか|すか|です|ます|かな|か)/g, ' ')
     .replace(/(?:は|を|に|で|が|って|とは)/g, ' ')
-    .replace(/(?:いつ|ありますか|あります|ある|教えて|見せて|みせて|知りたい|確認|一覧|表示|表示して|出して|だして|見たい|確認したい|ですか|かな|か)/g, ' ')
     .replace(/(?:今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月)/g, ' ')
     .replace(/[?？!！。．、,]/g, ' ')
     .replace(/^の+/, ' ')
