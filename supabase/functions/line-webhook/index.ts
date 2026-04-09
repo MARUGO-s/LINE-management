@@ -1449,8 +1449,9 @@ function looksLikeCalendarCandidate(text: string): boolean {
 function looksLikeCalendarListQuestion(text: string): boolean {
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   if (!compact) return false
+  if (looksLikeAnnouncementText(compact)) return false
 
-  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある|教えて|見せて|みせて|知りたい|一覧|確認|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compact)
+  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compact)
   if (!hasQuestionIntent) return false
 
   const hasCalendarHint =
@@ -2516,8 +2517,9 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
   const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
   if (!compact) return null
   if (/^予定(?:確認|一覧|報告)/.test(compact)) return null
+  if (looksLikeAnnouncementText(compact)) return null
 
-  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|確認|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compact)
+  const hasQuestionIntent = /(いつ|何件|ありますか|あります|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compact)
   const hasShortListIntent = /(?:今日|明日|今週|来週|今月|来月|当月|今月中|来月中|今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月|\d{1,2}月|\d{4}年\d{1,2}月|\d{4}[\/.-]\d{1,2}|\d{4}年)(?:の)?予定(?:一覧|確認|報告)?(?:だけ)?$/.test(compact)
   if (!hasQuestionIntent && !hasShortListIntent) return null
 
@@ -2539,6 +2541,14 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
 
   const keyword = normalizeKeywordForFilter(residue)
   return keyword ? { ...scope, keyword } : scope
+}
+
+function looksLikeAnnouncementText(compactText: string): boolean {
+  if (!compactText) return false
+  const hasBroadcastMarker = /(@all|各位|周知|共有|協力|お願い致します|お願いいたします|お願いします|よろしくお願いします|よろしくお願いいたします|引き続き)/.test(compactText)
+  if (!hasBroadcastMarker) return false
+  if (compactText.length >= 60) return true
+  return /確認をお願い|共有をお願い|周知をお願い/.test(compactText)
 }
 
 function detectRangeToken(compactText: string): string | null {
