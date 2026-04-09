@@ -695,6 +695,12 @@ async function fetchMediaState(
   const mediaContextMap = await fetchMediaContextMap(supabase, rows)
   const items = await Promise.all(rows.map(async (row) => {
     const signedUrl = await createSignedMediaUrl(supabase, row.storage_bucket, row.storage_path)
+    const downloadUrl = await createSignedMediaDownloadUrl(
+      supabase,
+      row.storage_bucket,
+      row.storage_path,
+      row.original_file_name ?? `${row.line_message_id}`,
+    )
     const context = mediaContextMap.get(row.id) ?? null
     return {
       ...row,
@@ -704,6 +710,7 @@ async function fetchMediaState(
       context_after_text: context?.after_text ?? null,
       context_after_at: context?.after_at ?? null,
       signed_url: signedUrl,
+      download_url: downloadUrl ?? signedUrl,
       line_message_tag: formatLineMediaTag(row.line_message_id),
     }
   }))
@@ -993,6 +1000,43 @@ async function createSignedMediaUrl(
     console.error(`Unexpected error while signing media URL for ${storageBucket}/${storagePath}:`, error)
     return null
   }
+}
+
+async function createSignedMediaDownloadUrl(
+  supabase: ReturnType<typeof createClient>,
+  storageBucket: string,
+  storagePath: string,
+  fileName: string,
+): Promise<string | null> {
+  const safeName = sanitizeDownloadFileName(fileName)
+  const downloadOption: string | boolean = safeName || true
+  try {
+    const { data, error } = await supabase
+      .storage
+      .from(storageBucket)
+      .createSignedUrl(storagePath, MEDIA_SIGNED_URL_EXPIRES_SEC, {
+        download: downloadOption,
+      } as any)
+    if (error) {
+      console.error(`Failed to create signed download URL for ${storageBucket}/${storagePath}:`, error.message)
+      return null
+    }
+    const signedUrl = typeof data?.signedUrl === "string" ? data.signedUrl.trim() : ""
+    return signedUrl || null
+  } catch (error) {
+    console.error(`Unexpected error while signing media download URL for ${storageBucket}/${storagePath}:`, error)
+    return null
+  }
+}
+
+function sanitizeDownloadFileName(value: string): string {
+  const sanitized = String(value ?? "")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!sanitized) return ""
+  if (sanitized.length <= 120) return sanitized
+  return sanitized.slice(0, 120).trimEnd()
 }
 
 function formatLineMediaTag(lineMessageId: string): string {

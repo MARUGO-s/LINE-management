@@ -512,6 +512,15 @@
       return src.slice(0, max).trimEnd() + '…';
     }
 
+    function safeDownloadName(value, fallback) {
+      const normalized = String(value || '')
+        .replace(/[\\/:*?"<>|]+/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const src = normalized || String(fallback || 'line-media');
+      return src.length <= 120 ? src : src.slice(0, 120).trimEnd();
+    }
+
     function buildContextRowHtml(label, at, text) {
       const normalizedText = compactContextText(text, 88);
       if (!normalizedText) return '';
@@ -576,7 +585,9 @@
     function renderMediaItem(item) {
       const type = String(item.media_type || 'file');
       const signedUrl = String(item.signed_url || '');
+      const downloadUrl = String(item.download_url || signedUrl || '');
       const name = item.original_file_name ? String(item.original_file_name) : '(名称なし)';
+      const downloadName = safeDownloadName(name === '(名称なし)' ? '' : name, String(item.line_message_id || 'line-media'));
       const mime = item.mime_type ? String(item.mime_type) : '-';
       const beforeContext = buildContextRowHtml('直前', item.context_before_at, item.context_before_text);
       const afterContext = buildContextRowHtml('直後', item.context_after_at, item.context_after_text);
@@ -602,8 +613,12 @@
       } else if (type === 'audio') {
         preview = '<audio controls preload="metadata" src="' + escapeHtml(signedUrl) + '"></audio>';
       } else {
-        preview = '<div class="empty"><a href="' + escapeHtml(signedUrl) + '" target="_blank" rel="noopener noreferrer">ダウンロード</a></div>';
+        preview = '<div class="empty"><a href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a></div>';
       }
+
+      const downloadAction = downloadUrl
+        ? '<a class="button" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a>'
+        : '';
 
       return [
         '<article class="item">',
@@ -617,7 +632,7 @@
         '<div class="item-line sub" title="' + escapeHtml(mime) + '">MIME: ' + escapeHtml(mime) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(String(item.line_message_tag || '')) + '">タグ: ' + escapeHtml(String(item.line_message_tag || '-')) + '</div>',
         contextBlock,
-        '<div class="item-actions"><button class="button danger media-delete-btn" type="button" data-media-id="' + escapeHtml(String(item.id || '')) + '">削除</button></div>',
+        '<div class="item-actions">' + downloadAction + '<button class="button danger media-delete-btn" type="button" data-media-id="' + escapeHtml(String(item.id || '')) + '">削除</button></div>',
         '</div>',
         '</article>',
       ].join('');
