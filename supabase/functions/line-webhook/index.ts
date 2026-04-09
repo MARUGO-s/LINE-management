@@ -2804,8 +2804,8 @@ async function createCalendarEvent(
   }
   const endDate = new Date(startDate.getTime() + command.durationMin * 60 * 1000)
   const accessToken = providedAccessToken || await fetchGoogleAccessToken(env)
-  const startDateTimeLocal = `${command.date}T${normalizedStartTime}:00`
-  const endDateTimeLocal = `${endLocal.date}T${endLocal.time}:00`
+  const startDateTimeJst = `${command.date}T${normalizedStartTime}:00+09:00`
+  const endDateTimeJst = `${endLocal.date}T${endLocal.time}:00+09:00`
 
   const calendarPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`
   const response = await fetch(calendarPath, {
@@ -2818,12 +2818,10 @@ async function createCalendarEvent(
       summary: command.title,
       description: `LINE room_id: ${roomId}\nLINE user_id: ${userId ?? 'unknown'}\nsource: line-webhook`,
       start: {
-        dateTime: startDateTimeLocal,
-        timeZone: env.timezone,
+        dateTime: startDateTimeJst,
       },
       end: {
-        dateTime: endDateTimeLocal,
-        timeZone: env.timezone,
+        dateTime: endDateTimeJst,
       },
     }),
   })
@@ -2833,12 +2831,7 @@ async function createCalendarEvent(
     return { ok: false, error: `Google Calendar API error (${response.status}): ${text}` }
   }
 
-  const created = await response.json() as GoogleCalendarEvent
-  let finalized = created
-  if (created?.id) {
-    const patched = await patchCalendarEventTime(created.id, env, accessToken, startDate, endDate)
-    if (patched) finalized = patched
-  }
+  const finalized = await response.json() as GoogleCalendarEvent
   const summary = String(finalized?.summary ?? command.title)
   return {
     ok: true,
@@ -2850,39 +2843,6 @@ async function createCalendarEvent(
     savedEndRaw: finalized?.end?.dateTime ?? finalized?.end?.date,
     savedEndTimeZone: finalized?.end?.timeZone,
   }
-}
-
-async function patchCalendarEventTime(
-  eventId: string,
-  env: CalendarEnv,
-  accessToken: string,
-  startDate: Date,
-  endDate: Date,
-): Promise<GoogleCalendarEvent | null> {
-  const eventPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events/${encodeURIComponent(eventId)}`
-  const patchResponse = await fetch(eventPath, {
-    method: 'PATCH',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      start: {
-        dateTime: startDate.toISOString(),
-        timeZone: 'UTC',
-      },
-      end: {
-        dateTime: endDate.toISOString(),
-        timeZone: 'UTC',
-      },
-    }),
-  })
-  if (!patchResponse.ok) {
-    const text = await patchResponse.text()
-    console.error(`Google Calendar PATCH error (${patchResponse.status}): ${text}`)
-    return null
-  }
-  return await patchResponse.json() as GoogleCalendarEvent
 }
 
 function normalizeTimeToHhMm(time: string): string | null {
