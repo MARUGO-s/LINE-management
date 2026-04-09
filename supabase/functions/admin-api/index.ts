@@ -32,6 +32,7 @@ type MediaListRow = {
   id: number
   line_message_id: string
   room_id: string
+  room_name: string | null
   user_id: string | null
   media_type: MediaType
   storage_bucket: string
@@ -683,10 +684,12 @@ async function fetchMediaState(
   }
 
   const rows = Array.isArray(data) ? data.map((item) => normalizeMediaListRow(item)).filter((item): item is MediaListRow => item !== null) : []
+  const roomNameMap = await fetchRoomNameMapForIds(supabase, rows.map((row) => row.room_id))
   const items = await Promise.all(rows.map(async (row) => {
     const signedUrl = await createSignedMediaUrl(supabase, row.storage_bucket, row.storage_path)
     return {
       ...row,
+      room_name: roomNameMap.get(row.room_id) ?? row.room_name ?? null,
       signed_url: signedUrl,
       line_message_tag: formatLineMediaTag(row.line_message_id),
     }
@@ -784,6 +787,7 @@ function normalizeMediaListRow(value: unknown): MediaListRow | null {
     id: Math.floor(idNum),
     line_message_id: lineMessageId,
     room_id: roomId,
+    room_name: value.room_name == null ? null : String(value.room_name),
     user_id: value.user_id == null ? null : String(value.user_id),
     media_type: mediaType,
     storage_bucket: storageBucket,
@@ -793,6 +797,39 @@ function normalizeMediaListRow(value: unknown): MediaListRow | null {
     file_size_bytes: toNonNegativeInteger(value.file_size_bytes),
     created_at: String(value.created_at ?? ""),
   }
+}
+
+async function fetchRoomNameMapForIds(
+  supabase: ReturnType<typeof createClient>,
+  roomIds: string[],
+): Promise<Map<string, string>> {
+  const normalizedIds = Array.from(
+    new Set(
+      roomIds
+        .map((value) => String(value ?? "").trim())
+        .filter((value) => value.length > 0),
+    ),
+  )
+  if (normalizedIds.length === 0) return new Map<string, string>()
+
+  const { data, error } = await supabase
+    .from("room_summary_settings")
+    .select("room_id, room_name")
+    .in("room_id", normalizedIds)
+
+  if (error) {
+    console.error("Failed to fetch room names for media list:", error.message)
+    return new Map<string, string>()
+  }
+
+  const map = new Map<string, string>()
+  for (const row of Array.isArray(data) ? data : []) {
+    const id = toSafeString((row as any)?.room_id)
+    const name = toSafeString((row as any)?.room_name)
+    if (!id || !name) continue
+    map.set(id, name)
+  }
+  return map
 }
 
 async function createSignedMediaUrl(
