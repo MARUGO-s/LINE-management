@@ -2732,8 +2732,8 @@ async function createCalendarEvent(
   }
   const endDate = new Date(startDate.getTime() + command.durationMin * 60 * 1000)
   const accessToken = providedAccessToken || await fetchGoogleAccessToken(env)
-  const startDateTimeLocal = formatGoogleCalendarDateTimeLocal(startDate, env.timezone)
-  const endDateTimeLocal = formatGoogleCalendarDateTimeLocal(endDate, env.timezone)
+  const startDateTimeLocal = formatGoogleCalendarDateTimeWithOffset(startDate, env.timezone)
+  const endDateTimeLocal = formatGoogleCalendarDateTimeWithOffset(endDate, env.timezone)
 
   const calendarPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`
   const response = await fetch(calendarPath, {
@@ -2766,7 +2766,14 @@ async function createCalendarEvent(
   return { ok: true, summary, startDate, endDate }
 }
 
-function formatGoogleCalendarDateTimeLocal(date: Date, timezone: string): string {
+function formatGoogleCalendarDateTimeLocal(date: Date, timezone: string): {
+  year: string
+  month: string
+  day: string
+  hour: string
+  minute: string
+  second: string
+} {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric',
@@ -2790,7 +2797,26 @@ function formatGoogleCalendarDateTimeLocal(date: Date, timezone: string): string
   const hour = partMap.get('hour') ?? '00'
   const minute = partMap.get('minute') ?? '00'
   const second = partMap.get('second') ?? '00'
-  return `${year}-${month}-${day}T${hour}:${minute}:${second}`
+  return { year, month, day, hour, minute, second }
+}
+
+function formatGoogleCalendarDateTimeWithOffset(date: Date, timezone: string): string {
+  const local = formatGoogleCalendarDateTimeLocal(date, timezone)
+  const localUtcMs = Date.UTC(
+    Number(local.year),
+    Number(local.month) - 1,
+    Number(local.day),
+    Number(local.hour),
+    Number(local.minute),
+    Number(local.second),
+    0,
+  )
+  const diffMinutes = Math.round((localUtcMs - date.getTime()) / 60000)
+  const sign = diffMinutes >= 0 ? '+' : '-'
+  const abs = Math.abs(diffMinutes)
+  const offHour = String(Math.floor(abs / 60)).padStart(2, '0')
+  const offMin = String(abs % 60).padStart(2, '0')
+  return `${local.year}-${local.month}-${local.day}T${local.hour}:${local.minute}:${local.second}${sign}${offHour}:${offMin}`
 }
 
 async function listCalendarEventsReply(
