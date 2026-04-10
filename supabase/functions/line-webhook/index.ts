@@ -542,6 +542,10 @@ Deno.serve(async (req) => {
                 isHighConfidenceAiCalendarIntent(normalizedAiIntent) &&
                 resolvedDetails?.titleSource !== 'default' &&
                 !isLikelyMultiEvent
+              const shouldAutoCreateWithoutReply =
+                !roomCanReply &&
+                normalizedAiIntent &&
+                isConfirmableAiCalendarIntent(normalizedAiIntent)
 
               if (canAutoCreate && normalizedAiIntent) {
                 const reply = await createCalendarEventReply(
@@ -559,6 +563,24 @@ Deno.serve(async (req) => {
                 )
                 if (roomCanReply) {
                   aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${reply}`
+                }
+              } else if (shouldAutoCreateWithoutReply && normalizedAiIntent) {
+                const silentCommand: CalendarCreateCommand = {
+                  kind: 'create',
+                  date: normalizedAiIntent.date,
+                  time: normalizedAiIntent.time,
+                  durationMin: normalizedAiIntent.durationMin,
+                  title: normalizedAiIntent.title,
+                  ...(normalizedAiIntent.location ? { location: normalizedAiIntent.location } : {}),
+                }
+                const silentResult = await createCalendarEvent(
+                  silentCommand,
+                  calendarEnvState.env,
+                  roomId,
+                  userId,
+                )
+                if (!silentResult.ok) {
+                  console.error('Silent auto-create failed:', silentResult.error)
                 }
               } else if (normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent)) {
                 const pendingSaved = await savePendingCalendarConfirmation(
