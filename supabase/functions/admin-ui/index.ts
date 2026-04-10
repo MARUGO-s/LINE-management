@@ -348,6 +348,7 @@ const html = String.raw`<!doctype html>
       border: 1px solid rgba(149, 219, 255, 0.25);
       background: rgba(7, 20, 34, 0.65);
       user-select: none;
+      -webkit-user-drag: element;
       font-size: 0.72rem;
       line-height: 1;
     }
@@ -1085,9 +1086,9 @@ const html = String.raw`<!doctype html>
         const tr = document.createElement('tr');
         tr.dataset.roomId = room.room_id;
         tr.dataset.roomSortOrder = String(parseRoomSortOrder(setting?.room_sort_order) ?? visualIndex);
-        tr.draggable = true;
+        tr.draggable = false;
         tr.innerHTML =
-          '<td><span class="room-id-tools"><span class="room-drag-handle" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
+          '<td><span class="room-id-tools"><span class="room-drag-handle" draggable="true" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
           '<td><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"></td>' +
           '<td>' + Number(room.pending_messages || 0) + '件</td>' +
           '<td>' + formatDate(room.last_message_at) + '</td>' +
@@ -1577,8 +1578,9 @@ const html = String.raw`<!doctype html>
     let draggingRoomRow = null;
 
     dom.roomTableBody.addEventListener('dragstart', function(event) {
-      const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
+      const targetNode = event.target;
+      const target = targetNode instanceof Element ? targetNode : (targetNode && targetNode.parentElement);
+      if (!target) return;
       const tr = target.closest('tr');
       const handle = target.closest('.room-drag-handle');
       if (!tr || !handle) {
