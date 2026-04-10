@@ -270,7 +270,7 @@ const html = String.raw`<!doctype html>
       white-space: nowrap;
     }
 
-    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 96px; text-align: center; }
+    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 128px; text-align: center; }
     .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 300px; }
     .rooms-table th:nth-child(3), .rooms-table td:nth-child(3) { width: 90px; text-align: center; }
     .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 150px; }
@@ -285,6 +285,32 @@ const html = String.raw`<!doctype html>
     .rooms-table th:nth-child(13), .rooms-table td:nth-child(13) { width: 170px; }
     .rooms-table th:nth-child(14), .rooms-table td:nth-child(14) { width: 150px; }
     .rooms-table th:nth-child(15), .rooms-table td:nth-child(15) { width: 220px; }
+
+    /* Keep ID / Display Name fixed while horizontally scrolling */
+    .rooms-table td:nth-child(1),
+    .rooms-table td:nth-child(2) {
+      position: sticky;
+      background: rgba(7, 20, 34, 0.98);
+      z-index: 2;
+    }
+
+    .rooms-table th:nth-child(1),
+    .rooms-table th:nth-child(2) {
+      position: sticky;
+      background: rgba(7, 20, 34, 0.98);
+      z-index: 6;
+    }
+
+    .rooms-table th:nth-child(1),
+    .rooms-table td:nth-child(1) {
+      left: 0;
+    }
+
+    .rooms-table th:nth-child(2),
+    .rooms-table td:nth-child(2) {
+      left: 128px;
+      box-shadow: 1px 0 0 rgba(149, 219, 255, 0.2) inset;
+    }
 
     .rooms-table .room-name,
     .rooms-table .room-hours {
@@ -302,6 +328,36 @@ const html = String.raw`<!doctype html>
       min-height: 30px;
       padding: 0 10px;
       font-size: 0.74rem;
+    }
+
+    .rooms-table .room-id-tools {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .rooms-table .room-drag-handle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      cursor: grab;
+      color: #9bd5f8;
+      border: 1px solid rgba(149, 219, 255, 0.25);
+      background: rgba(7, 20, 34, 0.65);
+      user-select: none;
+      font-size: 0.72rem;
+      line-height: 1;
+    }
+
+    .rooms-table tr.dragging .room-drag-handle {
+      cursor: grabbing;
+    }
+
+    .rooms-table tr.dragging td {
+      opacity: 0.82;
     }
 
     .log-table th:nth-child(1),
@@ -1008,12 +1064,30 @@ const html = String.raw`<!doctype html>
         return;
       }
 
-      for (const room of rooms) {
-        const setting = settingsMap.get(room.room_id) || null;
+      const sortedRooms = rooms
+        .map((room, originalIndex) => ({
+          room,
+          setting: settingsMap.get(room.room_id) || null,
+          originalIndex,
+        }))
+        .sort((a, b) => {
+          const orderA = parseRoomSortOrder(a.setting?.room_sort_order)
+          const orderB = parseRoomSortOrder(b.setting?.room_sort_order)
+          if (orderA != null && orderB != null) return orderA - orderB
+          if (orderA != null) return -1
+          if (orderB != null) return 1
+          return a.originalIndex - b.originalIndex
+        })
+
+      sortedRooms.forEach((entry, visualIndex) => {
+        const room = entry.room
+        const setting = entry.setting
         const tr = document.createElement('tr');
         tr.dataset.roomId = room.room_id;
+        tr.dataset.roomSortOrder = String(parseRoomSortOrder(setting?.room_sort_order) ?? visualIndex);
+        tr.draggable = true;
         tr.innerHTML =
-          '<td><button class="button room-show-id" type="button">ID表示</button></td>' +
+          '<td><span class="room-id-tools"><span class="room-drag-handle" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
           '<td><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"></td>' +
           '<td>' + Number(room.pending_messages || 0) + '件</td>' +
           '<td>' + formatDate(room.last_message_at) + '</td>' +
@@ -1041,7 +1115,7 @@ const html = String.raw`<!doctype html>
           '<button class="button warn room-delete">ルーム削除</button>' +
           '</span></td>';
         dom.roomTableBody.appendChild(tr);
-      }
+      });
     }
 
     function openRoomIdModal(tr) {
@@ -1172,7 +1246,13 @@ const html = String.raw`<!doctype html>
       return value === 'daily_rollup' ? '最終回のみ1日まとめ' : '各回独立';
     }
 
-    async function saveRoomFromRow(tr) {
+    function parseRoomSortOrder(value) {
+      const num = Number(value);
+      if (!Number.isInteger(num) || num < 0) return null;
+      return num;
+    }
+
+    function buildRoomSettingsPayloadFromRow(tr, roomSortOrder) {
       const roomId = tr.dataset.roomId || '';
       const nameInput = tr.querySelector('.room-name');
       const enabledInput = tr.querySelector('.room-enabled');
@@ -1188,7 +1268,11 @@ const html = String.raw`<!doctype html>
       const roomCleanupTiming = normalizeOptionalSelectValue(cleanupTimingInput ? cleanupTimingInput.value : '');
       const roomSummaryMode = normalizeOptionalSelectValue(summaryModeInput ? summaryModeInput.value : '');
       validateRoomModeCombination(roomCleanupTiming, roomSummaryMode);
-      const payload = {
+
+      const normalizedOrder = parseRoomSortOrder(roomSortOrder)
+      tr.dataset.roomSortOrder = String(normalizedOrder ?? 0)
+
+      return {
         room_id: roomId,
         room_name: nameInput ? nameInput.value.trim() : '',
         is_enabled: !!(enabledInput && enabledInput.checked),
@@ -1201,7 +1285,27 @@ const html = String.raw`<!doctype html>
         delivery_hours: parseHoursInput(hoursInput ? hoursInput.value : '', true),
         message_cleanup_timing: roomCleanupTiming,
         last_delivery_summary_mode: roomSummaryMode,
+        room_sort_order: normalizedOrder,
       };
+    }
+
+    async function persistRoomOrder() {
+      const rows = Array.from(dom.roomTableBody.querySelectorAll('tr'));
+      for (let index = 0; index < rows.length; index += 1) {
+        const tr = rows[index];
+        const payload = buildRoomSettingsPayloadFromRow(tr, index);
+        await api('/settings/rooms', {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+      }
+      isRoomDirty = false;
+      await safeLoadState();
+    }
+
+    async function saveRoomFromRow(tr) {
+      const visualIndex = Array.from(dom.roomTableBody.querySelectorAll('tr')).indexOf(tr);
+      const payload = buildRoomSettingsPayloadFromRow(tr, visualIndex >= 0 ? visualIndex : 0);
 
       await api('/settings/rooms', {
         method: 'PUT',
@@ -1249,6 +1353,7 @@ const html = String.raw`<!doctype html>
         delivery_hours: parseHoursInput(dom.newRoomHours.value, true),
         message_cleanup_timing: normalizeOptionalSelectValue(dom.newRoomCleanupTiming.value),
         last_delivery_summary_mode: normalizeOptionalSelectValue(dom.newRoomSummaryMode.value),
+        room_sort_order: Array.from(dom.roomTableBody.querySelectorAll('tr')).length,
       };
       validateRoomModeCombination(payload.message_cleanup_timing, payload.last_delivery_summary_mode);
       await api('/settings/rooms', {
@@ -1467,6 +1572,58 @@ const html = String.raw`<!doctype html>
       }
 
       markRoomDirty();
+    });
+
+    let draggingRoomRow = null;
+
+    dom.roomTableBody.addEventListener('dragstart', function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const tr = target.closest('tr');
+      const handle = target.closest('.room-drag-handle');
+      if (!tr || !handle) {
+        event.preventDefault();
+        return;
+      }
+      draggingRoomRow = tr;
+      tr.classList.add('dragging');
+      markRoomDirty();
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', tr.dataset.roomId || '');
+      }
+    });
+
+    dom.roomTableBody.addEventListener('dragover', function(event) {
+      if (!draggingRoomRow) return;
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const overRow = target.closest('tr');
+      if (!overRow || overRow === draggingRoomRow) return;
+      event.preventDefault();
+      const rect = overRow.getBoundingClientRect();
+      const insertAfter = event.clientY > rect.top + rect.height / 2;
+      if (insertAfter) {
+        overRow.after(draggingRoomRow);
+      } else {
+        overRow.before(draggingRoomRow);
+      }
+    });
+
+    dom.roomTableBody.addEventListener('drop', function(event) {
+      if (!draggingRoomRow) return;
+      event.preventDefault();
+    });
+
+    dom.roomTableBody.addEventListener('dragend', async function() {
+      if (!draggingRoomRow) return;
+      draggingRoomRow.classList.remove('dragging');
+      draggingRoomRow = null;
+      try {
+        await persistRoomOrder();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
     });
 
     [

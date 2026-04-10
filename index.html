@@ -200,7 +200,7 @@
       white-space: nowrap;
     }
 
-    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 96px; text-align: center; }
+    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 128px; text-align: center; }
     .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 300px; }
     .rooms-table th:nth-child(3), .rooms-table td:nth-child(3) { width: 90px; text-align: center; }
     .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 150px; }
@@ -215,6 +215,32 @@
     .rooms-table th:nth-child(13), .rooms-table td:nth-child(13) { width: 170px; }
     .rooms-table th:nth-child(14), .rooms-table td:nth-child(14) { width: 150px; }
     .rooms-table th:nth-child(15), .rooms-table td:nth-child(15) { width: 220px; }
+
+    /* Keep ID / Display Name fixed while horizontally scrolling */
+    .rooms-table td:nth-child(1),
+    .rooms-table td:nth-child(2) {
+      position: sticky;
+      background: rgba(8, 21, 35, 0.98);
+      z-index: 2;
+    }
+
+    .rooms-table th:nth-child(1),
+    .rooms-table th:nth-child(2) {
+      position: sticky;
+      background: rgba(8, 21, 35, 0.98);
+      z-index: 6;
+    }
+
+    .rooms-table th:nth-child(1),
+    .rooms-table td:nth-child(1) {
+      left: 0;
+    }
+
+    .rooms-table th:nth-child(2),
+    .rooms-table td:nth-child(2) {
+      left: 128px;
+      box-shadow: 1px 0 0 rgba(155, 220, 255, 0.2) inset;
+    }
 
     .rooms-table .room-name,
     .rooms-table .room-hours {
@@ -232,6 +258,36 @@
       min-height: 30px;
       padding: 0 10px;
       font-size: 0.74rem;
+    }
+
+    .rooms-table .room-id-tools {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .rooms-table .room-drag-handle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      cursor: grab;
+      color: #99d0f1;
+      border: 1px solid rgba(155, 220, 255, 0.24);
+      background: rgba(8, 21, 35, 0.68);
+      user-select: none;
+      font-size: 0.72rem;
+      line-height: 1;
+    }
+
+    .rooms-table tr.dragging .room-drag-handle {
+      cursor: grabbing;
+    }
+
+    .rooms-table tr.dragging td {
+      opacity: 0.82;
     }
 
     .log-table th:nth-child(1),
@@ -962,12 +1018,31 @@
         dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="15">ルームデータがありません。</td></tr>';
         return;
       }
-      for (const room of rooms) {
-        const setting = map.get(room.room_id) || null;
+      const sortedRooms = rooms
+        .map(function(room, originalIndex) {
+          return {
+            room: room,
+            setting: map.get(room.room_id) || null,
+            originalIndex: originalIndex,
+          };
+        })
+        .sort(function(a, b) {
+          const orderA = parseRoomSortOrder(a.setting && a.setting.room_sort_order);
+          const orderB = parseRoomSortOrder(b.setting && b.setting.room_sort_order);
+          if (orderA != null && orderB != null) return orderA - orderB;
+          if (orderA != null) return -1;
+          if (orderB != null) return 1;
+          return a.originalIndex - b.originalIndex;
+        });
+      sortedRooms.forEach(function(entry, visualIndex) {
+        const room = entry.room;
+        const setting = entry.setting;
         const tr = document.createElement('tr');
         tr.dataset.roomId = room.room_id;
+        tr.dataset.roomSortOrder = String(parseRoomSortOrder(setting && setting.room_sort_order) ?? visualIndex);
+        tr.draggable = true;
         tr.innerHTML =
-          '<td><button class="button room-show-id" type="button">ID表示</button></td>' +
+          '<td><span class="room-id-tools"><span class="room-drag-handle" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
           '<td><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"></td>' +
           '<td>' + Number(room.pending_messages || 0) + '件</td>' +
           '<td>' + formatDate(room.last_message_at) + '</td>' +
@@ -991,7 +1066,7 @@
           '</select></td>' +
           '<td><span class="row-actions"><button class="button primary room-save">保存</button><button class="button room-reset">継承</button><button class="button warn room-delete">ルーム削除</button></span></td>';
         dom.roomTableBody.appendChild(tr);
-      }
+      });
     }
 
     function openRoomIdModal(tr) {
@@ -1076,6 +1151,62 @@
       return value === 'daily_rollup' ? '最終回のみ1日まとめ' : '各回独立';
     }
 
+    function parseRoomSortOrder(value) {
+      const num = Number(value);
+      if (!Number.isInteger(num) || num < 0) return null;
+      return num;
+    }
+
+    function buildRoomSettingsPayloadFromRow(tr, roomSortOrder) {
+      const roomId = tr.dataset.roomId || '';
+      const nameInput = tr.querySelector('.room-name');
+      const enabledInput = tr.querySelector('.room-enabled');
+      const sendSummaryInput = tr.querySelector('.room-send-summary');
+      const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
+      const messageSearchEnabledInput = tr.querySelector('.room-message-search-enabled');
+      const botReplyEnabledInput = tr.querySelector('.room-bot-reply-enabled');
+      const calendarAutoCreateInput = tr.querySelector('.room-calendar-auto-create');
+      const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
+      const hoursInput = tr.querySelector('.room-hours');
+      const cleanupTimingInput = tr.querySelector('.room-cleanup-timing');
+      const summaryModeInput = tr.querySelector('.room-summary-mode');
+      const roomCleanupTiming = normalizeOptionalSelectValue(cleanupTimingInput ? cleanupTimingInput.value : '');
+      const roomSummaryMode = normalizeOptionalSelectValue(summaryModeInput ? summaryModeInput.value : '');
+      validateRoomModeCombination(roomCleanupTiming, roomSummaryMode);
+
+      const normalizedOrder = parseRoomSortOrder(roomSortOrder);
+      tr.dataset.roomSortOrder = String(normalizedOrder ?? 0);
+
+      return {
+        room_id: roomId,
+        room_name: nameInput ? nameInput.value.trim() : '',
+        is_enabled: !!(enabledInput && enabledInput.checked),
+        send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
+        calendar_tomorrow_reminder_enabled: !!(tomorrowReminderInput && tomorrowReminderInput.checked),
+        message_search_enabled: !!(messageSearchEnabledInput && messageSearchEnabledInput.checked),
+        bot_reply_enabled: !!(botReplyEnabledInput && botReplyEnabledInput.checked),
+        calendar_ai_auto_create_enabled: !!(calendarAutoCreateInput && calendarAutoCreateInput.checked),
+        gmail_reservation_alert_enabled: !!(gmailAlertEnabledInput && gmailAlertEnabledInput.checked),
+        delivery_hours: parseHours(hoursInput ? hoursInput.value : '', true),
+        message_cleanup_timing: roomCleanupTiming,
+        last_delivery_summary_mode: roomSummaryMode,
+        room_sort_order: normalizedOrder,
+      };
+    }
+
+    async function persistRoomOrder() {
+      const rows = Array.from(dom.roomTableBody.querySelectorAll('tr'));
+      for (let index = 0; index < rows.length; index += 1) {
+        const payload = buildRoomSettingsPayloadFromRow(rows[index], index);
+        await api('/settings/rooms', {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+      }
+      isRoomDirty = false;
+      await safeLoadState();
+    }
+
     async function addRoom() {
       const roomId = dom.newRoomId.value.trim();
       if (!roomId) throw new Error('room_id を入力してください。');
@@ -1097,6 +1228,7 @@
           delivery_hours: parseHours(dom.newRoomHours.value, true),
           message_cleanup_timing: roomCleanupTiming,
           last_delivery_summary_mode: roomSummaryMode,
+          room_sort_order: Array.from(dom.roomTableBody.querySelectorAll('tr')).length,
         }),
       });
       isRoomDirty = false;
@@ -1112,37 +1244,11 @@
     }
 
     async function saveRoomRow(tr) {
-      const roomId = tr.dataset.roomId || '';
-      const nameInput = tr.querySelector('.room-name');
-      const enabledInput = tr.querySelector('.room-enabled');
-      const sendSummaryInput = tr.querySelector('.room-send-summary');
-      const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
-      const messageSearchEnabledInput = tr.querySelector('.room-message-search-enabled');
-      const botReplyEnabledInput = tr.querySelector('.room-bot-reply-enabled');
-      const calendarAutoCreateInput = tr.querySelector('.room-calendar-auto-create');
-      const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
-      const hoursInput = tr.querySelector('.room-hours');
-      const cleanupTimingInput = tr.querySelector('.room-cleanup-timing');
-      const summaryModeInput = tr.querySelector('.room-summary-mode');
-      const roomCleanupTiming = normalizeOptionalSelectValue(cleanupTimingInput ? cleanupTimingInput.value : '');
-      const roomSummaryMode = normalizeOptionalSelectValue(summaryModeInput ? summaryModeInput.value : '');
-      validateRoomModeCombination(roomCleanupTiming, roomSummaryMode);
+      const visualIndex = Array.from(dom.roomTableBody.querySelectorAll('tr')).indexOf(tr);
+      const payload = buildRoomSettingsPayloadFromRow(tr, visualIndex >= 0 ? visualIndex : 0);
       await api('/settings/rooms', {
         method: 'PUT',
-        body: JSON.stringify({
-          room_id: roomId,
-          room_name: nameInput ? nameInput.value.trim() : '',
-          is_enabled: !!(enabledInput && enabledInput.checked),
-          send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
-          calendar_tomorrow_reminder_enabled: !!(tomorrowReminderInput && tomorrowReminderInput.checked),
-          message_search_enabled: !!(messageSearchEnabledInput && messageSearchEnabledInput.checked),
-          bot_reply_enabled: !!(botReplyEnabledInput && botReplyEnabledInput.checked),
-          calendar_ai_auto_create_enabled: !!(calendarAutoCreateInput && calendarAutoCreateInput.checked),
-          gmail_reservation_alert_enabled: !!(gmailAlertEnabledInput && gmailAlertEnabledInput.checked),
-          delivery_hours: parseHours(hoursInput ? hoursInput.value : '', true),
-          message_cleanup_timing: roomCleanupTiming,
-          last_delivery_summary_mode: roomSummaryMode,
-        }),
+        body: JSON.stringify(payload),
       });
       isRoomDirty = false;
       await safeLoadState();
@@ -1359,6 +1465,58 @@
       }
 
       markRoomDirty();
+    });
+
+    let draggingRoomRow = null;
+
+    dom.roomTableBody.addEventListener('dragstart', function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const tr = target.closest('tr');
+      const handle = target.closest('.room-drag-handle');
+      if (!tr || !handle) {
+        event.preventDefault();
+        return;
+      }
+      draggingRoomRow = tr;
+      tr.classList.add('dragging');
+      markRoomDirty();
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', tr.dataset.roomId || '');
+      }
+    });
+
+    dom.roomTableBody.addEventListener('dragover', function(event) {
+      if (!draggingRoomRow) return;
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      const overRow = target.closest('tr');
+      if (!overRow || overRow === draggingRoomRow) return;
+      event.preventDefault();
+      const rect = overRow.getBoundingClientRect();
+      const insertAfter = event.clientY > rect.top + rect.height / 2;
+      if (insertAfter) {
+        overRow.after(draggingRoomRow);
+      } else {
+        overRow.before(draggingRoomRow);
+      }
+    });
+
+    dom.roomTableBody.addEventListener('drop', function(event) {
+      if (!draggingRoomRow) return;
+      event.preventDefault();
+    });
+
+    dom.roomTableBody.addEventListener('dragend', async function() {
+      if (!draggingRoomRow) return;
+      draggingRoomRow.classList.remove('dragging');
+      draggingRoomRow = null;
+      try {
+        await persistRoomOrder();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
     });
 
     [

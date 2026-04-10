@@ -219,12 +219,13 @@ Deno.serve(async (req) => {
           calendar_ai_auto_create_enabled: payload.calendar_ai_auto_create_enabled,
           message_search_enabled: payload.message_search_enabled,
           gmail_reservation_alert_enabled: payload.gmail_reservation_alert_enabled,
+          room_sort_order: payload.room_sort_order,
           delivery_hours: payload.delivery_hours,
           message_cleanup_timing: payload.message_cleanup_timing,
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -439,7 +440,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -1370,6 +1371,7 @@ function buildRoomSettingsPayload(body: unknown): {
   calendar_ai_auto_create_enabled: boolean
   message_search_enabled: boolean
   gmail_reservation_alert_enabled: boolean
+  room_sort_order: number | null
   delivery_hours: number[] | null
   message_cleanup_timing: MessageCleanupTiming | null
   last_delivery_summary_mode: LastDeliverySummaryMode | null
@@ -1424,6 +1426,15 @@ function buildRoomSettingsPayload(body: unknown): {
   const gmailReservationAlertEnabled = gmailReservationAlertEnabledRaw === true
 
   const roomNameRaw = typeof body.room_name === "string" ? body.room_name.trim() : ""
+  const roomSortOrderRaw = body.room_sort_order
+  let roomSortOrder: number | null = null
+  if (roomSortOrderRaw != null && roomSortOrderRaw !== "") {
+    const num = Number(roomSortOrderRaw)
+    if (!Number.isInteger(num) || num < 0 || num > 1000000) {
+      throw { status: 400, message: "room_sort_order must be an integer between 0 and 1000000 or null." } satisfies AppError
+    }
+    roomSortOrder = num
+  }
   const deliveryHours = body.delivery_hours == null ? null : normalizeHours(body.delivery_hours, false)
   if (Array.isArray(deliveryHours) && deliveryHours.length === 0) {
     throw { status: 400, message: "delivery_hours must contain at least one hour or null." } satisfies AppError
@@ -1448,6 +1459,7 @@ function buildRoomSettingsPayload(body: unknown): {
     calendar_ai_auto_create_enabled: roomAiAutoCreateEnabled,
     message_search_enabled: messageSearchEnabled,
     gmail_reservation_alert_enabled: gmailReservationAlertEnabled,
+    room_sort_order: roomSortOrder,
     delivery_hours: deliveryHours,
     message_cleanup_timing: roomCleanupTiming,
     last_delivery_summary_mode: roomSummaryMode,
