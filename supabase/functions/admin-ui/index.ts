@@ -260,8 +260,8 @@ const html = String.raw`<!doctype html>
     }
 
     .rooms-table {
-      width: max(100%, 2100px);
-      min-width: 2100px;
+      width: max(100%, 2240px);
+      min-width: 2240px;
       table-layout: fixed;
     }
 
@@ -279,11 +279,12 @@ const html = String.raw`<!doctype html>
     .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 110px; text-align: center; }
     .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 90px; text-align: center; }
     .rooms-table th:nth-child(9), .rooms-table td:nth-child(9) { width: 90px; text-align: center; }
-    .rooms-table th:nth-child(10), .rooms-table td:nth-child(10) { width: 110px; text-align: center; }
-    .rooms-table th:nth-child(11), .rooms-table td:nth-child(11) { width: 160px; }
-    .rooms-table th:nth-child(12), .rooms-table td:nth-child(12) { width: 170px; }
-    .rooms-table th:nth-child(13), .rooms-table td:nth-child(13) { width: 150px; }
-    .rooms-table th:nth-child(14), .rooms-table td:nth-child(14) { width: 220px; }
+    .rooms-table th:nth-child(10), .rooms-table td:nth-child(10) { width: 90px; text-align: center; }
+    .rooms-table th:nth-child(11), .rooms-table td:nth-child(11) { width: 110px; text-align: center; }
+    .rooms-table th:nth-child(12), .rooms-table td:nth-child(12) { width: 160px; }
+    .rooms-table th:nth-child(13), .rooms-table td:nth-child(13) { width: 170px; }
+    .rooms-table th:nth-child(14), .rooms-table td:nth-child(14) { width: 150px; }
+    .rooms-table th:nth-child(15), .rooms-table td:nth-child(15) { width: 220px; }
 
     .rooms-table .room-name,
     .rooms-table .room-hours {
@@ -556,6 +557,7 @@ const html = String.raw`<!doctype html>
           <label class="switch"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
           <label class="switch"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
           <label class="switch"><input id="newRoomMessageSearchEnabled" type="checkbox" checked>会話検索応答</label>
+          <label class="switch"><input id="newRoomBotReplyEnabled" type="checkbox" checked>自動応答</label>
           <label class="switch"><input id="newRoomCalendarAutoCreate" type="checkbox" checked>自動登録</label>
           <label class="switch"><input id="newRoomGmailAlertEnabled" type="checkbox">Gmail予約通知</label>
           <select id="newRoomCleanupTiming" class="select" aria-label="ルーム処理タイミング">
@@ -582,6 +584,7 @@ const html = String.raw`<!doctype html>
                 <th>ルーム要約配信</th>
                 <th>明日予定配信</th>
                 <th>会話検索応答</th>
+                <th>自動応答</th>
                 <th>自動登録</th>
                 <th>Gmail予約通知</th>
                 <th>配信時刻</th>
@@ -614,6 +617,7 @@ const html = String.raw`<!doctype html>
     const TOKEN_KEY = 'line_summary_admin_token';
     const NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY = 'line_summary_new_room_default_tomorrow_reminder';
     const NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY = 'line_summary_new_room_default_message_search';
+    const NEW_ROOM_DEFAULT_BOT_REPLY_KEY = 'line_summary_new_room_default_bot_reply';
     const NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY = 'line_summary_new_room_default_calendar_auto_create';
     const NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY = 'line_summary_new_room_default_gmail_alert';
     const ROOM_DEFAULT_HOURS = '';
@@ -652,6 +656,7 @@ const html = String.raw`<!doctype html>
       newRoomSendSummary: document.getElementById('newRoomSendSummary'),
       newRoomTomorrowReminder: document.getElementById('newRoomTomorrowReminder'),
       newRoomMessageSearchEnabled: document.getElementById('newRoomMessageSearchEnabled'),
+      newRoomBotReplyEnabled: document.getElementById('newRoomBotReplyEnabled'),
       newRoomCalendarAutoCreate: document.getElementById('newRoomCalendarAutoCreate'),
       newRoomGmailAlertEnabled: document.getElementById('newRoomGmailAlertEnabled'),
       newRoomCleanupTiming: document.getElementById('newRoomCleanupTiming'),
@@ -700,6 +705,7 @@ const html = String.raw`<!doctype html>
     function applyNewRoomDefaultCheckboxes() {
       dom.newRoomTomorrowReminder.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY, false);
       dom.newRoomMessageSearchEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, true);
+      dom.newRoomBotReplyEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, true);
       dom.newRoomCalendarAutoCreate.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY, true);
       dom.newRoomGmailAlertEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, false);
     }
@@ -836,6 +842,7 @@ const html = String.raw`<!doctype html>
         || target.classList.contains('room-send-summary')
         || target.classList.contains('room-tomorrow-reminder')
         || target.classList.contains('room-message-search-enabled')
+        || target.classList.contains('room-bot-reply-enabled')
         || target.classList.contains('room-calendar-auto-create')
         || target.classList.contains('room-gmail-alert-enabled');
     }
@@ -997,7 +1004,7 @@ const html = String.raw`<!doctype html>
       dom.roomTableBody.innerHTML = '';
       const rooms = Array.isArray(roomOverview) ? roomOverview : [];
       if (rooms.length === 0) {
-        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="14">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
+        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="15">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
         return;
       }
 
@@ -1014,6 +1021,7 @@ const html = String.raw`<!doctype html>
           '<td><input class="room-send-summary room-check" type="checkbox" aria-label="ルーム要約配信" ' + ((setting && setting.send_room_summary === true) ? 'checked' : '') + '></td>' +
           '<td><input class="room-tomorrow-reminder room-check" type="checkbox" aria-label="明日予定配信" ' + ((setting && setting.calendar_tomorrow_reminder_enabled === true) ? 'checked' : '') + '></td>' +
           '<td><input class="room-message-search-enabled room-check" type="checkbox" aria-label="会話検索応答" ' + (((setting && setting.message_search_enabled) !== false) ? 'checked' : '') + '></td>' +
+          '<td><input class="room-bot-reply-enabled room-check" type="checkbox" aria-label="自動応答" ' + (((setting && setting.bot_reply_enabled) !== false) ? 'checked' : '') + '></td>' +
           '<td><input class="room-calendar-auto-create room-check" type="checkbox" aria-label="自動登録" ' + (((setting && setting.calendar_ai_auto_create_enabled) !== false) ? 'checked' : '') + '></td>' +
           '<td><input class="room-gmail-alert-enabled room-check" type="checkbox" aria-label="Gmail予約通知" ' + ((setting && setting.gmail_reservation_alert_enabled === true) ? 'checked' : '') + '></td>' +
           '<td><input class="input room-hours" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : ROOM_DEFAULT_HOURS) + '"></td>' +
@@ -1171,6 +1179,7 @@ const html = String.raw`<!doctype html>
       const sendSummaryInput = tr.querySelector('.room-send-summary');
       const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
       const messageSearchEnabledInput = tr.querySelector('.room-message-search-enabled');
+      const botReplyEnabledInput = tr.querySelector('.room-bot-reply-enabled');
       const calendarAutoCreateInput = tr.querySelector('.room-calendar-auto-create');
       const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
       const hoursInput = tr.querySelector('.room-hours');
@@ -1186,6 +1195,7 @@ const html = String.raw`<!doctype html>
         send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
         calendar_tomorrow_reminder_enabled: !!(tomorrowReminderInput && tomorrowReminderInput.checked),
         message_search_enabled: !!(messageSearchEnabledInput && messageSearchEnabledInput.checked),
+        bot_reply_enabled: !!(botReplyEnabledInput && botReplyEnabledInput.checked),
         calendar_ai_auto_create_enabled: !!(calendarAutoCreateInput && calendarAutoCreateInput.checked),
         gmail_reservation_alert_enabled: !!(gmailAlertEnabledInput && gmailAlertEnabledInput.checked),
         delivery_hours: parseHoursInput(hoursInput ? hoursInput.value : '', true),
@@ -1233,6 +1243,7 @@ const html = String.raw`<!doctype html>
         send_room_summary: !!dom.newRoomSendSummary.checked,
         calendar_tomorrow_reminder_enabled: !!dom.newRoomTomorrowReminder.checked,
         message_search_enabled: !!dom.newRoomMessageSearchEnabled.checked,
+        bot_reply_enabled: !!dom.newRoomBotReplyEnabled.checked,
         calendar_ai_auto_create_enabled: !!dom.newRoomCalendarAutoCreate.checked,
         gmail_reservation_alert_enabled: !!dom.newRoomGmailAlertEnabled.checked,
         delivery_hours: parseHoursInput(dom.newRoomHours.value, true),
@@ -1466,6 +1477,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomSendSummary,
       dom.newRoomTomorrowReminder,
       dom.newRoomMessageSearchEnabled,
+      dom.newRoomBotReplyEnabled,
       dom.newRoomCalendarAutoCreate,
       dom.newRoomGmailAlertEnabled,
       dom.newRoomCleanupTiming,
@@ -1481,6 +1493,9 @@ const html = String.raw`<!doctype html>
     });
     dom.newRoomMessageSearchEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, !!dom.newRoomMessageSearchEnabled.checked);
+    });
+    dom.newRoomBotReplyEnabled.addEventListener('change', function() {
+      saveBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, !!dom.newRoomBotReplyEnabled.checked);
     });
     dom.newRoomCalendarAutoCreate.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY, !!dom.newRoomCalendarAutoCreate.checked);

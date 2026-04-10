@@ -146,6 +146,7 @@ type AiPrimaryIntentResult = {
 
 type RoomReplyPolicy = {
   isEnabled: boolean
+  botReplyEnabled: boolean
   messageSearchEnabled: boolean
   calendarAiAutoCreateEnabled: boolean
 }
@@ -316,6 +317,7 @@ Deno.serve(async (req) => {
           roomId,
           roomReplyPolicyCache,
         )
+        const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
         const text = String(event.message.text ?? '').trim()
         if (isRoomBotReplyEnabled(roomReplyPolicy)) {
           let forceAiMessageSearch = false
@@ -331,6 +333,9 @@ Deno.serve(async (req) => {
               userId,
             )
             if (confirmationReply) {
+              if (!roomCanReply) {
+                continue
+              }
               if (!lineAccessToken) {
                 console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply pending confirmation.')
                 continue
@@ -363,6 +368,9 @@ Deno.serve(async (req) => {
                 if (isRoomInteractiveReplyEnabled(roomReplyPolicy)) {
                   const confirmPrompt = buildPrimaryIntentConfirmationPrompt(primaryIntent)
                   if (confirmPrompt) {
+                    if (!roomCanReply) {
+                      continue
+                    }
                     if (!lineAccessToken) {
                       console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI primary-intent confirmation.')
                       continue
@@ -417,6 +425,9 @@ Deno.serve(async (req) => {
             if (!roomReplyPolicy.messageSearchEnabled) {
               continue
             }
+            if (!roomCanReply) {
+              continue
+            }
 
             const replyMessage = await buildMessageSearchReply(
               messageSearchCommand,
@@ -450,6 +461,9 @@ Deno.serve(async (req) => {
               roomId,
               userId,
             )
+            if (!roomCanReply) {
+              continue
+            }
 
             if (!lineAccessToken) {
               console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply to command.')
@@ -481,6 +495,9 @@ Deno.serve(async (req) => {
                 ...(typeof aiListIntent.month === 'number' ? { month: aiListIntent.month } : {}),
                 ...(typeof aiListIntent.year === 'number' ? { year: aiListIntent.year } : {}),
                 ...(aiListIntent.keyword ? { keyword: aiListIntent.keyword } : {}),
+              }
+              if (!roomCanReply) {
+                continue
               }
               const replyMessage = await listCalendarEventsReply(aiCommand, calendarEnvState.env)
 
@@ -540,7 +557,9 @@ Deno.serve(async (req) => {
                   roomId,
                   userId,
                 )
-                aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${reply}`
+                if (roomCanReply) {
+                  aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${reply}`
+                }
               } else if (normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent)) {
                 const pendingSaved = await savePendingCalendarConfirmation(
                   supabase,
@@ -563,11 +582,15 @@ Deno.serve(async (req) => {
                   if (resolvedDetails?.titleSource === 'default') {
                     notices.push('件名を本文から確定できなかったため、確認後に登録します。')
                   }
-                  aiAutoCreateReply = notices.length > 0
-                    ? `${notices.join('\n')}\n${basePrompt}`
-                    : basePrompt
+                  if (roomCanReply) {
+                    aiAutoCreateReply = notices.length > 0
+                      ? `${notices.join('\n')}\n${basePrompt}`
+                      : basePrompt
+                  }
                 } else {
-                  aiAutoCreateReply = '予定候補を解釈しましたが、確認待ちの保存に失敗しました。もう一度送ってください。'
+                  if (roomCanReply) {
+                    aiAutoCreateReply = '予定候補を解釈しましたが、確認待ちの保存に失敗しました。もう一度送ってください。'
+                  }
                 }
               }
           }
@@ -1170,28 +1193,29 @@ async function loadRoomReplyPolicy(
 ): Promise<RoomReplyPolicy> {
   const normalizedRoomId = String(roomId ?? '').trim()
   if (!normalizedRoomId || normalizedRoomId === 'unknown') {
-    return { isEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
+    return { isEnabled: true, botReplyEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
   }
   if (cache.has(normalizedRoomId)) {
-    return cache.get(normalizedRoomId) ?? { isEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
+    return cache.get(normalizedRoomId) ?? { isEnabled: true, botReplyEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
   }
 
   try {
     const { data, error } = await supabase
       .from('room_summary_settings')
-      .select('is_enabled, message_search_enabled, calendar_ai_auto_create_enabled')
+      .select('is_enabled, bot_reply_enabled, message_search_enabled, calendar_ai_auto_create_enabled')
       .eq('room_id', normalizedRoomId)
       .maybeSingle()
 
     if (error) {
       console.error(`Failed to load room reply policy for ${normalizedRoomId}:`, error.message)
-      const fallback = { isEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
+      const fallback = { isEnabled: true, botReplyEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
       cache.set(normalizedRoomId, fallback)
       return fallback
     }
 
     const policy: RoomReplyPolicy = {
       isEnabled: data?.is_enabled !== false,
+      botReplyEnabled: data?.bot_reply_enabled !== false,
       messageSearchEnabled: data?.message_search_enabled !== false,
       calendarAiAutoCreateEnabled: data?.calendar_ai_auto_create_enabled !== false,
     }
@@ -1199,18 +1223,22 @@ async function loadRoomReplyPolicy(
     return policy
   } catch (err) {
     console.error(`Unexpected error while loading room reply policy for ${normalizedRoomId}:`, err)
-    const fallback = { isEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
+    const fallback = { isEnabled: true, botReplyEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
     cache.set(normalizedRoomId, fallback)
     return fallback
   }
 }
 
 function isRoomInteractiveReplyEnabled(policy: RoomReplyPolicy): boolean {
-  return policy.isEnabled && policy.messageSearchEnabled
+  return policy.isEnabled && policy.botReplyEnabled && policy.messageSearchEnabled
 }
 
 function isRoomBotReplyEnabled(policy: RoomReplyPolicy): boolean {
   return policy.isEnabled
+}
+
+function shouldSendRoomReply(policy: RoomReplyPolicy): boolean {
+  return policy.isEnabled && policy.botReplyEnabled
 }
 
 function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentionDays): MessageSearchParseResult {

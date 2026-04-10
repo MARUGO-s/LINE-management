@@ -213,6 +213,7 @@ Deno.serve(async (req) => {
           room_id: payload.room_id,
           room_name: payload.room_name,
           is_enabled: payload.is_enabled,
+          bot_reply_enabled: payload.bot_reply_enabled,
           send_room_summary: payload.send_room_summary,
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
           calendar_ai_auto_create_enabled: payload.calendar_ai_auto_create_enabled,
@@ -223,7 +224,7 @@ Deno.serve(async (req) => {
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -438,7 +439,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -1363,6 +1364,7 @@ function buildRoomSettingsPayload(body: unknown): {
   room_id: string
   room_name: string | null
   is_enabled: boolean
+  bot_reply_enabled: boolean
   send_room_summary: boolean
   calendar_tomorrow_reminder_enabled: boolean
   calendar_ai_auto_create_enabled: boolean
@@ -1385,6 +1387,12 @@ function buildRoomSettingsPayload(body: unknown): {
   if (typeof isEnabled !== "boolean") {
     throw { status: 400, message: "is_enabled must be boolean." } satisfies AppError
   }
+
+  const botReplyEnabledRaw = body.bot_reply_enabled
+  if (botReplyEnabledRaw != null && typeof botReplyEnabledRaw !== "boolean") {
+    throw { status: 400, message: "bot_reply_enabled must be boolean when provided." } satisfies AppError
+  }
+  const botReplyEnabled = botReplyEnabledRaw !== false
 
   const sendRoomSummary = body.send_room_summary
   if (typeof sendRoomSummary !== "boolean") {
@@ -1434,6 +1442,7 @@ function buildRoomSettingsPayload(body: unknown): {
     room_id: roomIdRaw,
     room_name: roomNameRaw || null,
     is_enabled: isEnabled,
+    bot_reply_enabled: botReplyEnabled,
     send_room_summary: sendRoomSummary,
     calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,
     calendar_ai_auto_create_enabled: roomAiAutoCreateEnabled,
