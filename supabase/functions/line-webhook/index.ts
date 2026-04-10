@@ -300,7 +300,7 @@ Deno.serve(async (req) => {
             }
           }
 
-          if (!!groqApiKey && text) {
+          if (!!groqApiKey && text && !isExplicitBotCommandText(text)) {
             const primaryIntent = await extractPrimaryIntentWithGroq(
               text,
               messageRetentionDays,
@@ -342,7 +342,7 @@ Deno.serve(async (req) => {
           if (messageSearchParse.matched) {
             messageSearchCommand = messageSearchParse.command
             messageSearchError = messageSearchParse.error
-          } else if (!!groqApiKey && (looksLikeMessageSearchQuestion(text) || forceAiMessageSearch)) {
+          } else if (!!groqApiKey && forceAiMessageSearch) {
             const aiSearchIntent = await extractMessageSearchIntentWithGroq(text, messageRetentionDays, groqApiKey)
             if (aiSearchIntent && isAcceptableAiMessageSearchIntent(aiSearchIntent)) {
               messageSearchCommand = {
@@ -408,7 +408,7 @@ Deno.serve(async (req) => {
             continue
           }
 
-          if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && (looksLikeCalendarListQuestion(text) || forceAiCalendarList)) {
+          if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && forceAiCalendarList) {
             const aiListIntent = await extractCalendarListIntentWithGroq(
               text,
               calendarEnvState.env.timezone,
@@ -441,17 +441,7 @@ Deno.serve(async (req) => {
             }
           }
 
-          if (aiAutoCreateEnabled && calendarEnvState.ok) {
-            const ruleCommands = extractCalendarCommandsFromText(text)
-            if (ruleCommands.length > 0) {
-              aiAutoCreateReply = await autoCreateCalendarEventsFromCommands(
-                ruleCommands,
-                calendarEnvState.env,
-                roomId,
-                userId,
-                'ルール抽出',
-              )
-            } else if (!!groqApiKey && (looksLikeCalendarCandidate(text) || forceAiCalendarCreate)) {
+          if (aiAutoCreateEnabled && calendarEnvState.ok && !!groqApiKey && forceAiCalendarCreate) {
               const aiIntent = await extractCalendarIntentWithGroq(
                 text,
                 calendarEnvState.env.timezone,
@@ -485,7 +475,6 @@ Deno.serve(async (req) => {
                   aiAutoCreateReply = '予定候補を解釈しましたが、確認待ちの保存に失敗しました。もう一度送ってください。'
                 }
               }
-            }
           }
         }
       }
@@ -1134,9 +1123,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
 
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   const hasExplicitPrefix = /^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)
-  const hasConversationHint = /(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|他ルーム|他のルーム|別ルーム|全ルーム)/.test(compact)
-  const hasQueryIntent = /(検索|探し|探して|探す|要約|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい)/.test(compact)
-  if (!hasExplicitPrefix && !(hasConversationHint && hasQueryIntent)) {
+  if (!hasExplicitPrefix) {
     return { matched: false, command: null, error: null }
   }
 
@@ -1165,6 +1152,14 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
     },
     error: null,
   }
+}
+
+function isExplicitBotCommandText(rawText: string): boolean {
+  const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
+  if (!compact) return false
+  if (/^予定(?:登録|追加|確認|一覧|報告)/.test(compact)) return true
+  if (/^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)) return true
+  return false
 }
 
 function detectMessageSearchDays(compactText: string): MessageRetentionDays | null {
@@ -2710,11 +2705,6 @@ function parseCalendarCommand(rawText: string): CalendarCommandParseResult {
     }
   }
 
-  const naturalListCommand = parseNaturalLanguageListQuery(text)
-  if (naturalListCommand) {
-    return { matched: true, command: { kind: 'list', ...naturalListCommand }, error: null }
-  }
-
   return { matched: false, command: null, error: null }
 }
 
@@ -2848,7 +2838,10 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
   }
 
   const keyword = normalizeKeywordForFilter(residue)
-  return keyword ? { ...scope, keyword } : scope
+  if (!keyword || isCalendarListStopKeyword(keyword)) {
+    return scope
+  }
+  return { ...scope, keyword }
 }
 
 function looksLikeAnnouncementText(compactText: string): boolean {
@@ -2897,6 +2890,12 @@ function normalizeKeywordForFilter(raw: string): string {
   if (!trimmed) return ''
   if (trimmed.length > 60) return trimmed.slice(0, 60)
   return trimmed
+}
+
+function isCalendarListStopKeyword(keyword: string): boolean {
+  const normalized = normalizeForRuleParsing(keyword).replace(/\s+/g, '')
+  if (!normalized) return true
+  return /^(何|なに|何が|何を|何か|どれ|どこ|いつ|何がありますか|何があります|なにがありますか|なにがあります)$/.test(normalized)
 }
 
 function canonicalizeListScopeText(raw: string): string {
