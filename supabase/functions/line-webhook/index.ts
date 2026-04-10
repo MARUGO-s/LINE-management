@@ -592,22 +592,8 @@ Deno.serve(async (req) => {
                 )
                 if (pendingSaved) {
                   const basePrompt = buildPendingCalendarConfirmationPrompt(normalizedAiIntent, calendarEnvState.env.timezone)
-                  const notices: string[] = []
-                  if (!roomReplyPolicy.calendarAiAutoCreateEnabled) {
-                    notices.push('このルームの自動登録はOFFなので、確認後に登録します。')
-                  } else if (!aiAutoCreateEnabled) {
-                    notices.push('自動登録はOFFなので、確認後に登録します。')
-                  }
-                  if (isLikelyMultiEvent) {
-                    notices.push('本文に複数の予定候補があるため、自動登録せず確認後に登録します。')
-                  }
-                  if (resolvedDetails?.titleSource === 'default') {
-                    notices.push('件名を本文から確定できなかったため、確認後に登録します。')
-                  }
                   if (roomCanReply) {
-                    aiAutoCreateReply = notices.length > 0
-                      ? `${notices.join('\n')}\n${basePrompt}`
-                      : basePrompt
+                    aiAutoCreateReply = basePrompt
                   }
                 } else {
                   if (roomCanReply) {
@@ -2005,6 +1991,7 @@ async function extractCalendarIntentWithGroq(
               'ユーザー文から「カレンダーに予定登録すべき明確な意図」がある場合のみ should_create=true にしてください。',
               '日時が曖昧・未指定なら should_create=false。',
               'title は予定の中身だけ（短い名詞句）にしてください。日時・場所・案内文（例: ぜひ来てください）は含めないでください。',
+              'title は短縮しすぎず、修飾語を保持してください（例: 「シェフミーティング」は「ミーティング」に短縮しない）。',
               '場所が読み取れる場合は location に入れてください（例: 「marugoで試飲会」→ title=試飲会, location=marugo）。',
               '複数行の案内文でも同様に分離してください（例: 「試飲会お知らせ / 7/15 / クラウディア2 / 2階 / 15:00-17:00」→ title=試飲会, location=クラウディア2 2階）。',
               'ラベル付きでも同様に分離してください（例: 「【日時】6/19 15時〜17時 / 【場所】マルゴ四谷 / 従業員向け試飲会」→ title=試飲会, location=マルゴ四谷）。',
@@ -3082,15 +3069,22 @@ function resolveAiCalendarDetails(
   const hasSourceText = normalizeKeywordForSearch(sourceText).length > 0
 
   const normalizedAiTitle = normalizeEventTitleCandidate(aiTitle)
+  const inferredTitle = inferTitleFromLine(sourceText)
   if (normalizedAiTitle && (!hasSourceText || isTitleGroundedInSource(normalizedAiTitle, sourceText))) {
-    title = normalizedAiTitle
-    titleSource = 'ai'
-  } else {
-    const inferredTitle = inferTitleFromLine(sourceText)
-    if (inferredTitle) {
+    if (
+      inferredTitle &&
+      isGenericEventTitle(normalizedAiTitle) &&
+      isMoreSpecificDerivedTitle(normalizedAiTitle, inferredTitle)
+    ) {
       title = inferredTitle
       titleSource = 'source_derived'
+    } else {
+      title = normalizedAiTitle
+      titleSource = 'ai'
     }
+  } else if (inferredTitle) {
+    title = inferredTitle
+    titleSource = 'source_derived'
   }
 
   const location = resolveEventLocation(sourceText, aiLocation, title)
@@ -3130,11 +3124,36 @@ function isTitleGroundedInSource(title: string, sourceText: string): boolean {
   return keywordMatchesHaystacks(title, [sourceText])
 }
 
+function isGenericEventTitle(title: string): boolean {
+  const normalizedTitle = normalizeKeywordForSearch(title)
+  if (!normalizedTitle) return false
+  return CALENDAR_EVENT_TITLE_KEYWORDS.some((keyword) => normalizeKeywordForSearch(keyword) === normalizedTitle)
+}
+
+function isMoreSpecificDerivedTitle(baseTitle: string, derivedTitle: string): boolean {
+  const normalizedBase = normalizeKeywordForSearch(baseTitle)
+  const normalizedDerived = normalizeKeywordForSearch(derivedTitle)
+  if (!normalizedBase || !normalizedDerived) return false
+  if (normalizedBase === normalizedDerived) return false
+  if (!normalizedDerived.includes(normalizedBase)) return false
+  return compactSearchText(derivedTitle).length > compactSearchText(baseTitle).length
+}
+
 function extractEventKeywordTitle(raw: string): string | null {
   const text = normalizeForRuleParsing(raw)
+  const firstSentence = text.split(/[、,。．.!！?？\n]/)[0] ?? text
+  const normalizedSentence = firstSentence.trim()
+  if (!normalizedSentence) return null
+
   for (const keyword of CALENDAR_EVENT_TITLE_KEYWORDS) {
     const escaped = escapeRegExp(keyword)
-    const exact = text.match(new RegExp(escaped, 'i'))
+    const compound = normalizedSentence.match(
+      new RegExp(`([A-Za-z0-9ァ-ヶー一-龥々・]{1,24}${escaped})`, 'i'),
+    )
+    if (compound && compound[1]) {
+      return cleanCalendarTitle(compound[1])
+    }
+    const exact = normalizedSentence.match(new RegExp(escaped, 'i'))
     if (exact) return cleanCalendarTitle(exact[0])
   }
   return null
