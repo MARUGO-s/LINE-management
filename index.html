@@ -3,10 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>LINE Summary Admin Dashboard</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Barlow+Condensed:wght@600;700&display=swap');
-
     :root {
       --bg0: #061320;
       --bg1: #173247;
@@ -829,7 +828,7 @@
       }, request.headers || {});
       const res = await fetch(
         base + '/functions/v1/admin-api' + requestPath,
-        Object.assign({}, request, { headers, cache: 'no-store' }),
+        Object.assign({}, request, { headers, cache: 'no-store', referrerPolicy: 'no-referrer' }),
       );
       const text = await res.text();
       let body = {};

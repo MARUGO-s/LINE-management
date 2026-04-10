@@ -3,10 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>LINE Media Viewer</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Barlow+Condensed:wght@600;700&display=swap');
-
     :root {
       --bg0: #061320;
       --bg1: #173247;
@@ -515,9 +514,6 @@
       documentNextBtn: document.getElementById('documentNextBtn'),
     };
     const MEDIA_CAP_DEFAULT_BYTES = 500 * 1024 * 1024;
-    const PDFJS_CDN_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.mjs';
-    const PDFJS_WORKER_CDN_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs';
-    let pdfjsLibPromise = null;
 
     function getToken() {
       return localStorage.getItem(STORE_TOKEN_KEY) || '';
@@ -607,6 +603,7 @@
         method: req.method || 'GET',
         headers: headers,
         body: req.body,
+        referrerPolicy: 'no-referrer',
         cache: 'no-store',
       });
       const text = await res.text();
@@ -679,8 +676,13 @@
         if (!roomId) return;
         const roomName = String(roomNameValue || '').trim();
         const existing = nameByRoomId.get(roomId);
-        if (existing) return;
-        nameByRoomId.set(roomId, roomName || roomId);
+        if (!existing) {
+          nameByRoomId.set(roomId, roomName || roomId);
+          return;
+        }
+        if (existing === roomId && roomName) {
+          nameByRoomId.set(roomId, roomName);
+        }
       }
 
       const roomSettings = Array.isArray(stateBody && stateBody.room_settings) ? stateBody.room_settings : [];
@@ -940,66 +942,6 @@
       }
     }
 
-    async function ensurePdfjsLib() {
-      if (pdfjsLibPromise) return pdfjsLibPromise;
-      pdfjsLibPromise = import(PDFJS_CDN_URL)
-        .then(function(module) {
-          const lib = module && module.default ? module.default : module;
-          if (lib && lib.GlobalWorkerOptions) {
-            lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN_URL;
-          }
-          return lib;
-        })
-        .catch(function(error) {
-          console.warn('pdf.js の読み込みに失敗しました:', error);
-          return null;
-        });
-      return pdfjsLibPromise;
-    }
-
-    async function extractPdfTextInBrowser(file) {
-      const lib = await ensurePdfjsLib();
-      if (!lib || typeof lib.getDocument !== 'function') return '';
-      try {
-        const buffer = await file.arrayBuffer();
-        const loadingTask = lib.getDocument({ data: new Uint8Array(buffer) });
-        const pdf = await loadingTask.promise;
-        const chunks = [];
-        for (let pageNo = 1; pageNo <= pdf.numPages; pageNo += 1) {
-          const page = await pdf.getPage(pageNo);
-          const textContent = await page.getTextContent();
-          const pageText = (Array.isArray(textContent.items) ? textContent.items : [])
-            .map(function(item) { return String(item && item.str || '').trim(); })
-            .filter(function(value) { return !!value; })
-            .join(' ');
-          if (pageText) chunks.push(pageText);
-        }
-        if (loadingTask && typeof loadingTask.destroy === 'function') {
-          loadingTask.destroy();
-        }
-        return chunks.join('\n').trim();
-      } catch (error) {
-        console.warn('PDFテキスト抽出に失敗しました:', error);
-        return '';
-      }
-    }
-
-    async function extractDocumentText(file) {
-      const name = String(file && file.name || '').toLowerCase();
-      const mime = String(file && file.type || '').toLowerCase();
-      if (mime.includes('text/plain') || name.endsWith('.txt') || name.endsWith('.log') || name.endsWith('.md') || name.endsWith('.csv')) {
-        try {
-          return String(await file.text() || '');
-        } catch (_) {
-          return '';
-        }
-      }
-      if (mime.includes('pdf') || name.endsWith('.pdf')) {
-        return await extractPdfTextInBrowser(file);
-      }
-      return '';
-    }
-
     async function uploadDocument() {
       const files = dom.documentFileInput.files;
       if (!files || files.length === 0) {
@@ -1011,11 +953,6 @@
       formData.append('file', file);
       if (roomId) {
         formData.append('room_id', roomId);
-      }
-
-      const extractedText = await extractDocumentText(file);
-      if (extractedText) {
-        formData.append('extracted_text', extractedText);
       }
 
       await api('/documents', {

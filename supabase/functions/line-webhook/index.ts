@@ -1648,6 +1648,9 @@ async function buildMessageSearchReply(
     .select('room_id, original_file_name, mime_type, extracted_text, created_at')
     .order('created_at', { ascending: false })
     .limit(SEARCH_MAX_DOCUMENT_ROWS)
+  if (sinceIso) {
+    docQuery = docQuery.gte('created_at', sinceIso)
+  }
   if (command.scope !== 'all_rooms') {
     docQuery = docQuery.eq('room_id', roomId)
   }
@@ -1725,9 +1728,6 @@ async function buildMessageSearchReply(
   }
   if (docRows.length >= SEARCH_MAX_DOCUMENT_ROWS) {
     lines.push(`※資料件数が多いため、新しい順で先頭${SEARCH_MAX_DOCUMENT_ROWS}件を対象にしています。`)
-  }
-  if (docRows.length > 0) {
-    lines.push('※資料検索は保持期間設定に関係なく、アップロード済み資料全件が対象です。')
   }
   if (summary) {
     lines.push('')

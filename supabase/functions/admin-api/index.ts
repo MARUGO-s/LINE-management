@@ -839,9 +839,9 @@ async function fetchDocumentState(
       row.original_file_name,
     )
     const normalizedRoomId = row.room_id || null
-    const normalizedRoomName = row.room_name
-      ? String(row.room_name)
-      : (normalizedRoomId ? (roomNameMap.get(normalizedRoomId) ?? normalizedRoomId) : null)
+    const latestRoomName = normalizedRoomId ? (roomNameMap.get(normalizedRoomId) ?? "") : ""
+    const normalizedRoomName = latestRoomName
+      || (row.room_name ? String(row.room_name) : (normalizedRoomId || null))
     const snippet = buildDocumentSnippet(row.extracted_text, DOCUMENT_PREVIEW_MAX_CHARS)
     return {
       ...row,
@@ -965,8 +965,7 @@ async function uploadDocumentFile(
   const fallbackExtractedText = mimeType === "text/plain"
     ? tryDecodeText(bytes)
     : ""
-  const extractedTextHint = toSafeString(formData.get("extracted_text"))
-  const extractedText = normalizeExtractedText(extractedTextHint || fallbackExtractedText)
+  const extractedText = normalizeExtractedText(fallbackExtractedText)
   const nowIso = new Date().toISOString()
   const storagePath = buildDocumentStoragePath(roomId, originalFileName)
 

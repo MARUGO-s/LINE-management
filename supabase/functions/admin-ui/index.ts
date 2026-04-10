@@ -5,10 +5,9 @@ const html = String.raw`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
   <title>LINE Summary Admin</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Barlow+Condensed:wght@600;700&display=swap');
-
     :root {
       --bg0: #071422;
       --bg1: #132c3f;
@@ -861,7 +860,10 @@ const html = String.raw`<!doctype html>
         'Content-Type': 'application/json',
       }, request.headers || {});
 
-      const response = await fetch(API_BASE + path, Object.assign({}, request, { headers }));
+      const response = await fetch(
+        API_BASE + path,
+        Object.assign({}, request, { headers, cache: 'no-store', referrerPolicy: 'no-referrer' }),
+      );
       const text = await response.text();
       let data = {};
       try {
