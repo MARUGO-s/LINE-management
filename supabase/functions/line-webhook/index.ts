@@ -2208,7 +2208,7 @@ async function fetchPendingCalendarConfirmation(
   const conversationKey = buildConversationKey(roomId, userId)
   const { data, error } = await supabase
     .from(CALENDAR_PENDING_TABLE)
-    .select('id, conversation_key, source_text, title, date, time, duration_min, confidence, reason, expires_at')
+    .select('id, conversation_key, source_text, title, location, date, time, duration_min, confidence, reason, expires_at')
     .eq('conversation_key', conversationKey)
     .eq('status', 'pending')
     .order('created_at', { ascending: false })
@@ -2265,7 +2265,7 @@ async function fetchPendingCalendarConfirmation(
     conversation_key: String(data.conversation_key),
     source_text: data.source_text ? String(data.source_text) : null,
     title: String(data.title),
-    location: null,
+    location: data.location ? String(data.location) : null,
     date: String(data.date),
     time: String(data.time),
     duration_min: Number(data.duration_min),
@@ -2349,6 +2349,7 @@ async function savePendingCalendarConfirmation(
       user_id: userId,
       source_text: sourceText,
       title: cleanCalendarTitle(intent.title),
+      location: intent.location ?? null,
       date: intent.date,
       time: intent.time,
       duration_min: intent.durationMin,
@@ -2412,8 +2413,275 @@ function buildPendingCalendarConfirmationPrompt(
     lines.push(`場所: ${intent.location}`)
   }
   lines.push('')
+  lines.push('修正する場合は「場所をmarugoに変更」「時間を19:00に変更」のように送ってください。')
   lines.push('「はい」で登録 / 「いいえ」でキャンセル')
   return lines.join('\n')
+}
+
+function buildPendingCalendarIntent(pending: PendingCalendarConfirmation): AiCalendarIntent {
+  return {
+    shouldCreate: true,
+    confidence: pending.confidence,
+    title: cleanCalendarTitle(pending.title),
+    ...(pending.location ? { location: pending.location } : {}),
+    date: pending.date,
+    time: pending.time,
+    durationMin: pending.duration_min,
+    reason: pending.reason ?? '',
+  }
+}
+
+function appendCorrectionToPendingSourceText(sourceText: string | null | undefined, correctionText: string): string {
+  const base = normalizeForRuleParsing(sourceText ?? '').trim()
+  const correction = normalizeForRuleParsing(correctionText).trim()
+  if (!base) return correction
+  if (!correction) return base
+  return `${base}\n[修正] ${correction}`
+}
+
+function looksLikePendingCorrectionText(rawText: string): boolean {
+  const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
+  if (!compact) return false
+  return /(訂正|修正|変更|変えて|直して|更新|場所|会場|時間|時刻|開始|日付|日にち|日時|件名|タイトル|予定名|内容)/.test(compact)
+}
+
+function extractCorrectionLocation(rawText: string): string | undefined {
+  const normalized = normalizeForRuleParsing(rawText).trim()
+  if (!normalized) return undefined
+  const patterns = [
+    /(?:場所|会場|開催場所|開催会場)\s*(?:を|は)?\s*([^\n。]+?)\s*(?:に(?:変更|して|変えて|してください)|へ(?:変更|して|変えて|してください)|です|でお願いします|でおねがい|にします|にする)/i,
+    /(?:場所|会場|開催場所|開催会場)\s*[：:]\s*([^\n。]+)/i,
+  ]
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern)
+    if (!match || !match[1]) continue
+    let candidate = String(match[1]).trim()
+    const fromTo = candidate.match(/(?:.+?)から\s*(.+)$/)
+    if (fromTo && fromTo[1]) candidate = fromTo[1].trim()
+    candidate = candidate.replace(/\s*(?:に|へ)\s*$/g, '').trim()
+    const cleaned = cleanCalendarLocation(candidate)
+    if (cleaned) return cleaned
+  }
+  return undefined
+}
+
+function extractCorrectionTitle(rawText: string): string | undefined {
+  const normalized = normalizeForRuleParsing(rawText).trim()
+  if (!normalized) return undefined
+  const patterns = [
+    /(?:件名|タイトル|予定名|内容)\s*(?:を|は)?\s*([^\n。]+?)\s*(?:に(?:変更|して|変えて|してください)|です|でお願いします|にします|にする)/i,
+    /(?:件名|タイトル|予定名|内容)\s*[：:]\s*([^\n。]+)/i,
+  ]
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern)
+    if (!match || !match[1]) continue
+    const cleaned = normalizeEventTitleCandidate(match[1]) || cleanCalendarTitle(match[1])
+    if (cleaned && cleaned !== '予定') return cleaned
+  }
+  return undefined
+}
+
+function extractCorrectionDate(rawText: string, baseDate = new Date()): string | null {
+  const normalized = normalizeForRuleParsing(rawText).trim()
+  if (!normalized) return null
+
+  let match = normalized.match(/(\d{4})[\/.\-年](\d{1,2})[\/.\-月](\d{1,2})日?/)
+  if (match) {
+    const year = Number(match[1])
+    const month = Number(match[2])
+    const day = Number(match[3])
+    return toIsoDateStringSafe(year, month, day)
+  }
+
+  match = normalized.match(/(\d{1,2})月(\d{1,2})日/)
+  if (match) {
+    const { year } = getJstYearMonth(baseDate)
+    const month = Number(match[1])
+    const day = Number(match[2])
+    return toIsoDateStringSafe(year, month, day)
+  }
+
+  match = normalized.match(/(?:日付|日にち|日程|日時)\s*(?:を|は|:|：)?\s*(\d{1,2})日/)
+  if (match) {
+    const { year, month } = getJstYearMonth(baseDate)
+    const day = Number(match[1])
+    return toIsoDateStringSafe(year, month, day)
+  }
+
+  return null
+}
+
+function extractCorrectionTime(rawText: string): string | null {
+  const normalized = normalizeForRuleParsing(rawText).trim()
+  if (!normalized) return null
+  const patterns = [
+    /(?:時間|時刻|開始(?:時間|時刻)?|開始|スタート)\s*(?:を|は|:|：)?\s*([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))/i,
+    /([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))\s*(?:に(?:変更|して|変えて|します|する)|開始|スタート|です|でお願いします)/i,
+    /^([0-9]{1,2}(?::[0-9]{2}|時(?:\s*[0-9]{1,2}分?)?))$/i,
+  ]
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern)
+    if (!match || !match[1]) continue
+    const parsed = parseFlexibleTimeToken(match[1])
+    if (!parsed) continue
+    const time = `${String(parsed.hour).padStart(2, '0')}:${String(parsed.minute).padStart(2, '0')}`
+    if (isValidTime(time)) return time
+  }
+  return null
+}
+
+function tryBuildPendingCorrection(
+  rawText: string,
+  pending: PendingCalendarConfirmation,
+): {
+  updates: {
+    source_text: string
+    title?: string
+    location?: string | null
+    date?: string
+    time?: string
+    duration_min?: number
+  }
+  changedFields: string[]
+  guidance?: string
+} | null {
+  const text = String(rawText ?? '').trim()
+  if (!text) return null
+
+  const hasCue = looksLikePendingCorrectionText(text)
+  const slot = parseDateTimeSlotFromLine(text)
+  const dateFromSlot = slot?.date
+  const timeFromSlot = slot?.time
+  const durationFromSlot = slot?.durationMin
+  const dateOnly = dateFromSlot ? null : extractCorrectionDate(text)
+  const timeOnly = timeFromSlot ? null : extractCorrectionTime(text)
+  const location = extractCorrectionLocation(text)
+  const title = extractCorrectionTitle(text)
+
+  const updates: {
+    source_text: string
+    title?: string
+    location?: string | null
+    date?: string
+    time?: string
+    duration_min?: number
+  } = {
+    source_text: appendCorrectionToPendingSourceText(pending.source_text, text),
+  }
+  const changedFields: string[] = []
+
+  const nextDate = dateFromSlot ?? dateOnly
+  if (nextDate && nextDate !== pending.date) {
+    updates.date = nextDate
+    changedFields.push('日付')
+  }
+
+  const nextTime = timeFromSlot ?? timeOnly
+  if (nextTime && nextTime !== pending.time) {
+    updates.time = nextTime
+    changedFields.push('時刻')
+  }
+
+  if (
+    typeof durationFromSlot === 'number' &&
+    Number.isInteger(durationFromSlot) &&
+    durationFromSlot > 0 &&
+    durationFromSlot <= MAX_DURATION_MIN &&
+    durationFromSlot !== pending.duration_min
+  ) {
+    updates.duration_min = durationFromSlot
+    changedFields.push('時間幅')
+  }
+
+  if (title && cleanCalendarTitle(title) !== cleanCalendarTitle(pending.title)) {
+    updates.title = cleanCalendarTitle(title)
+    changedFields.push('件名')
+  }
+
+  if (typeof location !== 'undefined') {
+    const currentLocation = cleanCalendarLocation(pending.location ?? '')
+    if (location !== currentLocation) {
+      updates.location = location
+      changedFields.push('場所')
+    }
+  }
+
+  if (changedFields.length === 0) {
+    if (!hasCue) return null
+    return {
+      updates,
+      changedFields,
+      guidance: '修正内容を読み取れませんでした。例: 「場所をmarugoに変更」「時間を19:00に変更」',
+    }
+  }
+
+  return { updates, changedFields }
+}
+
+async function updatePendingCalendarConfirmation(
+  supabase: any,
+  pending: PendingCalendarConfirmation,
+  updates: {
+    source_text: string
+    title?: string
+    location?: string | null
+    date?: string
+    time?: string
+    duration_min?: number
+  },
+): Promise<PendingCalendarConfirmation | null> {
+  const next: PendingCalendarConfirmation = {
+    ...pending,
+    source_text: updates.source_text,
+    title: updates.title ?? pending.title,
+    location: typeof updates.location !== 'undefined' ? updates.location : pending.location ?? null,
+    date: updates.date ?? pending.date,
+    time: updates.time ?? pending.time,
+    duration_min: typeof updates.duration_min === 'number' ? updates.duration_min : pending.duration_min,
+  }
+
+  if (pending.storage === 'pending_table') {
+    const { error } = await supabase
+      .from(CALENDAR_PENDING_TABLE)
+      .update({
+        source_text: next.source_text ?? '',
+        title: next.title,
+        location: next.location ?? null,
+        date: next.date,
+        time: next.time,
+        duration_min: next.duration_min,
+      })
+      .eq('id', Number(pending.id))
+      .eq('status', 'pending')
+    if (error) {
+      console.error('Failed to update pending confirmation:', error)
+      return null
+    }
+    return next
+  }
+
+  const payloadContent = encodeLegacyPendingContent({
+    conversationKey: next.conversation_key,
+    sourceText: next.source_text ?? null,
+    title: next.title,
+    location: next.location ?? null,
+    date: next.date,
+    time: next.time,
+    durationMin: next.duration_min,
+    confidence: next.confidence,
+    reason: next.reason ?? null,
+    expiresAt: next.expires_at,
+  })
+  const { error } = await supabase
+    .from('line_messages')
+    .update({ content: payloadContent })
+    .eq('id', next.id)
+    .eq('processed', true)
+  if (error) {
+    console.error('Failed to update legacy pending confirmation:', error)
+    return null
+  }
+  return next
 }
 
 async function tryHandlePendingCalendarConfirmation(
@@ -2423,9 +2691,6 @@ async function tryHandlePendingCalendarConfirmation(
   roomId: string,
   userId: string | null,
 ): Promise<string | null> {
-  const decision = normalizeConfirmationDecision(text)
-  if (!decision) return null
-
   const pending = await fetchPendingCalendarConfirmation(supabase, roomId, userId)
   if (!pending) return null
 
@@ -2435,26 +2700,50 @@ async function tryHandlePendingCalendarConfirmation(
     return '確認待ちの予定が期限切れです。予定文をもう一度送ってください。'
   }
 
+  const decision = normalizeConfirmationDecision(text)
+
   if (decision === 'no') {
     await resolvePendingCalendarConfirmation(supabase, pending, 'cancelled')
     return '予定登録をキャンセルしました。'
   }
 
+  if (decision !== 'yes') {
+    const correction = tryBuildPendingCorrection(text, pending)
+    if (!correction) return null
+    if (correction.guidance) {
+      return correction.guidance
+    }
+
+    const updatedPending = await updatePendingCalendarConfirmation(supabase, pending, correction.updates)
+    if (!updatedPending) {
+      return '予定候補の修正保存に失敗しました。もう一度修正内容を送ってください。'
+    }
+    const fields = correction.changedFields.join('・')
+    const lines = [
+      fields ? `予定候補を更新しました（${fields}）。` : '予定候補を更新しました。',
+      buildPendingCalendarConfirmationPrompt(buildPendingCalendarIntent(updatedPending), env.timezone),
+    ]
+    return lines.join('\n')
+  }
+
+  const explicitPendingTitle = normalizeEventTitleCandidate(pending.title) || cleanCalendarTitle(pending.title)
+  const explicitPendingLocation = cleanCalendarLocation(pending.location ?? '') ?? null
   const resolvedPendingDetails = resolveAiCalendarDetails(
     pending.source_text ?? '',
-    pending.title,
-    pending.location ?? undefined,
+    explicitPendingTitle,
+    explicitPendingLocation ?? undefined,
   )
-  const resolvedPendingTitle = resolvedPendingDetails.titleSource === 'default'
+  const resolvedPendingTitle = explicitPendingTitle || (resolvedPendingDetails.titleSource === 'default'
     ? cleanCalendarTitle(pending.title)
-    : resolvedPendingDetails.title
+    : resolvedPendingDetails.title)
+  const resolvedPendingLocation = explicitPendingLocation ?? resolvedPendingDetails.location ?? null
   const command: CalendarCreateCommand = {
     kind: 'create',
     date: pending.date,
     time: pending.time,
     durationMin: pending.duration_min,
     title: resolvedPendingTitle,
-    ...(resolvedPendingDetails.location ? { location: resolvedPendingDetails.location } : {}),
+    ...(resolvedPendingLocation ? { location: resolvedPendingLocation } : {}),
   }
   const result = await createCalendarEvent(command, env, roomId, userId)
   if (!result.ok) {
