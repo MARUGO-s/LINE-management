@@ -390,6 +390,15 @@ Deno.serve(async (req) => {
             }
           }
 
+          if (
+            !forceAiMessageSearch &&
+            !forceAiCalendarCreate &&
+            !forceAiCalendarList &&
+            looksLikeMessageSearchQuestion(text)
+          ) {
+            forceAiMessageSearch = true
+          }
+
           // Fallback: capture explicit single-event announcements even when primary intent misses.
           if (
             !forceAiCalendarCreate &&
@@ -1254,8 +1263,11 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
   if (!text) return { matched: false, command: null, error: null }
 
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
-  const hasExplicitPrefix = /^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)
-  if (!hasExplicitPrefix) {
+  const hasExplicitPrefix = /^(会話|トーク|履歴|チャット)(検索|要約|確認|まとめ|まとめて)/.test(compact)
+  const hasConversationHint = /(会話|トーク|履歴|チャット|メッセージ|発言)/.test(compact)
+  const hasSearchIntent =
+    /(検索|要約|まとめ|まとめて|要点|要旨|教えて|見せて|みせて|確認|知りたい|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた)/.test(compact)
+  if (!hasExplicitPrefix && !(hasConversationHint && hasSearchIntent)) {
     return { matched: false, command: null, error: null }
   }
 
@@ -1453,7 +1465,7 @@ function looksLikeMessageSearchQuestion(text: string): boolean {
   if (!compact) return false
   if (/^予定(?:確認|一覧|報告|登録|追加)/.test(compact)) return false
 
-  const hasSearchIntent = /(検索|探し|探して|探す|教えて|表示|表示して|見せて|みせて|確認|知りたい|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた)/.test(compact)
+  const hasSearchIntent = /(検索|探し|探して|探す|教えて|表示|表示して|見せて|みせて|確認|知りたい|要約|まとめ|まとめて|要点|要旨|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた)/.test(compact)
   if (!hasSearchIntent) return false
 
   const hasConversationHint = /(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|他ルーム|他のルーム|別ルーム|別のルーム|全ルーム)/.test(compact)
@@ -2468,6 +2480,14 @@ function extractCorrectionTitle(rawText: string): string | undefined {
   return undefined
 }
 
+function looksLikeEventTextForPendingCorrection(rawText: string): boolean {
+  const normalized = normalizeForRuleParsing(rawText).trim()
+  if (!normalized) return false
+  if (parseDateTimeSlotFromLine(normalized)) return true
+  return /(試飲会|打ち合わせ|打合せ|会議|ミーティング|meeting|mtg|商談|面談|イベント|予約|アポ|グランドオープン|オープン|ランチ|ディナー)/i
+    .test(normalized)
+}
+
 function extractCorrectionDate(rawText: string, baseDate = new Date()): string | null {
   const normalized = normalizeForRuleParsing(rawText).trim()
   if (!normalized) return null
@@ -2543,7 +2563,11 @@ function tryBuildPendingCorrection(
   const dateOnly = dateFromSlot ? null : extractCorrectionDate(text)
   const timeOnly = timeFromSlot ? null : extractCorrectionTime(text)
   const location = extractCorrectionLocation(text)
-  const title = extractCorrectionTitle(text)
+  const explicitTitle = extractCorrectionTitle(text)
+  const inferredTitle = !explicitTitle && looksLikeEventTextForPendingCorrection(text)
+    ? resolveAiCalendarDetails(text, pending.title, pending.location ?? undefined).title
+    : undefined
+  const title = explicitTitle || inferredTitle
 
   const updates: {
     source_text: string
