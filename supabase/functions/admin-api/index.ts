@@ -14,7 +14,7 @@ type AppError = {
 
 type MessageCleanupTiming = "after_each_delivery" | "end_of_day"
 type LastDeliverySummaryMode = "independent" | "daily_rollup"
-type MessageRetentionDays = 60 | 120 | 180
+type MessageRetentionDays = 0 | 60 | 120 | 180 | 365 | 730 | 1095
 type StorageUsageTableStat = {
   table_name: string
   size_bytes: number
@@ -49,6 +49,21 @@ type MediaMessageContext = {
   after_text: string | null
   after_at: string | null
 }
+type DocumentMimeType = "text/plain" | "application/pdf"
+type DocumentListRow = {
+  id: number
+  room_id: string | null
+  room_name: string | null
+  storage_bucket: string
+  storage_path: string
+  original_file_name: string
+  mime_type: DocumentMimeType
+  file_size_bytes: number
+  extracted_text: string
+  source: string
+  created_at: string
+  updated_at: string
+}
 
 const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
 const MEDIA_LIST_DEFAULT_LIMIT = 24
@@ -56,6 +71,12 @@ const MEDIA_LIST_MAX_LIMIT = 100
 const MEDIA_STORAGE_CAP_BYTES = 500 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
 const MAX_MEDIA_UPLOAD_MAX_MB = 20
+const LINE_DOCUMENT_BUCKET = "line-documents"
+const DOCUMENT_LIST_DEFAULT_LIMIT = 20
+const DOCUMENT_LIST_MAX_LIMIT = 100
+const DOCUMENT_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+const DOCUMENT_EXTRACT_MAX_CHARS = 250000
+const DOCUMENT_PREVIEW_MAX_CHARS = 240
 type MediaUsageStats = {
   total_files: number
   total_bytes: number
@@ -106,6 +127,16 @@ Deno.serve(async (req) => {
       return json(mediaState, 200)
     }
 
+    if (req.method === "GET" && path === "/documents") {
+      const documentState = await fetchDocumentState(supabase, url)
+      return json(documentState, 200)
+    }
+
+    if (req.method === "POST" && path === "/documents") {
+      const created = await uploadDocumentFile(req, supabase)
+      return json({ success: true, document: created }, 200)
+    }
+
     if (req.method === "PUT" && path === "/settings/media-upload-limit") {
       const body = await parseJson(req)
       if (!isRecord(body)) {
@@ -140,6 +171,16 @@ Deno.serve(async (req) => {
         throw { status: 400, message: "media_id must be a positive integer." } satisfies AppError
       }
       const deleted = await deleteMediaItemById(supabase, mediaId)
+      return json({ success: true, deleted }, 200)
+    }
+
+    if (req.method === "DELETE" && path.startsWith("/documents/")) {
+      const documentIdRaw = path.replace("/documents/", "")
+      const documentId = Number(documentIdRaw)
+      if (!Number.isInteger(documentId) || documentId <= 0) {
+        throw { status: 400, message: "document_id must be a positive integer." } satisfies AppError
+      }
+      const deleted = await deleteDocumentById(supabase, documentId)
       return json({ success: true, deleted }, 200)
     }
 
@@ -261,6 +302,10 @@ Deno.serve(async (req) => {
       if (!mediaCleanup.ok) {
         throw { status: 500, message: mediaCleanup.message } satisfies AppError
       }
+      const documentCleanup = await removeRoomDocuments(supabase, roomId)
+      if (!documentCleanup.ok) {
+        throw { status: 500, message: documentCleanup.message } satisfies AppError
+      }
 
       const { count: messageCount, error: messageCountError } = await supabase
         .from("line_messages")
@@ -302,6 +347,8 @@ Deno.serve(async (req) => {
           messages: messageCount ?? 0,
           media_files: mediaCleanup.deletedFiles,
           media_metadata: mediaCleanup.deletedMetadataRows,
+          document_files: documentCleanup.deletedFiles,
+          document_metadata: documentCleanup.deletedMetadataRows,
           room_settings: roomSettingsRow ? 1 : 0,
         },
       }, 200)
@@ -740,6 +787,333 @@ async function fetchMediaState(
   }
 }
 
+async function fetchDocumentState(
+  supabase: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const limit = clampInt(url.searchParams.get("limit"), DOCUMENT_LIST_DEFAULT_LIMIT, 1, DOCUMENT_LIST_MAX_LIMIT)
+  const offset = clampInt(url.searchParams.get("offset"), 0, 0, 1000000)
+  const roomId = String(url.searchParams.get("room_id") ?? "").trim()
+
+  let query = supabase
+    .from("line_search_documents")
+    .select(
+      "id, room_id, room_name, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, extracted_text, source, created_at, updated_at",
+      { count: "exact" },
+    )
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1)
+
+  if (roomId) {
+    query = query.eq("room_id", roomId)
+  }
+
+  const [listRes, filteredUsageRes, allUsageRes] = await Promise.all([
+    query,
+    fetchLineDocumentUsageStats(supabase, roomId || null),
+    fetchLineDocumentUsageStats(supabase, null),
+  ])
+  const { data, error, count } = listRes
+  if (error) {
+    throw { status: 500, message: `Failed to fetch document list: ${error.message}` } satisfies AppError
+  }
+  if (!filteredUsageRes.ok) {
+    throw { status: 500, message: filteredUsageRes.message } satisfies AppError
+  }
+  if (!allUsageRes.ok) {
+    throw { status: 500, message: allUsageRes.message } satisfies AppError
+  }
+
+  const rows = Array.isArray(data)
+    ? data.map((item) => normalizeDocumentListRow(item)).filter((item): item is DocumentListRow => item !== null)
+    : []
+  const roomNameMap = await fetchRoomNameMapForIds(
+    supabase,
+    rows.map((row) => row.room_id || "").filter((value) => value.length > 0),
+  )
+  const items = await Promise.all(rows.map(async (row) => {
+    const signedUrl = await createSignedMediaDownloadUrl(
+      supabase,
+      row.storage_bucket,
+      row.storage_path,
+      row.original_file_name,
+    )
+    const normalizedRoomId = row.room_id || null
+    const normalizedRoomName = row.room_name
+      ? String(row.room_name)
+      : (normalizedRoomId ? (roomNameMap.get(normalizedRoomId) ?? normalizedRoomId) : null)
+    const snippet = buildDocumentSnippet(row.extracted_text, DOCUMENT_PREVIEW_MAX_CHARS)
+    return {
+      ...row,
+      room_id: normalizedRoomId,
+      room_name: normalizedRoomName,
+      snippet,
+      signed_url: signedUrl,
+      has_extracted_text: row.extracted_text.length > 0,
+      extracted_char_count: row.extracted_text.length,
+    }
+  }))
+
+  const safeTotal = Number.isFinite(Number(count)) ? Number(count) : items.length
+  const nextOffset = offset + items.length
+  return {
+    items,
+    total: safeTotal,
+    total_file_bytes: filteredUsageRes.stats.total_bytes,
+    total_file_count: filteredUsageRes.stats.total_files,
+    all_file_bytes: allUsageRes.stats.total_bytes,
+    all_file_count: allUsageRes.stats.total_files,
+    limit,
+    offset,
+    has_more: nextOffset < safeTotal,
+    next_offset: nextOffset < safeTotal ? nextOffset : null,
+    generated_at: new Date().toISOString(),
+  }
+}
+
+async function fetchLineDocumentUsageStats(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string | null,
+): Promise<{ ok: true; stats: MediaUsageStats } | { ok: false; message: string }> {
+  const { data, error } = await supabase.rpc("get_line_document_usage_stats", {
+    filter_room_id: roomId,
+  })
+  if (error) {
+    return { ok: false, message: `Failed to fetch document usage stats: ${error.message}` }
+  }
+  const row = Array.isArray(data) ? data[0] : null
+  const totalFiles = toNonNegativeInteger((row as any)?.total_files)
+  const totalBytes = toNonNegativeInteger((row as any)?.total_bytes)
+  return {
+    ok: true,
+    stats: {
+      total_files: totalFiles,
+      total_bytes: totalBytes,
+    },
+  }
+}
+
+function normalizeDocumentListRow(value: unknown): DocumentListRow | null {
+  if (!isRecord(value)) return null
+  const idNum = Number(value.id)
+  if (!Number.isFinite(idNum) || idNum <= 0) return null
+
+  const storageBucket = toSafeString(value.storage_bucket)
+  const storagePath = toSafeString(value.storage_path)
+  const originalFileName = toSafeString(value.original_file_name)
+  if (!storageBucket || !storagePath || !originalFileName) return null
+
+  const mimeType = normalizeDocumentMimeType(String(value.mime_type ?? ""), originalFileName)
+  if (!mimeType) return null
+
+  return {
+    id: Math.floor(idNum),
+    room_id: value.room_id == null ? null : toSafeString(value.room_id) || null,
+    room_name: value.room_name == null ? null : String(value.room_name),
+    storage_bucket: storageBucket,
+    storage_path: storagePath,
+    original_file_name: originalFileName,
+    mime_type: mimeType,
+    file_size_bytes: toNonNegativeInteger(value.file_size_bytes),
+    extracted_text: normalizeExtractedText(String(value.extracted_text ?? "")),
+    source: toSafeString(value.source) || "manual_upload",
+    created_at: String(value.created_at ?? ""),
+    updated_at: String(value.updated_at ?? ""),
+  }
+}
+
+async function uploadDocumentFile(
+  req: Request,
+  supabase: ReturnType<typeof createClient>,
+) {
+  let formData: FormData
+  try {
+    formData = await req.formData()
+  } catch {
+    throw {
+      status: 400,
+      message: "Upload request must be multipart/form-data.",
+    } satisfies AppError
+  }
+
+  const fileValue = formData.get("file")
+  if (!(fileValue instanceof File)) {
+    throw { status: 400, message: "file is required." } satisfies AppError
+  }
+  if (!Number.isFinite(fileValue.size) || fileValue.size <= 0) {
+    throw { status: 400, message: "file must not be empty." } satisfies AppError
+  }
+  if (fileValue.size >= DOCUMENT_UPLOAD_MAX_BYTES) {
+    throw {
+      status: 400,
+      message: `file must be smaller than ${Math.floor(DOCUMENT_UPLOAD_MAX_BYTES / (1024 * 1024))}MB.`,
+    } satisfies AppError
+  }
+
+  const roomIdRaw = toSafeString(formData.get("room_id"))
+  const roomId = roomIdRaw || null
+  let roomName = toSafeString(formData.get("room_name")) || null
+
+  const originalFileName = sanitizeUploadFileName(fileValue.name || "document")
+  const mimeType = normalizeDocumentMimeType(fileValue.type || "", originalFileName)
+  if (!mimeType) {
+    throw { status: 400, message: "Only TXT or PDF files can be uploaded." } satisfies AppError
+  }
+
+  const buffer = await fileValue.arrayBuffer()
+  const bytes = new Uint8Array(buffer)
+  const fallbackExtractedText = mimeType === "text/plain"
+    ? tryDecodeText(bytes)
+    : ""
+  const extractedTextHint = toSafeString(formData.get("extracted_text"))
+  const extractedText = normalizeExtractedText(extractedTextHint || fallbackExtractedText)
+  const nowIso = new Date().toISOString()
+  const storagePath = buildDocumentStoragePath(roomId, originalFileName)
+
+  const uploadRes = await supabase
+    .storage
+    .from(LINE_DOCUMENT_BUCKET)
+    .upload(storagePath, bytes, {
+      contentType: mimeType,
+      upsert: false,
+    })
+  if (uploadRes.error) {
+    throw { status: 500, message: `Failed to upload document: ${uploadRes.error.message}` } satisfies AppError
+  }
+
+  if (roomId && !roomName) {
+    const { data: roomRow } = await supabase
+      .from("room_summary_settings")
+      .select("room_name")
+      .eq("room_id", roomId)
+      .maybeSingle()
+    roomName = toSafeString(roomRow?.room_name) || null
+  }
+
+  const insertPayload = {
+    room_id: roomId,
+    room_name: roomName,
+    storage_bucket: LINE_DOCUMENT_BUCKET,
+    storage_path: storagePath,
+    original_file_name: originalFileName,
+    mime_type: mimeType,
+    file_size_bytes: bytes.byteLength,
+    extracted_text: extractedText,
+    source: "manual_upload",
+    created_at: nowIso,
+    updated_at: nowIso,
+  }
+  const { data: inserted, error: insertError } = await supabase
+    .from("line_search_documents")
+    .insert(insertPayload)
+    .select("id, room_id, room_name, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, extracted_text, source, created_at, updated_at")
+    .single()
+
+  if (insertError) {
+    await supabase.storage.from(LINE_DOCUMENT_BUCKET).remove([storagePath])
+    throw { status: 500, message: `Failed to save document metadata: ${insertError.message}` } satisfies AppError
+  }
+
+  const normalized = normalizeDocumentListRow(inserted)
+  if (!normalized) {
+    await supabase.storage.from(LINE_DOCUMENT_BUCKET).remove([storagePath])
+    throw { status: 500, message: "Saved document row is invalid." } satisfies AppError
+  }
+
+  const signedUrl = await createSignedMediaDownloadUrl(
+    supabase,
+    normalized.storage_bucket,
+    normalized.storage_path,
+    normalized.original_file_name,
+  )
+  return {
+    ...normalized,
+    snippet: buildDocumentSnippet(normalized.extracted_text, DOCUMENT_PREVIEW_MAX_CHARS),
+    signed_url: signedUrl,
+    has_extracted_text: normalized.extracted_text.length > 0,
+    extracted_char_count: normalized.extracted_text.length,
+  }
+}
+
+function normalizeDocumentMimeType(rawMimeType: string, fileName: string): DocumentMimeType | null {
+  const normalizedMimeType = String(rawMimeType ?? "").split(";")[0].trim().toLowerCase()
+  if (normalizedMimeType === "text/plain") return "text/plain"
+  if (normalizedMimeType === "application/pdf") return "application/pdf"
+
+  const ext = extractFileExt(fileName)
+  if (ext === "txt" || ext === "log" || ext === "md" || ext === "csv") {
+    return "text/plain"
+  }
+  if (ext === "pdf") return "application/pdf"
+  return null
+}
+
+function sanitizeUploadFileName(value: string): string {
+  const safe = String(value ?? "")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!safe) return "document.txt"
+  return safe.length <= 180 ? safe : safe.slice(0, 180).trimEnd()
+}
+
+function extractFileExt(fileName: string): string {
+  const safe = sanitizeUploadFileName(fileName)
+  const idx = safe.lastIndexOf(".")
+  if (idx < 0 || idx === safe.length - 1) return ""
+  return safe
+    .slice(idx + 1)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+}
+
+function buildDocumentStoragePath(roomId: string | null, originalFileName: string): string {
+  const now = new Date()
+  const y = now.getUTCFullYear()
+  const m = String(now.getUTCMonth() + 1).padStart(2, "0")
+  const d = String(now.getUTCDate()).padStart(2, "0")
+  const roomSegment = sanitizeStoragePathSegment(roomId || "shared")
+  const ext = extractFileExt(originalFileName) || "bin"
+  const baseName = sanitizeStoragePathSegment(originalFileName.replace(/\.[^.]+$/, "") || "document")
+  const docId = crypto.randomUUID()
+  return `${y}/${m}/${d}/${roomSegment}/${docId}-${baseName}.${ext}`
+}
+
+function sanitizeStoragePathSegment(value: string): string {
+  const cleaned = String(value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+  if (!cleaned) return "unknown"
+  return cleaned.length > 120 ? cleaned.slice(0, 120) : cleaned
+}
+
+function tryDecodeText(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes)
+  } catch {
+    return ""
+  }
+}
+
+function normalizeExtractedText(value: string): string {
+  const normalized = String(value ?? "")
+    .replace(/\u0000/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .trim()
+  if (!normalized) return ""
+  if (normalized.length <= DOCUMENT_EXTRACT_MAX_CHARS) return normalized
+  return normalized.slice(0, DOCUMENT_EXTRACT_MAX_CHARS).trimEnd()
+}
+
+function buildDocumentSnippet(text: string, maxChars: number): string {
+  const normalized = String(text ?? "")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!normalized) return ""
+  if (normalized.length <= maxChars) return normalized
+  return `${normalized.slice(0, maxChars).trimEnd()}…`
+}
+
 async function fetchMediaUploadMaxMb(
   supabase: ReturnType<typeof createClient>,
 ): Promise<number> {
@@ -1092,6 +1466,51 @@ async function deleteMediaItemById(
   }
 }
 
+async function deleteDocumentById(
+  supabase: ReturnType<typeof createClient>,
+  documentId: number,
+): Promise<{ document_id: number; room_id: string | null; storage_deleted: boolean }> {
+  const { data: row, error: fetchError } = await supabase
+    .from("line_search_documents")
+    .select("id, room_id, storage_bucket, storage_path")
+    .eq("id", documentId)
+    .maybeSingle()
+  if (fetchError) {
+    throw { status: 500, message: `Failed to fetch document row: ${fetchError.message}` } satisfies AppError
+  }
+  if (!row) {
+    throw { status: 404, message: "Document not found." } satisfies AppError
+  }
+
+  const storageBucket = toSafeString(row.storage_bucket)
+  const storagePath = toSafeString(row.storage_path)
+  let storageDeleted = false
+  if (storageBucket && storagePath) {
+    const { data: removed, error: removeError } = await supabase
+      .storage
+      .from(storageBucket)
+      .remove([storagePath])
+    if (removeError) {
+      throw { status: 500, message: `Failed to delete storage object: ${removeError.message}` } satisfies AppError
+    }
+    storageDeleted = Array.isArray(removed) && removed.length > 0
+  }
+
+  const { error: deleteError } = await supabase
+    .from("line_search_documents")
+    .delete()
+    .eq("id", documentId)
+  if (deleteError) {
+    throw { status: 500, message: `Failed to delete document metadata: ${deleteError.message}` } satisfies AppError
+  }
+
+  return {
+    document_id: documentId,
+    room_id: row.room_id == null ? null : String(row.room_id),
+    storage_deleted: storageDeleted,
+  }
+}
+
 async function removeRoomMediaObjects(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
@@ -1149,6 +1568,64 @@ async function removeRoomMediaObjects(
     return { ok: false, message: `Failed to delete media metadata: ${deleteMetaError.message}` }
   }
 
+  return { ok: true, deletedFiles, deletedMetadataRows: deletedMetadataRows ?? 0 }
+}
+
+async function removeRoomDocuments(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+): Promise<{ ok: true; deletedFiles: number; deletedMetadataRows: number } | { ok: false; message: string }> {
+  const { data: rowsRaw, error: fetchError } = await supabase
+    .from("line_search_documents")
+    .select("id, storage_bucket, storage_path")
+    .eq("room_id", roomId)
+  if (fetchError) {
+    return { ok: false, message: `Failed to fetch room documents: ${fetchError.message}` }
+  }
+
+  const rows = Array.isArray(rowsRaw)
+    ? rowsRaw
+        .map((item) => ({
+          id: Number(item?.id),
+          storage_bucket: toSafeString(item?.storage_bucket),
+          storage_path: toSafeString(item?.storage_path),
+        }))
+        .filter((item) => Number.isFinite(item.id) && item.id > 0 && item.storage_bucket && item.storage_path)
+    : []
+
+  if (rows.length === 0) {
+    return { ok: true, deletedFiles: 0, deletedMetadataRows: 0 }
+  }
+
+  const bucketMap = new Map<string, string[]>()
+  for (const row of rows) {
+    const list = bucketMap.get(row.storage_bucket) ?? []
+    list.push(row.storage_path)
+    bucketMap.set(row.storage_bucket, list)
+  }
+
+  let deletedFiles = 0
+  for (const [bucket, paths] of bucketMap.entries()) {
+    const chunks = chunkArray(paths, 100)
+    for (const chunk of chunks) {
+      const { data: removed, error: removeError } = await supabase
+        .storage
+        .from(bucket)
+        .remove(chunk)
+      if (removeError) {
+        return { ok: false, message: `Failed to delete document files in bucket ${bucket}: ${removeError.message}` }
+      }
+      deletedFiles += Array.isArray(removed) ? removed.length : 0
+    }
+  }
+
+  const { count: deletedMetadataRows, error: deleteMetaError } = await supabase
+    .from("line_search_documents")
+    .delete({ count: "exact" })
+    .eq("room_id", roomId)
+  if (deleteMetaError) {
+    return { ok: false, message: `Failed to delete document metadata: ${deleteMetaError.message}` }
+  }
   return { ok: true, deletedFiles, deletedMetadataRows: deletedMetadataRows ?? 0 }
 }
 
@@ -1268,7 +1745,7 @@ async function fetchGlobalSettings(supabase: ReturnType<typeof createClient>) {
     is_enabled: true,
     message_cleanup_timing: "after_each_delivery" as MessageCleanupTiming,
     last_delivery_summary_mode: "independent" as LastDeliverySummaryMode,
-    message_retention_days: 60 as MessageRetentionDays,
+    message_retention_days: 365 as MessageRetentionDays,
     calendar_tomorrow_reminder_enabled: true,
     calendar_tomorrow_reminder_hours: [19],
     calendar_tomorrow_reminder_only_if_events: false,
@@ -1508,12 +1985,14 @@ function normalizeLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMo
 }
 
 function normalizeMessageRetentionDays(value: unknown): MessageRetentionDays {
-  if (value == null || value === "") return 60
+  if (value == null || value === "") return 365
   const days = Number(value)
-  if (days === 60 || days === 120 || days === 180) return days
+  if (days === 0 || days === 60 || days === 120 || days === 180 || days === 365 || days === 730 || days === 1095) {
+    return days
+  }
   throw {
     status: 400,
-    message: "message_retention_days must be one of 60, 120, or 180.",
+    message: "message_retention_days must be one of 0, 60, 120, 180, 365, 730, or 1095.",
   } satisfies AppError
 }
 

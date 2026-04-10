@@ -4,7 +4,7 @@ import { Groq } from "https://esm.sh/groq-sdk@0.5.0"
 
 type MessageCleanupTiming = 'after_each_delivery' | 'end_of_day'
 type LastDeliverySummaryMode = 'independent' | 'daily_rollup'
-type MessageRetentionDays = 60 | 120 | 180
+type MessageRetentionDays = 0 | 60 | 120 | 180 | 365 | 730 | 1095
 type MessageUpdateResult = { affectedCount: number; error: Error | null }
 type LineMessageRow = { id: string; room_id: string; content: string; created_at: string }
 type RoomRuntimeSetting = {
@@ -79,7 +79,7 @@ const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar'
 const DEFAULT_TOMORROW_REMINDER_HOURS = [19]
 const DEFAULT_TOMORROW_REMINDER_MAX_ITEMS = 20
-const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 60
+const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 365
 const DEFAULT_GMAIL_ALERT_QUERY = 'is:inbox is:unread newer_than:7d (予約 OR reservation OR booking)'
 const DEFAULT_GMAIL_ALERT_MAX_MESSAGES = 5
 const MAX_GMAIL_ALERT_MAX_MESSAGES = 20
@@ -138,11 +138,15 @@ Deno.serve(async (req) => {
     }
 
     try {
-      const pruneResult = await pruneMessagesByRetentionDays(supabase, messageRetentionDays, now)
-      if (pruneResult.error) {
-        console.error(`Failed to prune by retention (${messageRetentionDays} days):`, pruneResult.error.message)
-      } else if (pruneResult.affectedCount > 0) {
-        console.log(`Pruned ${pruneResult.affectedCount} LINE messages older than ${messageRetentionDays} days.`)
+      if (messageRetentionDays > 0) {
+        const pruneResult = await pruneMessagesByRetentionDays(supabase, messageRetentionDays, now)
+        if (pruneResult.error) {
+          console.error(`Failed to prune by retention (${messageRetentionDays} days):`, pruneResult.error.message)
+        } else if (pruneResult.affectedCount > 0) {
+          console.log(`Pruned ${pruneResult.affectedCount} LINE messages older than ${messageRetentionDays} days.`)
+        }
+      } else {
+        console.log('Retention prune is disabled (message_retention_days=0).')
       }
     } catch (pruneErr) {
       console.error('Unexpected retention-prune error:', pruneErr)
@@ -1766,7 +1770,9 @@ function normalizeLastDeliverySummaryMode(value: unknown): LastDeliverySummaryMo
 
 function normalizeMessageRetentionDays(value: unknown): MessageRetentionDays {
   const days = Number(value)
-  if (days === 60 || days === 120 || days === 180) return days
+  if (days === 0 || days === 60 || days === 120 || days === 180 || days === 365 || days === 730 || days === 1095) {
+    return days
+  }
   return DEFAULT_MESSAGE_RETENTION_DAYS
 }
 
@@ -1876,6 +1882,9 @@ async function pruneMessagesByRetentionDays(
   retentionDays: MessageRetentionDays,
   now = new Date(),
 ): Promise<MessageUpdateResult> {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+    return { affectedCount: 0, error: null }
+  }
   const cutoffIso = new Date(now.getTime() - retentionDays * 24 * 60 * 60 * 1000).toISOString()
   const { count, error: countError } = await supabase
     .from('line_messages')

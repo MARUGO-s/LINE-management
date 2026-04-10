@@ -566,6 +566,10 @@ const html = String.raw`<!doctype html>
             <option value="daily_rollup">最終配信のみ1日まとめ</option>
           </select>
           <select id="messageRetentionDays" class="select" aria-label="メッセージ保持期間">
+            <option value="365">会話保持: 1年（推奨）</option>
+            <option value="730">会話保持: 2年</option>
+            <option value="1095">会話保持: 3年</option>
+            <option value="0">会話保持: 無制限</option>
             <option value="60">会話保持: 60日</option>
             <option value="120">会話保持: 120日</option>
             <option value="180">会話保持: 180日</option>
@@ -967,9 +971,9 @@ const html = String.raw`<!doctype html>
         ? 'daily_rollup'
         : 'independent';
       const retentionDays = Number(settings.message_retention_days);
-      dom.messageRetentionDays.value = (retentionDays === 60 || retentionDays === 120 || retentionDays === 180)
+      dom.messageRetentionDays.value = ([0, 60, 120, 180, 365, 730, 1095].includes(retentionDays))
         ? String(retentionDays)
-        : '60';
+        : '365';
       dom.tomorrowReminderEnabled.checked = settings.calendar_tomorrow_reminder_enabled !== false;
       dom.tomorrowReminderHoursInput.value = Array.isArray(settings.calendar_tomorrow_reminder_hours)
         ? settings.calendar_tomorrow_reminder_hours.join(',')
@@ -987,7 +991,7 @@ const html = String.raw`<!doctype html>
         '配信回数: ' + count + '回/日'
         + '  |  消去: ' + cleanupTimingLabel(dom.messageCleanupTiming.value)
         + '  |  最終回: ' + summaryModeLabel(dom.lastDeliverySummaryMode.value)
-        + '  |  会話保持: ' + dom.messageRetentionDays.value + '日'
+        + '  |  会話保持: ' + messageRetentionLabel(dom.messageRetentionDays.value)
         + '  |  翌日予定通知: '
         + (dom.tomorrowReminderEnabled.checked ? ('ON (' + reminderHours + '時)') : 'OFF')
         + '  |  予定なし時: '
@@ -1245,6 +1249,15 @@ const html = String.raw`<!doctype html>
 
     function summaryModeLabel(value) {
       return value === 'daily_rollup' ? '最終回のみ1日まとめ' : '各回独立';
+    }
+
+    function messageRetentionLabel(value) {
+      const days = Number(value || 0);
+      if (days <= 0) return '無制限';
+      if (days === 365) return '1年';
+      if (days === 730) return '2年';
+      if (days === 1095) return '3年';
+      return days + '日';
     }
 
     function parseRoomSortOrder(value) {

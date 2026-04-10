@@ -111,7 +111,7 @@ type CalendarCreateResult =
     }
   | { ok: false; error: string }
 
-type MessageRetentionDays = 60 | 120 | 180
+type MessageRetentionDays = 0 | 60 | 120 | 180 | 365 | 730 | 1095
 
 type MessageSearchScope = 'current_room' | 'all_rooms'
 
@@ -158,6 +158,14 @@ type SearchMessageRow = {
   created_at: string
   user_id: string | null
 }
+type SearchDocumentRow = {
+  room_id: string | null
+  room_label?: string | null
+  original_file_name: string
+  mime_type: string
+  extracted_text: string
+  created_at: string
+}
 
 type StorableLineMediaType = 'image' | 'video' | 'audio' | 'file'
 
@@ -177,10 +185,11 @@ const PENDING_CONFIRMATION_TTL_MIN = 30
 const CALENDAR_PENDING_TABLE = 'calendar_pending_confirmations'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
 const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
-const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 60
+const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 365
 const SEARCH_MAX_FETCH_ROWS = 800
 const SEARCH_MAX_SUMMARY_ROWS = 120
 const SEARCH_AI_SUMMARY_MAX_HITS = 80
+const SEARCH_MAX_DOCUMENT_ROWS = 300
 const LINE_MEDIA_BUCKET = 'line-media'
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 500 * 1024 * 1024
@@ -1198,7 +1207,9 @@ async function loadMessageRetentionDays(
 
 function normalizeMessageRetentionDays(value: unknown): MessageRetentionDays {
   const days = Number(value)
-  if (days === 60 || days === 120 || days === 180) return days
+  if (days === 0 || days === 60 || days === 120 || days === 180 || days === 365 || days === 730 || days === 1095) {
+    return days
+  }
   return DEFAULT_MESSAGE_RETENTION_DAYS
 }
 
@@ -1306,6 +1317,10 @@ function isExplicitBotCommandText(rawText: string): boolean {
 }
 
 function detectMessageSearchDays(compactText: string): MessageRetentionDays | null {
+  if (/(全期間|無制限|すべて|全部|全件)/.test(compactText)) return 0
+  if (/(1095日|3年|三年)/.test(compactText)) return 1095
+  if (/(730日|2年|二年)/.test(compactText)) return 730
+  if (/(365日|1年|一年|12ヶ月|12か月|十二ヶ月)/.test(compactText)) return 365
   if (/(180日|半年|6ヶ月|6か月|六ヶ月)/.test(compactText)) return 180
   if (/(120日|4ヶ月|4か月|四ヶ月)/.test(compactText)) return 120
   if (/(60日|2ヶ月|2か月|二ヶ月)/.test(compactText)) return 60
@@ -1324,7 +1339,7 @@ function detectMessageSearchScope(compactText: string): MessageSearchScope {
 
 function extractMessageSearchKeyword(rawText: string): string {
   const stripped = normalizeForRuleParsing(rawText)
-    .replace(/(180日|120日|60日|半年|6ヶ月|6か月|六ヶ月|4ヶ月|4か月|四ヶ月|2ヶ月|2か月|二ヶ月)/g, ' ')
+    .replace(/(1095日|730日|365日|180日|120日|60日|3年|2年|1年|三年|二年|一年|半年|12ヶ月|12か月|十二ヶ月|6ヶ月|6か月|六ヶ月|4ヶ月|4か月|四ヶ月|2ヶ月|2か月|二ヶ月|全期間|無制限)/g, ' ')
     .replace(/(過去|最近|直近|以内|分|間)/g, ' ')
     .replace(/(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|全ルーム|他ルーム|他のルーム|別ルーム|別のルーム)/g, ' ')
     .replace(/(検索|探し|探して|探す|要約|まとめ|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい|記述|言及)/g, ' ')
@@ -1494,14 +1509,14 @@ async function extractMessageSearchIntentWithGroq(
               '会話・履歴・メッセージ検索の意図がある場合のみ should_search=true にしてください。',
               '予定照会（予定・会議などのカレンダー検索）は should_search=false にしてください。',
               'JSONのみ返してください。説明文やコードブロックは禁止です。',
-              `days は 60/120/180 のいずれか。未指定時は ${defaultDays}。`,
+              `days は 0/60/120/180/365/730/1095 のいずれか。0 は全期間。未指定時は ${defaultDays}。`,
               'scope は current_room または all_rooms。',
               'scopeが明示されない場合は all_rooms を返してください。',
               '「他のルーム」「全ルーム」「別グループ」等の意図がある場合は all_rooms。',
               '「このルーム」「このグループ」等の意図がある場合は current_room。',
               'keyword は検索に使う短い語句のみ。',
               '返却JSONスキーマ:',
-              '{"should_search":boolean,"keyword":string,"days":60|120|180,"scope":"current_room|all_rooms","confidence":number(0-1)}',
+              '{"should_search":boolean,"keyword":string,"days":0|60|120|180|365|730|1095,"scope":"current_room|all_rooms","confidence":number(0-1)}',
             ].join('\n'),
           },
           { role: 'user', content: text },
@@ -1531,7 +1546,7 @@ async function extractMessageSearchIntentWithGroq(
       : 0
 
     const rawDays = Number(raw.days)
-    const days = rawDays === 60 || rawDays === 120 || rawDays === 180
+    const days = isSupportedMessageRetentionDays(rawDays)
       ? rawDays
       : defaultDays
 
@@ -1561,6 +1576,16 @@ function normalizeAiMessageSearchScope(raw: string): MessageSearchScope {
   return 'all_rooms'
 }
 
+function isSupportedMessageRetentionDays(value: number): value is MessageRetentionDays {
+  return value === 0
+    || value === 60
+    || value === 120
+    || value === 180
+    || value === 365
+    || value === 730
+    || value === 1095
+}
+
 function isAcceptableAiMessageSearchIntent(intent: AiMessageSearchIntent): boolean {
   if (!intent.shouldSearch) return false
   if (intent.confidence < AI_MESSAGE_SEARCH_MIN_CONFIDENCE) return false
@@ -1579,15 +1604,25 @@ async function buildMessageSearchReply(
   if (parseError) return [parseError]
   if (!command) return ['会話検索の意図を解釈できませんでした。']
 
-  const effectiveDays = command.days > configuredRetentionDays ? configuredRetentionDays : command.days
-  const sinceIso = new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
+  const requestedDays = command.days
+  const effectiveDays = configuredRetentionDays === 0
+    ? requestedDays
+    : (requestedDays === 0 ? configuredRetentionDays : Math.min(requestedDays, configuredRetentionDays))
+  const adjustedByRetention = configuredRetentionDays > 0 && (
+    requestedDays === 0 || requestedDays > configuredRetentionDays
+  )
+  const sinceIso = effectiveDays > 0
+    ? new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
+    : null
 
   let query = supabase
     .from('line_messages')
     .select('room_id, content, created_at, user_id')
-    .gte('created_at', sinceIso)
     .order('created_at', { ascending: false })
     .limit(SEARCH_MAX_FETCH_ROWS)
+  if (sinceIso) {
+    query = query.gte('created_at', sinceIso)
+  }
 
   if (command.scope !== 'all_rooms') {
     query = query.eq('room_id', roomId)
@@ -1608,17 +1643,48 @@ async function buildMessageSearchReply(
       }))
     : []
 
+  let docQuery = supabase
+    .from('line_search_documents')
+    .select('room_id, original_file_name, mime_type, extracted_text, created_at')
+    .order('created_at', { ascending: false })
+    .limit(SEARCH_MAX_DOCUMENT_ROWS)
+  if (command.scope !== 'all_rooms') {
+    docQuery = docQuery.eq('room_id', roomId)
+  }
+  const { data: docData, error: docError } = await docQuery
+  if (docError) {
+    console.error('Failed to fetch document rows for message search:', docError.message)
+  }
+  const docRows: SearchDocumentRow[] = Array.isArray(docData)
+    ? docData.map((row: any) => ({
+        room_id: row?.room_id == null ? null : String(row.room_id),
+        original_file_name: String(row?.original_file_name ?? ''),
+        mime_type: String(row?.mime_type ?? ''),
+        extracted_text: String(row?.extracted_text ?? ''),
+        created_at: String(row?.created_at ?? ''),
+      }))
+    : []
+
   const hitsRaw = rows.filter((row) => messageMatchesKeyword(row.content, command.keyword))
-  if (hitsRaw.length === 0) {
-    const lines = [`「${command.keyword}」に一致する会話はありません（過去${effectiveDays}日）`]
-    if (effectiveDays !== command.days) {
+  const docHitsRaw = docRows.filter((row) => {
+    const searchable = `${row.original_file_name}\n${row.extracted_text}`
+    return messageMatchesKeyword(searchable, command.keyword)
+  })
+  if (hitsRaw.length === 0 && docHitsRaw.length === 0) {
+    const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+    const lines = [`「${command.keyword}」に一致する会話・資料はありません（${periodText}）`]
+    if (adjustedByRetention) {
       lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
     }
     return [lines.join('\n')]
   }
 
+  const labelTargetRows: Array<{ room_id: string | null }> = [
+    ...hitsRaw.map((row) => ({ room_id: row.room_id })),
+    ...docHitsRaw.map((row) => ({ room_id: row.room_id })),
+  ]
   const roomLabels = command.scope === 'all_rooms'
-    ? await loadRoomLabelsForHits(supabase, hitsRaw)
+    ? await loadRoomLabelsForHits(supabase, labelTargetRows)
     : new Map<string, string>()
   const hits = hitsRaw.map((row) => ({
     ...row,
@@ -1626,8 +1692,14 @@ async function buildMessageSearchReply(
       ? (roomLabels.get(row.room_id) ?? row.room_id)
       : null,
   }))
+  const docHits = docHitsRaw.map((row) => ({
+    ...row,
+    room_label: command.scope === 'all_rooms'
+      ? (row.room_id ? (roomLabels.get(row.room_id) ?? row.room_id) : '共通資料')
+      : null,
+  }))
 
-  const shouldSummarize = !!groqApiKey && hits.length <= SEARCH_AI_SUMMARY_MAX_HITS
+  const shouldSummarize = !!groqApiKey && hits.length > 0 && hits.length <= SEARCH_AI_SUMMARY_MAX_HITS
   const summary = await summarizeMessageSearchHitsWithGroq(
     shouldSummarize ? hits.slice(0, SEARCH_MAX_SUMMARY_ROWS) : [],
     command.keyword,
@@ -1636,38 +1708,56 @@ async function buildMessageSearchReply(
   )
 
   const scopeLabel = command.scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
+  const periodLabel = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
   const lines: string[] = [
-    '会話検索結果',
+    '会話・資料検索結果',
     `対象: ${scopeLabel}`,
-    `期間: 過去${effectiveDays}日`,
+    `期間: ${periodLabel}`,
     `キーワード: ${command.keyword}`,
-    `一致件数: ${hits.length}件`,
+    `会話一致: ${hits.length}件`,
+    `資料一致: ${docHits.length}件`,
   ]
-  if (effectiveDays !== command.days) {
+  if (adjustedByRetention) {
     lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
   }
   if (rows.length >= SEARCH_MAX_FETCH_ROWS) {
     lines.push(`※検索対象が多いため、新しい順で先頭${SEARCH_MAX_FETCH_ROWS}件を対象にしています。`)
   }
+  if (docRows.length >= SEARCH_MAX_DOCUMENT_ROWS) {
+    lines.push(`※資料件数が多いため、新しい順で先頭${SEARCH_MAX_DOCUMENT_ROWS}件を対象にしています。`)
+  }
+  if (docRows.length > 0) {
+    lines.push('※資料検索は保持期間設定に関係なく、アップロード済み資料全件が対象です。')
+  }
   if (summary) {
     lines.push('')
-    lines.push('要約:')
+    lines.push('会話要約:')
     lines.push(summary)
   } else if (!!groqApiKey && hits.length > SEARCH_AI_SUMMARY_MAX_HITS) {
     lines.push(`※一致件数が多いため、AI要約は省略しています（${SEARCH_AI_SUMMARY_MAX_HITS}件超）。`)
   }
-  lines.push('')
-  lines.push('一致メッセージ（新しい順）:')
-  for (let i = 0; i < hits.length; i += 1) {
+  if (hits.length > 0) {
     lines.push('')
-    lines.push(...formatMessageSearchPreview(hits[i], i + 1, command.scope === 'all_rooms'))
+    lines.push('一致メッセージ（新しい順）:')
+    for (let i = 0; i < hits.length; i += 1) {
+      lines.push('')
+      lines.push(...formatMessageSearchPreview(hits[i], i + 1, command.scope === 'all_rooms'))
+    }
+  }
+  if (docHits.length > 0) {
+    lines.push('')
+    lines.push('一致資料（新しい順）:')
+    for (let i = 0; i < docHits.length; i += 1) {
+      lines.push('')
+      lines.push(...formatDocumentSearchPreview(docHits[i], i + 1, command.keyword, command.scope === 'all_rooms'))
+    }
   }
   return splitTextForLineReply(lines.join('\n'))
 }
 
 async function loadRoomLabelsForHits(
   supabase: ReturnType<typeof createClient>,
-  rows: SearchMessageRow[],
+  rows: Array<{ room_id: string | null }>,
 ): Promise<Map<string, string>> {
   const roomIds = Array.from(new Set(rows.map((row) => String(row.room_id ?? '').trim()).filter((id) => id.length > 0)))
   if (roomIds.length === 0) return new Map<string, string>()
@@ -1690,6 +1780,51 @@ async function loadRoomLabelsForHits(
     map.set(id, name || id)
   }
   return map
+}
+
+function formatDocumentSearchPreview(
+  row: SearchDocumentRow,
+  index: number,
+  keyword: string,
+  includeRoomLabel = false,
+): string[] {
+  const date = formatSearchDateTime(row.created_at)
+  const fileName = normalizeInlineText(row.original_file_name) || '（ファイル名不明）'
+  const mimeType = normalizeInlineText(row.mime_type) || '-'
+  const snippet = buildDocumentSearchSnippet(row.extracted_text, keyword)
+  const wrappedSnippet = wrapTextForLineDisplay(snippet, 24)
+  const lines = [`${index}件目`]
+  if (includeRoomLabel) {
+    const roomLabel = normalizeInlineText(String(row.room_label ?? '')) || '（ルーム不明）'
+    lines.push(`  ルーム: ${roomLabel}`)
+  }
+  lines.push(`  日時: ${date}`)
+  lines.push(`  ファイル: ${fileName}`)
+  lines.push(`  種別: ${mimeType}`)
+  lines.push('  抜粋:')
+  for (const line of wrappedSnippet) {
+    lines.push(`    ${line}`)
+  }
+  return lines
+}
+
+function buildDocumentSearchSnippet(text: string, keyword: string): string {
+  const normalized = normalizeInlineText(String(text ?? '')).replace(/\s+/g, ' ').trim()
+  if (!normalized) return '（本文抽出なし。ファイル名のみ一致）'
+  const lower = normalized.toLowerCase()
+  const key = normalizeInlineText(keyword).toLowerCase()
+  if (!key) {
+    return normalized.length > 180 ? `${normalized.slice(0, 180)}...` : normalized
+  }
+  const idx = lower.indexOf(key)
+  if (idx < 0) {
+    return normalized.length > 180 ? `${normalized.slice(0, 180)}...` : normalized
+  }
+  const start = Math.max(0, idx - 70)
+  const end = Math.min(normalized.length, idx + key.length + 70)
+  const prefix = start > 0 ? '...' : ''
+  const suffix = end < normalized.length ? '...' : ''
+  return `${prefix}${normalized.slice(start, end)}${suffix}`
 }
 
 function formatMessageSearchPreview(
@@ -1780,7 +1915,7 @@ async function summarizeMessageSearchHitsWithGroq(
             role: 'user',
             content: [
               `検索キーワード: ${keyword}`,
-              `検索範囲: 過去${days}日`,
+              `検索範囲: ${days > 0 ? `過去${days}日` : '全期間'}`,
               '以下を要約してください:',
               transcript,
             ].join('\n\n'),

@@ -432,6 +432,36 @@
         <button id="nextBtn" class="button">次へ</button>
       </div>
     </section>
+
+    <section class="card">
+      <h2>資料ライブラリ（TXT / PDF）</h2>
+      <div class="controls">
+        <select id="documentUploadRoomSelect" class="select" aria-label="資料の紐付けルーム" style="min-width:240px">
+          <option value="">共通資料（ルーム未指定）</option>
+        </select>
+        <input id="documentFileInput" class="input" type="file" accept=".txt,.pdf,text/plain,application/pdf">
+        <button id="uploadDocumentBtn" class="button primary">資料をアップロード</button>
+      </div>
+      <div class="meta">TXTは全文を検索対象化します。PDFはブラウザ抽出できた範囲を検索対象化します。</div>
+      <div class="controls" style="margin-top:10px;">
+        <select id="documentRoomFilter" class="select" aria-label="資料ルームで絞り込み" style="min-width:240px">
+          <option value="">全ルーム</option>
+        </select>
+        <select id="documentLimitSelect" class="select" aria-label="資料の表示件数">
+          <option value="12" selected>12件</option>
+          <option value="24">24件</option>
+          <option value="48">48件</option>
+        </select>
+        <button id="applyDocumentFilterBtn" class="button primary">表示</button>
+        <button id="reloadDocumentsBtn" class="button">再読み込み</button>
+      </div>
+      <div id="documentSummary" class="meta">未取得</div>
+      <div id="documentList" class="list"></div>
+      <div class="pager">
+        <button id="documentPrevBtn" class="button">前へ</button>
+        <button id="documentNextBtn" class="button">次へ</button>
+      </div>
+    </section>
   </div>
 
   <script>
@@ -443,6 +473,10 @@
       limit: 24,
       total: 0,
       hasMore: false,
+      docsOffset: 0,
+      docsLimit: 12,
+      docsTotal: 0,
+      docsHasMore: false,
     };
 
     const dom = {
@@ -468,8 +502,22 @@
       mediaList: document.getElementById('mediaList'),
       prevBtn: document.getElementById('prevBtn'),
       nextBtn: document.getElementById('nextBtn'),
+      documentUploadRoomSelect: document.getElementById('documentUploadRoomSelect'),
+      documentFileInput: document.getElementById('documentFileInput'),
+      uploadDocumentBtn: document.getElementById('uploadDocumentBtn'),
+      documentRoomFilter: document.getElementById('documentRoomFilter'),
+      documentLimitSelect: document.getElementById('documentLimitSelect'),
+      applyDocumentFilterBtn: document.getElementById('applyDocumentFilterBtn'),
+      reloadDocumentsBtn: document.getElementById('reloadDocumentsBtn'),
+      documentSummary: document.getElementById('documentSummary'),
+      documentList: document.getElementById('documentList'),
+      documentPrevBtn: document.getElementById('documentPrevBtn'),
+      documentNextBtn: document.getElementById('documentNextBtn'),
     };
     const MEDIA_CAP_DEFAULT_BYTES = 500 * 1024 * 1024;
+    const PDFJS_CDN_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.mjs';
+    const PDFJS_WORKER_CDN_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs';
+    let pdfjsLibPromise = null;
 
     function getToken() {
       return localStorage.getItem(STORE_TOKEN_KEY) || '';
@@ -549,13 +597,15 @@
       if (!token) throw new Error('先に管理トークンを保存してください。');
       const req = options || {};
       const url = FIXED_PROJECT_URL.replace(/\/+$/, '') + '/functions/v1/admin-api' + path;
+      const isFormDataBody = req.body instanceof FormData;
+      const headers = {
+        'x-admin-token': token,
+        ...(isFormDataBody ? {} : { 'Content-Type': 'application/json' }),
+        ...(req.headers || {}),
+      };
       const res = await fetch(url, {
         method: req.method || 'GET',
-        headers: {
-          'x-admin-token': token,
-          'Content-Type': 'application/json',
-          ...(req.headers || {}),
-        },
+        headers: headers,
         body: req.body,
         cache: 'no-store',
       });
@@ -585,29 +635,40 @@
     }
 
     function setRoomFilterOptions(options) {
-      const prevValue = String(dom.roomFilter.value || '');
-      dom.roomFilter.innerHTML = '';
+      const prevMediaValue = String(dom.roomFilter.value || '');
+      const prevDocFilterValue = String(dom.documentRoomFilter.value || '');
+      const prevDocUploadValue = String(dom.documentUploadRoomSelect.value || '');
 
-      const allOption = document.createElement('option');
-      allOption.value = '';
-      allOption.textContent = '全ルーム';
-      dom.roomFilter.appendChild(allOption);
-
-      for (const option of options) {
-        const roomId = String(option && option.room_id || '').trim();
-        const roomLabel = String(option && option.label || '').trim();
-        if (!roomId || !roomLabel) continue;
-        const el = document.createElement('option');
-        el.value = roomId;
-        el.textContent = roomLabel;
-        dom.roomFilter.appendChild(el);
+      function refillSelect(selectEl, emptyLabel) {
+        selectEl.innerHTML = '';
+        const allOption = document.createElement('option');
+        allOption.value = '';
+        allOption.textContent = emptyLabel;
+        selectEl.appendChild(allOption);
+        for (const option of options) {
+          const roomId = String(option && option.room_id || '').trim();
+          const roomLabel = String(option && option.label || '').trim();
+          if (!roomId || !roomLabel) continue;
+          const el = document.createElement('option');
+          el.value = roomId;
+          el.textContent = roomLabel;
+          selectEl.appendChild(el);
+        }
       }
 
-      if (prevValue && Array.from(dom.roomFilter.options).some(function(opt) { return opt.value === prevValue; })) {
-        dom.roomFilter.value = prevValue;
-      } else {
-        dom.roomFilter.value = '';
-      }
+      refillSelect(dom.roomFilter, '全ルーム');
+      refillSelect(dom.documentRoomFilter, '全ルーム');
+      refillSelect(dom.documentUploadRoomSelect, '共通資料（ルーム未指定）');
+
+      dom.roomFilter.value = Array.from(dom.roomFilter.options).some(function(opt) { return opt.value === prevMediaValue; })
+        ? prevMediaValue
+        : '';
+      dom.documentRoomFilter.value = Array.from(dom.documentRoomFilter.options).some(function(opt) { return opt.value === prevDocFilterValue; })
+        ? prevDocFilterValue
+        : '';
+      dom.documentUploadRoomSelect.value = Array.from(dom.documentUploadRoomSelect.options).some(function(opt) { return opt.value === prevDocUploadValue; })
+        ? prevDocUploadValue
+        : '';
     }
 
     function collectRoomFilterOptions(stateBody) {
@@ -727,6 +788,11 @@
       dom.nextBtn.disabled = !state.hasMore;
     }
 
+    function updateDocumentPager() {
+      dom.documentPrevBtn.disabled = state.docsOffset <= 0;
+      dom.documentNextBtn.disabled = !state.docsHasMore;
+    }
+
     function renderUsageBar(totalBytes, capBytes) {
       const cap = Number.isFinite(Number(capBytes)) && Number(capBytes) > 0
         ? Number(capBytes)
@@ -789,6 +855,178 @@
       await loadMedia();
     }
 
+    function buildDocumentQuery() {
+      const params = new URLSearchParams();
+      params.set('limit', String(state.docsLimit));
+      params.set('offset', String(state.docsOffset));
+      const roomId = String(dom.documentRoomFilter.value || '').trim();
+      if (roomId) params.set('room_id', roomId);
+      params.set('_ts', String(Date.now()));
+      return '/documents?' + params.toString();
+    }
+
+    function renderDocumentItem(item) {
+      const fileName = String(item && item.original_file_name || '(名称なし)');
+      const roomName = String(item && item.room_name || '共通資料');
+      const mimeType = String(item && item.mime_type || '-');
+      const snippet = String(item && item.snippet || '').trim();
+      const excerpt = snippet ? snippet : '本文抽出なし（ファイル名一致または未抽出）';
+      const downloadUrl = String(item && item.signed_url || '');
+      const downloadName = safeDownloadName(fileName === '(名称なし)' ? '' : fileName, 'line-document');
+      const extractedCharCount = Number(item && item.extracted_char_count || 0);
+      const hasExtractedText = !!(item && item.has_extracted_text);
+      const downloadAction = downloadUrl
+        ? '<a class="button" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a>'
+        : '';
+      return [
+        '<article class="item">',
+        '<div class="preview"><div class="empty">資料</div></div>',
+        '<div class="item-body">',
+        '<span class="tag">' + escapeHtml(mimeType) + '</span>',
+        '<div class="item-line" title="' + escapeHtml(fileName) + '">' + escapeHtml(fileName) + '</div>',
+        '<div class="item-line sub">ルーム: ' + escapeHtml(roomName) + '</div>',
+        '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item && item.created_at)) + '</div>',
+        '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item && item.file_size_bytes)) + '</div>',
+        '<div class="item-line sub">抽出: ' + escapeHtml(hasExtractedText ? (extractedCharCount + '文字') : 'なし') + '</div>',
+        '<div class="item-line sub" title="' + escapeHtml(excerpt) + '">抜粋: ' + escapeHtml(excerpt) + '</div>',
+        '<div class="item-actions">' + downloadAction + '<button class="button danger document-delete-btn" type="button" data-document-id="' + escapeHtml(String(item && item.id || '')) + '">削除</button></div>',
+        '</div>',
+        '</article>',
+      ].join('');
+    }
+
+    async function loadDocuments() {
+      const result = await api(buildDocumentQuery());
+      const items = Array.isArray(result.items) ? result.items : [];
+      state.docsTotal = Number(result.total || 0);
+      state.docsHasMore = !!result.has_more;
+
+      if (items.length === 0) {
+        dom.documentList.innerHTML = '<div class="item"><div class="preview"><div class="empty">該当データなし</div></div></div>';
+      } else {
+        dom.documentList.innerHTML = items.map(renderDocumentItem).join('');
+      }
+
+      const from = state.docsTotal === 0 ? 0 : state.docsOffset + 1;
+      const to = Math.min(state.docsOffset + items.length, state.docsTotal);
+      const filteredTotalBytes = Number(result.total_file_bytes || 0);
+      const filteredTotalCount = Number(result.total_file_count || state.docsTotal || 0);
+      const allTotalBytes = Number(result.all_file_bytes || filteredTotalBytes || 0);
+      const allTotalCount = Number(result.all_file_count || filteredTotalCount || 0);
+      const hasFilter = String(dom.documentRoomFilter.value || '').trim();
+      dom.documentSummary.textContent =
+        '表示: ' + from + '-' + to + ' / 全' + state.docsTotal + '件'
+        + ' | この条件の合計: ' + formatBytes(filteredTotalBytes) + '（' + filteredTotalCount + '件）'
+        + (hasFilter ? (' | 全体合計: ' + formatBytes(allTotalBytes) + '（' + allTotalCount + '件）') : '');
+      updateDocumentPager();
+    }
+
+    async function loadFirstDocumentPage() {
+      state.docsOffset = 0;
+      state.docsLimit = Number(dom.documentLimitSelect.value || 12);
+      await loadDocuments();
+    }
+
+    async function deleteDocumentItem(documentId) {
+      const id = Number(documentId);
+      if (!Number.isInteger(id) || id <= 0) throw new Error('削除対象の資料IDが不正です。');
+      const ok = window.confirm('この資料を削除します。よろしいですか？');
+      if (!ok) return;
+      await api('/documents/' + encodeURIComponent(String(id)), { method: 'DELETE' });
+      await loadDocuments();
+      if (state.docsTotal > 0 && state.docsOffset >= state.docsTotal && state.docsOffset > 0) {
+        state.docsOffset = Math.max(0, state.docsOffset - state.docsLimit);
+        await loadDocuments();
+      }
+    }
+
+    async function ensurePdfjsLib() {
+      if (pdfjsLibPromise) return pdfjsLibPromise;
+      pdfjsLibPromise = import(PDFJS_CDN_URL)
+        .then(function(module) {
+          const lib = module && module.default ? module.default : module;
+          if (lib && lib.GlobalWorkerOptions) {
+            lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN_URL;
+          }
+          return lib;
+        })
+        .catch(function(error) {
+          console.warn('pdf.js の読み込みに失敗しました:', error);
+          return null;
+        });
+      return pdfjsLibPromise;
+    }
+
+    async function extractPdfTextInBrowser(file) {
+      const lib = await ensurePdfjsLib();
+      if (!lib || typeof lib.getDocument !== 'function') return '';
+      try {
+        const buffer = await file.arrayBuffer();
+        const loadingTask = lib.getDocument({ data: new Uint8Array(buffer) });
+        const pdf = await loadingTask.promise;
+        const chunks = [];
+        for (let pageNo = 1; pageNo <= pdf.numPages; pageNo += 1) {
+          const page = await pdf.getPage(pageNo);
+          const textContent = await page.getTextContent();
+          const pageText = (Array.isArray(textContent.items) ? textContent.items : [])
+            .map(function(item) { return String(item && item.str || '').trim(); })
+            .filter(function(value) { return !!value; })
+            .join(' ');
+          if (pageText) chunks.push(pageText);
+        }
+        if (loadingTask && typeof loadingTask.destroy === 'function') {
+          loadingTask.destroy();
+        }
+        return chunks.join('\n').trim();
+      } catch (error) {
+        console.warn('PDFテキスト抽出に失敗しました:', error);
+        return '';
+      }
+    }
+
+    async function extractDocumentText(file) {
+      const name = String(file && file.name || '').toLowerCase();
+      const mime = String(file && file.type || '').toLowerCase();
+      if (mime.includes('text/plain') || name.endsWith('.txt') || name.endsWith('.log') || name.endsWith('.md') || name.endsWith('.csv')) {
+        try {
+          return String(await file.text() || '');
+        } catch (_) {
+          return '';
+        }
+      }
+      if (mime.includes('pdf') || name.endsWith('.pdf')) {
+        return await extractPdfTextInBrowser(file);
+      }
+      return '';
+    }
+
+    async function uploadDocument() {
+      const files = dom.documentFileInput.files;
+      if (!files || files.length === 0) {
+        throw new Error('アップロードするファイルを選択してください。');
+      }
+      const file = files[0];
+      const roomId = String(dom.documentUploadRoomSelect.value || '').trim();
+      const formData = new FormData();
+      formData.append('file', file);
+      if (roomId) {
+        formData.append('room_id', roomId);
+      }
+
+      const extractedText = await extractDocumentText(file);
+      if (extractedText) {
+        formData.append('extracted_text', extractedText);
+      }
+
+      await api('/documents', {
+        method: 'POST',
+        body: formData,
+      });
+      dom.documentFileInput.value = '';
+      await loadFirstDocumentPage();
+      alert('資料をアップロードしました。');
+    }
+
     async function deleteMediaItem(mediaId) {
       const id = Number(mediaId);
       if (!Number.isInteger(id) || id <= 0) throw new Error('削除対象のIDが不正です。');
@@ -821,6 +1059,7 @@
       try {
         await loadRoomFilterOptions();
         await loadFirstPage();
+        await loadFirstDocumentPage();
       } catch (error) {
         alert(error.message || String(error));
       }
@@ -828,13 +1067,22 @@
 
     dom.clearTokenBtn.addEventListener('click', function() {
       setToken('');
+      state.offset = 0;
+      state.hasMore = false;
+      state.total = 0;
+      state.docsOffset = 0;
+      state.docsHasMore = false;
+      state.docsTotal = 0;
       dom.mediaList.innerHTML = '';
+      dom.documentList.innerHTML = '';
       dom.summary.textContent = '未取得';
+      dom.documentSummary.textContent = '未取得';
       dom.mediaUploadLimitMeta.textContent = '';
       setRoomFilterOptions([]);
       renderUsageBar(0, MEDIA_CAP_DEFAULT_BYTES);
       dom.lastRefresh.textContent = '最終更新: なし';
       updatePager();
+      updateDocumentPager();
     });
 
     dom.applyFilterBtn.addEventListener('click', async function() {
@@ -881,6 +1129,50 @@
       }
     });
 
+    dom.uploadDocumentBtn.addEventListener('click', async function() {
+      try {
+        await uploadDocument();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.applyDocumentFilterBtn.addEventListener('click', async function() {
+      try {
+        await loadFirstDocumentPage();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.reloadDocumentsBtn.addEventListener('click', async function() {
+      try {
+        await loadDocuments();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.documentPrevBtn.addEventListener('click', async function() {
+      if (state.docsOffset <= 0) return;
+      state.docsOffset = Math.max(0, state.docsOffset - state.docsLimit);
+      try {
+        await loadDocuments();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.documentNextBtn.addEventListener('click', async function() {
+      if (!state.docsHasMore) return;
+      state.docsOffset += state.docsLimit;
+      try {
+        await loadDocuments();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
     dom.mediaList.addEventListener('click', async function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
@@ -893,16 +1185,29 @@
       }
     });
 
+    dom.documentList.addEventListener('click', async function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.classList.contains('document-delete-btn')) return;
+      const documentId = target.getAttribute('data-document-id') || '';
+      try {
+        await deleteDocumentItem(documentId);
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
     (function init() {
       dom.projectUrlInput.value = FIXED_PROJECT_URL;
       updateAuthState();
       updatePager();
+      updateDocumentPager();
       setRoomFilterOptions([]);
       dom.mediaUploadMaxMbInput.value = '10';
       dom.mediaUploadLimitMeta.textContent = '現在: 10MB未満';
       renderUsageBar(0, MEDIA_CAP_DEFAULT_BYTES);
       if (getToken()) {
-        Promise.all([loadRoomFilterOptions(), loadFirstPage()]).catch(function(error) {
+        Promise.all([loadRoomFilterOptions(), loadFirstPage(), loadFirstDocumentPage()]).catch(function(error) {
           alert(error.message || String(error));
         });
       }
