@@ -215,6 +215,7 @@ Deno.serve(async (req) => {
           is_enabled: payload.is_enabled,
           send_room_summary: payload.send_room_summary,
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
+          calendar_ai_auto_create_enabled: payload.calendar_ai_auto_create_enabled,
           message_search_enabled: payload.message_search_enabled,
           gmail_reservation_alert_enabled: payload.gmail_reservation_alert_enabled,
           delivery_hours: payload.delivery_hours,
@@ -222,7 +223,7 @@ Deno.serve(async (req) => {
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -437,7 +438,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -1364,6 +1365,7 @@ function buildRoomSettingsPayload(body: unknown): {
   is_enabled: boolean
   send_room_summary: boolean
   calendar_tomorrow_reminder_enabled: boolean
+  calendar_ai_auto_create_enabled: boolean
   message_search_enabled: boolean
   gmail_reservation_alert_enabled: boolean
   delivery_hours: number[] | null
@@ -1394,6 +1396,12 @@ function buildRoomSettingsPayload(body: unknown): {
     throw { status: 400, message: "calendar_tomorrow_reminder_enabled must be boolean when provided." } satisfies AppError
   }
   const roomTomorrowReminderEnabled = roomTomorrowReminderEnabledRaw === true
+
+  const roomAiAutoCreateEnabledRaw = body.calendar_ai_auto_create_enabled
+  if (roomAiAutoCreateEnabledRaw != null && typeof roomAiAutoCreateEnabledRaw !== "boolean") {
+    throw { status: 400, message: "calendar_ai_auto_create_enabled must be boolean when provided." } satisfies AppError
+  }
+  const roomAiAutoCreateEnabled = roomAiAutoCreateEnabledRaw !== false
 
   const messageSearchEnabledRaw = body.message_search_enabled
   if (messageSearchEnabledRaw != null && typeof messageSearchEnabledRaw !== "boolean") {
@@ -1428,6 +1436,7 @@ function buildRoomSettingsPayload(body: unknown): {
     is_enabled: isEnabled,
     send_room_summary: sendRoomSummary,
     calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,
+    calendar_ai_auto_create_enabled: roomAiAutoCreateEnabled,
     message_search_enabled: messageSearchEnabled,
     gmail_reservation_alert_enabled: gmailReservationAlertEnabled,
     delivery_hours: deliveryHours,

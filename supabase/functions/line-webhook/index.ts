@@ -20,6 +20,7 @@ type CalendarCommand =
       time: string
       durationMin: number
       title: string
+      location?: string
     }
   | {
       kind: 'list'
@@ -53,6 +54,7 @@ type AiCalendarIntent = {
   shouldCreate: boolean
   confidence: number
   title: string
+  location?: string
   date: string
   time: string
   durationMin: number
@@ -63,7 +65,9 @@ type PendingCalendarConfirmation = {
   storage: 'pending_table' | 'line_messages'
   id: string
   conversation_key: string
+  source_text?: string | null
   title: string
+  location?: string | null
   date: string
   time: string
   duration_min: number
@@ -143,6 +147,7 @@ type AiPrimaryIntentResult = {
 type RoomReplyPolicy = {
   isEnabled: boolean
   messageSearchEnabled: boolean
+  calendarAiAutoCreateEnabled: boolean
 }
 
 type SearchMessageRow = {
@@ -183,6 +188,45 @@ const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
 const MAX_MEDIA_UPLOAD_MAX_MB = 20
 const CALENDAR_CREATE_TIMEZONE = 'Asia/Tokyo'
 const STORABLE_LINE_MEDIA_TYPES = new Set<StorableLineMediaType>(['image', 'video', 'audio', 'file'])
+const CALENDAR_EVENT_TITLE_KEYWORDS = [
+  '試飲会',
+  '打ち合わせ',
+  '打合せ',
+  '会議',
+  'ミーティング',
+  'meeting',
+  'mtg',
+  '商談',
+  '面談',
+  'イベント',
+  '予約',
+  'アポ',
+  'グランドオープン',
+  'オープン',
+  'ランチ',
+  'ディナー',
+] as const
+const CALENDAR_LOCATION_HINT_KEYWORDS = [
+  'marugo',
+  'マルゴ',
+  'クラウディア',
+  '四谷',
+  '新宿',
+  '新橋',
+  '丸の内',
+  'オット',
+  'こるり',
+  'サヴァ',
+  'セカンド',
+  'ペロタ',
+  '東京ドーム',
+  'オンライン',
+  'google meet',
+  'zoom',
+  'teams',
+  '会議室',
+  'ホール',
+] as const
 const KEYWORD_SYNONYM_GROUPS = [
   ['ミーティング', 'meeting', 'mtg', '会議', '打ち合わせ', '打合せ', '商談'],
   ['試飲会', '試飲', 'テイスティング', 'tasting'],
@@ -335,6 +379,18 @@ Deno.serve(async (req) => {
             }
           }
 
+          // Fallback: capture explicit single-event announcements even when primary intent misses.
+          if (
+            !forceAiCalendarCreate &&
+            !forceAiCalendarList &&
+            !forceAiMessageSearch &&
+            calendarEnvState.ok &&
+            !!groqApiKey &&
+            looksLikeSingleEventAnnouncement(text)
+          ) {
+            forceAiCalendarCreate = true
+          }
+
           const messageSearchParse = parseMessageSearchCommand(text, messageRetentionDays)
           let messageSearchCommand: MessageSearchCommand | null = null
           let messageSearchError: string | null = null
@@ -441,36 +497,73 @@ Deno.serve(async (req) => {
             }
           }
 
-          if (aiAutoCreateEnabled && calendarEnvState.ok && !!groqApiKey && forceAiCalendarCreate) {
+          if (calendarEnvState.ok && !!groqApiKey && forceAiCalendarCreate) {
               const aiIntent = await extractCalendarIntentWithGroq(
                 text,
                 calendarEnvState.env.timezone,
                 groqApiKey,
               )
-              if (aiIntent && isHighConfidenceAiCalendarIntent(aiIntent)) {
+              const resolvedDetails = aiIntent
+                ? resolveAiCalendarDetails(text, aiIntent.title, aiIntent.location)
+                : null
+              const isLikelyMultiEvent = looksLikeMultiEventAnnouncement(text)
+              const normalizedAiIntent = aiIntent
+                ? {
+                    ...aiIntent,
+                    title: resolvedDetails?.title ?? aiIntent.title,
+                    location: resolvedDetails?.location,
+                  }
+                : null
+
+              const canAutoCreate =
+                aiAutoCreateEnabled &&
+                roomReplyPolicy.calendarAiAutoCreateEnabled &&
+                normalizedAiIntent &&
+                isHighConfidenceAiCalendarIntent(normalizedAiIntent) &&
+                resolvedDetails?.titleSource !== 'default' &&
+                !isLikelyMultiEvent
+
+              if (canAutoCreate && normalizedAiIntent) {
                 const reply = await createCalendarEventReply(
                   {
                     kind: 'create',
-                    date: aiIntent.date,
-                    time: aiIntent.time,
-                    durationMin: aiIntent.durationMin,
-                    title: aiIntent.title,
+                    date: normalizedAiIntent.date,
+                    time: normalizedAiIntent.time,
+                    durationMin: normalizedAiIntent.durationMin,
+                    title: normalizedAiIntent.title,
+                    ...(normalizedAiIntent.location ? { location: normalizedAiIntent.location } : {}),
                   },
                   calendarEnvState.env,
                   roomId,
                   userId,
                 )
-                aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(aiIntent.confidence * 100)}%）。\n${reply}`
-              } else if (aiIntent && isConfirmableAiCalendarIntent(aiIntent)) {
+                aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${reply}`
+              } else if (normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent)) {
                 const pendingSaved = await savePendingCalendarConfirmation(
                   supabase,
                   roomId,
                   userId,
                   text,
-                  aiIntent,
+                  normalizedAiIntent,
                 )
                 if (pendingSaved) {
-                  aiAutoCreateReply = buildPendingCalendarConfirmationPrompt(aiIntent, calendarEnvState.env.timezone)
+                  const basePrompt = buildPendingCalendarConfirmationPrompt(normalizedAiIntent, calendarEnvState.env.timezone)
+                  const notices: string[] = []
+                  if (!aiAutoCreateEnabled) {
+                    notices.push('自動登録はOFFなので、確認後に登録します。')
+                  }
+                  if (!roomReplyPolicy.calendarAiAutoCreateEnabled) {
+                    notices.push('このルームの自動登録はOFFなので、確認後に登録します。')
+                  }
+                  if (isLikelyMultiEvent) {
+                    notices.push('本文に複数の予定候補があるため、自動登録せず確認後に登録します。')
+                  }
+                  if (resolvedDetails?.titleSource === 'default') {
+                    notices.push('件名を本文から確定できなかったため、確認後に登録します。')
+                  }
+                  aiAutoCreateReply = notices.length > 0
+                    ? `${notices.join('\n')}\n${basePrompt}`
+                    : basePrompt
                 } else {
                   aiAutoCreateReply = '予定候補を解釈しましたが、確認待ちの保存に失敗しました。もう一度送ってください。'
                 }
@@ -1075,22 +1168,22 @@ async function loadRoomReplyPolicy(
 ): Promise<RoomReplyPolicy> {
   const normalizedRoomId = String(roomId ?? '').trim()
   if (!normalizedRoomId || normalizedRoomId === 'unknown') {
-    return { isEnabled: true, messageSearchEnabled: true }
+    return { isEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
   }
   if (cache.has(normalizedRoomId)) {
-    return cache.get(normalizedRoomId) ?? { isEnabled: true, messageSearchEnabled: true }
+    return cache.get(normalizedRoomId) ?? { isEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
   }
 
   try {
     const { data, error } = await supabase
       .from('room_summary_settings')
-      .select('is_enabled, message_search_enabled')
+      .select('is_enabled, message_search_enabled, calendar_ai_auto_create_enabled')
       .eq('room_id', normalizedRoomId)
       .maybeSingle()
 
     if (error) {
       console.error(`Failed to load room reply policy for ${normalizedRoomId}:`, error.message)
-      const fallback = { isEnabled: true, messageSearchEnabled: true }
+      const fallback = { isEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
       cache.set(normalizedRoomId, fallback)
       return fallback
     }
@@ -1098,12 +1191,13 @@ async function loadRoomReplyPolicy(
     const policy: RoomReplyPolicy = {
       isEnabled: data?.is_enabled !== false,
       messageSearchEnabled: data?.message_search_enabled !== false,
+      calendarAiAutoCreateEnabled: data?.calendar_ai_auto_create_enabled !== false,
     }
     cache.set(normalizedRoomId, policy)
     return policy
   } catch (err) {
     console.error(`Unexpected error while loading room reply policy for ${normalizedRoomId}:`, err)
-    const fallback = { isEnabled: true, messageSearchEnabled: true }
+    const fallback = { isEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
     cache.set(normalizedRoomId, fallback)
     return fallback
   }
@@ -1652,6 +1746,52 @@ function looksLikeCalendarCandidate(text: string): boolean {
   return (hasDateHint && hasTimeHint) || (hasIntentWord && (hasDateHint || hasTimeHint))
 }
 
+function looksLikeSingleEventAnnouncement(text: string): boolean {
+  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
+  if (!compact) return false
+  if (looksLikeExplicitCalendarQuestion(compact)) return false
+  if (looksLikeMessageSearchQuestion(text)) return false
+  if (parseCalendarCommand(text).matched) return false
+
+  const hasDateHint = /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}[\/.\-]\d{1,2}|(?:\d{1,2}月)?\d{1,2}日|今日|明日|明後日|来週|今週|来月|今月)/.test(compact)
+  const hasTimeHint = /(\d{1,2}:\d{2}|\d{1,2}時(?:\d{1,2}分)?)/.test(compact)
+  const hasEventWord = /(試飲会|会議|打ち合わせ|打合せ|ミーティング|meeting|mtg|イベント|オープン|グランドオープン|講習会|セミナー|説明会|研修)/i.test(compact)
+  const hasListIntent = /(予定確認|予定一覧|予定報告|いつ|何件|教えて|確認したい|ありますか|ある？)/.test(compact)
+  if (hasListIntent) return false
+
+  return hasDateHint && hasTimeHint && hasEventWord
+}
+
+function looksLikeMultiEventAnnouncement(text: string): boolean {
+  const normalized = normalizeForRuleParsing(text)
+  if (!normalized) return false
+  const compact = normalized.replace(/\s+/g, '')
+  if (!compact) return false
+  if (looksLikeExplicitCalendarQuestion(compact)) return false
+  if (looksLikeMessageSearchQuestion(text)) return false
+
+  const hasEventWord = /(試飲会|会議|打ち合わせ|打合せ|ミーティング|meeting|mtg|イベント|オープン|グランドオープン|講習会|セミナー|説明会|研修)/i.test(compact)
+  const hasTimeHint = /(\d{1,2}:\d{2}|\d{1,2}時(?:\d{1,2}分)?)/.test(compact)
+  if (!hasEventWord || !hasTimeHint) return false
+
+  const datePattern = /(\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?|\d{1,2}月\d{1,2}日|\d{1,2}[\/.\-]\d{1,2}(?:日)?)/g
+  const uniqueDates = new Set<string>()
+  let match: RegExpExecArray | null
+  while ((match = datePattern.exec(normalized)) !== null) {
+    const token = String(match[1] ?? '').trim()
+    if (!token) continue
+    uniqueDates.add(token)
+    if (uniqueDates.size >= 2) return true
+  }
+
+  const lineCount = normalized
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0).length
+  const looksLikeList = /(お知らせ|一覧|下記|次の通り|以下)/.test(compact)
+  return looksLikeList && lineCount >= 5 && uniqueDates.size >= 1
+}
+
 function looksLikeCalendarListQuestion(text: string): boolean {
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   if (!compact) return false
@@ -1812,11 +1952,18 @@ async function extractCalendarIntentWithGroq(
               'あなたは予定抽出専用のJSON抽出器です。',
               'ユーザー文から「カレンダーに予定登録すべき明確な意図」がある場合のみ should_create=true にしてください。',
               '日時が曖昧・未指定なら should_create=false。',
+              'title は予定の中身だけ（短い名詞句）にしてください。日時・場所・案内文（例: ぜひ来てください）は含めないでください。',
+              '場所が読み取れる場合は location に入れてください（例: 「marugoで試飲会」→ title=試飲会, location=marugo）。',
+              '複数行の案内文でも同様に分離してください（例: 「試飲会お知らせ / 7/15 / クラウディア2 / 2階 / 15:00-17:00」→ title=試飲会, location=クラウディア2 2階）。',
+              'ラベル付きでも同様に分離してください（例: 「【日時】6/19 15時〜17時 / 【場所】マルゴ四谷 / 従業員向け試飲会」→ title=試飲会, location=マルゴ四谷）。',
+              '「次回会議は6月12日、14:30～15:30にオンライン会議」のような文は title=会議, location=オンライン にしてください。',
+              '提出期限など別目的の日付が混在していても、予定本体（会議/試飲会など）の日時を優先して抽出してください。',
+              '「〜のご案内」「よろしくお願いします」「皆様ぜひ〜」等の周知文は title に含めないでください。',
               `現在時刻は ${nowText} (${timezone})。相対表現（今日/明日/来週）を絶対日付に変換してください。`,
               '「18日の18時」のように月が未指定で日付だけある場合は、現在月（現在年）として解釈してください。',
               'JSONのみ返してください。説明文やコードブロックは不要です。',
               '返却JSONスキーマ:',
-              '{"should_create":boolean,"confidence":number(0-1),"title":string,"date":"YYYY-MM-DD","time":"HH:mm","duration_min":number,"reason":string}',
+              '{"should_create":boolean,"confidence":number(0-1),"title":string,"location":"string|optional","date":"YYYY-MM-DD","time":"HH:mm","duration_min":number,"reason":string}',
               'duration_min が不明なら 60 としてください。',
             ].join('\n'),
           },
@@ -1845,13 +1992,24 @@ async function extractCalendarIntentWithGroq(
       ? Math.max(0, Math.min(1, confidenceNum))
       : 0
     const title = String(raw.title ?? '').trim()
+    const locationRaw = String(raw.location ?? raw.place ?? raw.venue ?? '').trim()
     const date = String(raw.date ?? '').trim()
     const time = String(raw.time ?? '').trim()
     const durationRaw = Number(raw.duration_min ?? raw.durationMin ?? DEFAULT_DURATION_MIN)
     const durationMin = Number.isFinite(durationRaw) ? Math.round(durationRaw) : DEFAULT_DURATION_MIN
     const reason = String(raw.reason ?? '').trim()
+    const location = locationRaw || undefined
 
-    return { shouldCreate, confidence, title, date, time, durationMin, reason }
+    return {
+      shouldCreate,
+      confidence,
+      title,
+      ...(location ? { location } : {}),
+      date,
+      time,
+      durationMin,
+      reason,
+    }
   } catch (err) {
     console.error('Failed to extract calendar intent with Groq:', err)
     return null
@@ -1928,7 +2086,9 @@ function isMissingPendingTableError(error: any): boolean {
 
 function encodeLegacyPendingContent(payload: {
   conversationKey: string
+  sourceText?: string | null
   title: string
+  location?: string | null
   date: string
   time: string
   durationMin: number
@@ -1941,7 +2101,9 @@ function encodeLegacyPendingContent(payload: {
 
 function decodeLegacyPendingContent(content: string): null | {
   conversationKey: string
+  sourceText?: string | null
   title: string
+  location?: string | null
   date: string
   time: string
   durationMin: number
@@ -1955,7 +2117,9 @@ function decodeLegacyPendingContent(content: string): null | {
   if (!parsed || typeof parsed !== 'object') return null
   const raw = parsed as Record<string, unknown>
   const conversationKey = String(raw.conversationKey ?? '').trim()
+  const sourceTextRaw = String(raw.sourceText ?? raw.source_text ?? '').trim()
   const title = String(raw.title ?? '').trim()
+  const locationRaw = String(raw.location ?? '').trim()
   const date = String(raw.date ?? '').trim()
   const time = String(raw.time ?? '').trim()
   const durationRaw = Number(raw.durationMin ?? raw.duration_min ?? DEFAULT_DURATION_MIN)
@@ -1972,7 +2136,9 @@ function decodeLegacyPendingContent(content: string): null | {
 
   return {
     conversationKey,
+    sourceText: sourceTextRaw || null,
     title,
+    location: locationRaw || null,
     date,
     time,
     durationMin,
@@ -1990,7 +2156,7 @@ async function fetchPendingCalendarConfirmation(
   const conversationKey = buildConversationKey(roomId, userId)
   const { data, error } = await supabase
     .from(CALENDAR_PENDING_TABLE)
-    .select('id, conversation_key, title, date, time, duration_min, confidence, reason, expires_at')
+    .select('id, conversation_key, source_text, title, date, time, duration_min, confidence, reason, expires_at')
     .eq('conversation_key', conversationKey)
     .eq('status', 'pending')
     .order('created_at', { ascending: false })
@@ -2027,7 +2193,9 @@ async function fetchPendingCalendarConfirmation(
         storage: 'line_messages',
         id: String(row?.id ?? ''),
         conversation_key: decoded.conversationKey,
+        source_text: decoded.sourceText ?? null,
         title: decoded.title,
+        location: decoded.location ?? null,
         date: decoded.date,
         time: decoded.time,
         duration_min: decoded.durationMin,
@@ -2043,7 +2211,9 @@ async function fetchPendingCalendarConfirmation(
     storage: 'pending_table',
     id: String(data.id),
     conversation_key: String(data.conversation_key),
+    source_text: data.source_text ? String(data.source_text) : null,
     title: String(data.title),
+    location: null,
     date: String(data.date),
     time: String(data.time),
     duration_min: Number(data.duration_min),
@@ -2075,7 +2245,9 @@ async function resolvePendingCalendarConfirmation(
 
   const legacyPayload = {
     conversationKey: pending.conversation_key,
+    sourceText: pending.source_text ?? null,
     title: pending.title,
+    location: pending.location ?? null,
     date: pending.date,
     time: pending.time,
     durationMin: pending.duration_min,
@@ -2141,7 +2313,9 @@ async function savePendingCalendarConfirmation(
     }
     const payloadContent = encodeLegacyPendingContent({
       conversationKey,
+      sourceText,
       title: cleanCalendarTitle(intent.title),
+      location: intent.location ?? null,
       date: intent.date,
       time: intent.time,
       durationMin: intent.durationMin,
@@ -2182,6 +2356,9 @@ function buildPendingCalendarConfirmationPrompt(
     lines.push(intent.time)
   }
   lines.push(title)
+  if (intent.location) {
+    lines.push(`場所: ${intent.location}`)
+  }
   lines.push('')
   lines.push('「はい」で登録 / 「いいえ」でキャンセル')
   return lines.join('\n')
@@ -2211,12 +2388,21 @@ async function tryHandlePendingCalendarConfirmation(
     return '予定登録をキャンセルしました。'
   }
 
+  const resolvedPendingDetails = resolveAiCalendarDetails(
+    pending.source_text ?? '',
+    pending.title,
+    pending.location ?? undefined,
+  )
+  const resolvedPendingTitle = resolvedPendingDetails.titleSource === 'default'
+    ? cleanCalendarTitle(pending.title)
+    : resolvedPendingDetails.title
   const command: CalendarCreateCommand = {
     kind: 'create',
     date: pending.date,
     time: pending.time,
     durationMin: pending.duration_min,
-    title: pending.title,
+    title: resolvedPendingTitle,
+    ...(resolvedPendingDetails.location ? { location: resolvedPendingDetails.location } : {}),
   }
   const result = await createCalendarEvent(command, env, roomId, userId)
   if (!result.ok) {
@@ -2224,12 +2410,16 @@ async function tryHandlePendingCalendarConfirmation(
   }
 
   await resolvePendingCalendarConfirmation(supabase, pending, 'confirmed')
-  return [
+  const lines = [
     '確認済みの予定を登録しました。',
     formatDateOnlyForLine(result.startDate, env.timezone),
     formatTimeOnlyForLine(result.startDate, env.timezone),
     cleanCalendarTitle(result.summary),
-  ].join('\n')
+  ]
+  if (command.location) {
+    lines.push(`場所: ${command.location}`)
+  }
+  return lines.join('\n')
 }
 
 function isAcceptableAiListIntent(intent: AiListIntent): boolean {
@@ -2511,19 +2701,7 @@ function computeDurationMinutes(
 
 function inferTitleFromLine(line: string): string | null {
   const normalized = normalizeForRuleParsing(line)
-  const stripped = normalized
-    .replace(
-      /(?:日時\s*[::]\s*)?(?:\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?)(?:\s*[（(][^）)]*[）)])?\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?)(?:\s*(?:から|[-~〜～‐‑‒–—―ー－])\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?))?/g,
-      ' ',
-    )
-    .replace(
-      /(?:今月|来月|再来月|先月|今日|明日|明後日|本日|当日)?(?:の)?\s*\d{1,2}月\d{1,2}日(?:\s*[（(][^）)]*[）)])?\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?)(?:\s*(?:から|[-~〜～‐‑‒–—―ー－])\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?))?/g,
-      ' ',
-    )
-    .replace(
-      /(?:今月|来月|再来月|先月|今日|明日|明後日|本日|当日)?(?:の)?\s*\d{1,2}日(?:\s*[（(][^）)]*[）)])?\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?)(?:\s*(?:から|[-~〜～‐‑‒–—―ー－])\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?))?/g,
-      ' ',
-    )
+  const stripped = stripDateTimePhrases(normalized)
     .replace(/(?:^|[\s、,])(?:今月|来月|再来月|先月|今週|来週|再来週|今日|明日|明後日|本日|当日)(?:の)?/g, ' ')
     .replace(/(?:^|[\s、,])(?:\d{1,2}日|(?:\d{1,2}月\d{1,2}日))(?:$|[\s、,])/g, ' ')
     .replace(/(?:^|[\s、,])\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?)(?:$|[\s、,])/g, ' ')
@@ -2534,7 +2712,264 @@ function inferTitleFromLine(line: string): string | null {
     .replace(/\s+/g, ' ')
     .trim()
   if (!stripped) return null
-  return cleanCalendarTitle(stripped)
+  return normalizeEventTitleCandidate(stripped)
+}
+
+function stripDateTimePhrases(raw: string): string {
+  return String(raw ?? '')
+    .replace(
+      /(?:日時\s*[::]\s*)?(?:\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?)(?:\s*[（(][^）)]*[）)])?(?:\s*の)?\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?)(?:\s*(?:から|より|[-~〜～‐‑‒–—―ー－])\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?))?/g,
+      ' ',
+    )
+    .replace(
+      /(?:今月|来月|再来月|先月|今日|明日|明後日|本日|当日)?(?:の)?\s*\d{1,2}月\d{1,2}日(?:\s*[（(][^）)]*[）)])?(?:\s*の)?\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?)(?:\s*(?:から|より|[-~〜～‐‑‒–—―ー－])\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?))?/g,
+      ' ',
+    )
+    .replace(
+      /(?:今月|来月|再来月|先月|今日|明日|明後日|本日|当日)?(?:の)?\s*\d{1,2}日(?:\s*[（(][^）)]*[）)])?(?:\s*の)?\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?)(?:\s*(?:から|より|[-~〜～‐‑‒–—―ー－])\s*\d{1,2}(?::\d{2}|時(?:\s*\d{1,2}分?)?))?/g,
+      ' ',
+    )
+}
+
+function resolveAiCalendarDetails(
+  sourceText: string,
+  aiTitle: string,
+  aiLocation?: string,
+): { title: string; titleSource: 'ai' | 'source_derived' | 'default'; location?: string } {
+  let title = '予定'
+  let titleSource: 'ai' | 'source_derived' | 'default' = 'default'
+  const hasSourceText = normalizeKeywordForSearch(sourceText).length > 0
+
+  const normalizedAiTitle = normalizeEventTitleCandidate(aiTitle)
+  if (normalizedAiTitle && (!hasSourceText || isTitleGroundedInSource(normalizedAiTitle, sourceText))) {
+    title = normalizedAiTitle
+    titleSource = 'ai'
+  } else {
+    const inferredTitle = inferTitleFromLine(sourceText)
+    if (inferredTitle) {
+      title = inferredTitle
+      titleSource = 'source_derived'
+    }
+  }
+
+  const location = resolveEventLocation(sourceText, aiLocation, title)
+  return {
+    title,
+    titleSource,
+    ...(location ? { location } : {}),
+  }
+}
+
+function normalizeEventTitleCandidate(raw: string): string {
+  const normalized = normalizeForRuleParsing(raw)
+  const withoutDateTime = stripDateTimePhrases(normalized)
+  const firstSentence = withoutDateTime.split(/[。．.!！?？\n]/)[0] ?? withoutDateTime
+  const compact = firstSentence
+    .replace(/(?:皆様|みなさま|ぜひ|どうぞ|よろしければ|いらしてください|来てください|お越しください|お願いします|お願い致します).*/g, ' ')
+    .replace(/(?:開催します|開催予定です|開催予定|開催です|実施します|行います|あります|がある|です)\s*$/g, ' ')
+    .replace(/^[\s:：\-]+/, '')
+    .replace(/^(?:から|より|に|へ|で)\s*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!compact) return ''
+
+  const keywordTitle = extractEventKeywordTitle(compact)
+  if (keywordTitle) return keywordTitle
+  return cleanCalendarTitle(compact)
+}
+
+function isTitleGroundedInSource(title: string, sourceText: string): boolean {
+  const normalizedTitle = normalizeKeywordForSearch(title)
+  const normalizedSource = normalizeKeywordForSearch(sourceText)
+  const compactTitle = compactSearchText(title)
+  const compactSource = compactSearchText(sourceText)
+
+  if (normalizedTitle && normalizedSource.includes(normalizedTitle)) return true
+  if (compactTitle && compactSource.includes(compactTitle)) return true
+  return keywordMatchesHaystacks(title, [sourceText])
+}
+
+function extractEventKeywordTitle(raw: string): string | null {
+  const text = normalizeForRuleParsing(raw)
+  for (const keyword of CALENDAR_EVENT_TITLE_KEYWORDS) {
+    const escaped = escapeRegExp(keyword)
+    const exact = text.match(new RegExp(escaped, 'i'))
+    if (exact) return cleanCalendarTitle(exact[0])
+  }
+  return null
+}
+
+function resolveEventLocation(sourceText: string, aiLocation: string | undefined, title: string): string | null {
+  const cleanedAiLocation = cleanCalendarLocation(aiLocation ?? '')
+  if (cleanedAiLocation && isLocationGroundedInSource(cleanedAiLocation, sourceText)) {
+    return cleanedAiLocation
+  }
+
+  const virtualLocation = inferVirtualMeetingLocation(sourceText)
+  if (virtualLocation) return virtualLocation
+
+  const inferredLocationFromLines = inferLocationFromStructuredLines(sourceText, title)
+  if (inferredLocationFromLines) return inferredLocationFromLines
+
+  const inferredLocation = inferLocationFromLine(sourceText, title)
+  if (inferredLocation) return inferredLocation
+  return null
+}
+
+function inferVirtualMeetingLocation(text: string): string | null {
+  const normalized = normalizeKeywordForSearch(text)
+  if (!normalized) return null
+  if (normalized.includes('meet.google.com') || normalized.includes('google meet')) return 'Google Meet'
+  if (normalized.includes('zoom')) return 'Zoom'
+  if (normalized.includes('teams')) return 'Microsoft Teams'
+  if (normalized.includes('オンライン')) return 'オンライン'
+  return null
+}
+
+function inferLocationFromStructuredLines(sourceText: string, title: string): string | null {
+  const lines = normalizeForRuleParsing(sourceText)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  if (lines.length === 0) return null
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    const labeled = line.match(/^(?:[【\[]\s*)?(?:場所|会場|開催場所|開催会場)(?:\s*[】\]])?\s*(?:[：:]\s*)?(.+)$/i)
+    if (labeled && labeled[1]) {
+      const location = cleanCalendarLocation(labeled[1])
+      if (location) return location
+    }
+    if (/^(?:[【\[]\s*)?(?:場所|会場|開催場所|開催会場)(?:\s*[】\]])?\s*[：:]?\s*$/i.test(line)) {
+      const next = lines[i + 1]
+      if (next) {
+        const location = cleanCalendarLocation(next)
+        if (location) return location
+      }
+    }
+  }
+
+  const compactTitle = compactSearchText(title)
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (isLikelyDateOrTimeLine(line)) continue
+    if (isLikelyInstructionLine(line)) continue
+
+    const cleaned = cleanCalendarLocation(line)
+    if (!cleaned) continue
+    const compact = compactSearchText(cleaned)
+    if (!compact) continue
+    if (compactTitle && compact === compactTitle) continue
+
+    const joinedFloor = buildJoinedFloorLocation(lines, i, cleaned)
+    if (joinedFloor) return joinedFloor
+
+    if (hasLocationHint(cleaned)) return cleaned
+  }
+  return null
+}
+
+function inferLocationFromLine(text: string, title: string): string | null {
+  const normalized = normalizeForRuleParsing(text)
+  const stripped = stripDateTimePhrases(normalized)
+  const firstSentence = stripped.split(/[。．.!！?？\n]/)[0] ?? stripped
+  if (!firstSentence) return null
+
+  const compactTitle = normalizeForRuleParsing(title).replace(/\s+/g, '')
+  if (compactTitle) {
+    const escapedTitle = escapeRegExp(compactTitle)
+    const compactSentence = normalizeForRuleParsing(firstSentence).replace(/\s+/g, '')
+    const m = compactSentence.match(new RegExp(`^(.{1,40}?)で(?:${escapedTitle})`))
+    if (m && m[1]) {
+      const location = cleanCalendarLocation(m[1])
+      if (location) return location
+    }
+  }
+
+  const m2 = firstSentence.match(/(.{1,40}?)\s*で\s*(?:[^。]*)(?:試飲会|打ち合わせ|打合せ|会議|ミーティング|meeting|mtg|商談|面談|イベント|予約|アポ|グランドオープン|オープン|ランチ|ディナー|セミナー|講習会|説明会|研修)/i)
+  if (m2 && m2[1]) {
+    const location = cleanCalendarLocation(m2[1])
+    if (location) return location
+  }
+  return null
+}
+
+function buildJoinedFloorLocation(lines: string[], index: number, base: string): string | null {
+  const nextRaw = lines[index + 1] ? normalizeForRuleParsing(lines[index + 1]).trim() : ''
+  if (!nextRaw) return null
+  const next = nextRaw.replace(/\s*(?:にて|で)\s*$/i, '').trim()
+  if (!/^(?:\d{1,2}階|[Bb]\d{1,2}F|[1-9]\d?F)$/i.test(next)) return null
+  if (isLikelyDateOrTimeLine(base) || isLikelyInstructionLine(base)) return null
+  const joined = cleanCalendarLocation(`${base} ${next}`)
+  return joined
+}
+
+function isLikelyDateOrTimeLine(line: string): boolean {
+  const normalized = normalizeForRuleParsing(line)
+  if (!normalized) return false
+  if (/^(?:日時|日程|開催日|開催日時)\s*[：:]/.test(normalized)) return true
+  if (parseDateTimeSlotFromLine(normalized)) return true
+  if (/^\d{1,2}[\/.\-]\d{1,2}(?:\([^)]+\))?$/.test(normalized)) return true
+  if (/^\d{1,2}:\d{2}(?:\s*[-~〜～‐‑‒–—―ー－]\s*\d{1,2}:\d{2})?$/.test(normalized)) return true
+  if (/^\d{1,2}時(?:\d{1,2}分?)?(?:\s*[-~〜～‐‑‒–—―ー－]\s*\d{1,2}時(?:\d{1,2}分?)?)?$/.test(normalized)) return true
+  return false
+}
+
+function isLikelyInstructionLine(line: string): boolean {
+  const normalized = normalizeForRuleParsing(line)
+  if (!normalized) return true
+  if (/^(?:お疲れ様|よろしく|お願いします|お願い致します|お願い申し上げます|ご周知|周知|共有|リマインド|ご案内|案内|参加|ご参加|皆様)/.test(normalized)) {
+    return true
+  }
+  if (/https?:\/\//i.test(normalized)) return true
+  return false
+}
+
+function hasLocationHint(line: string): boolean {
+  const normalized = normalizeKeywordForSearch(line)
+  if (!normalized) return false
+  if (/(?:\d{1,2}階|[Bb]\d{1,2}f|[1-9]\d?f)$/.test(normalized)) return true
+  return CALENDAR_LOCATION_HINT_KEYWORDS.some((keyword) => normalized.includes(normalizeKeywordForSearch(keyword)))
+}
+
+function cleanCalendarLocation(raw: string): string | null {
+  const normalized = normalizeForRuleParsing(stripDateTimePhrases(raw))
+  const firstSentence = normalized.split(/[。．.!！?？\n]/)[0] ?? normalized
+  const cleaned = firstSentence
+    .replace(/^(?:[【\[]\s*)?(?:場所|会場|開催場所|開催会場)(?:\s*[】\]])?\s*(?:[：:]\s*)?/i, '')
+    .replace(/(?:皆様|みなさま|ぜひ|どうぞ|よろしければ|いらしてください|来てください|お越しください|お願いします|お願い致します).*/g, ' ')
+    .replace(/(?:開催します|開催予定です|開催予定|開催です|実施します|行います|あります|がある|です)\s*$/g, ' ')
+    .replace(/(?:試飲会お知らせ|会議お知らせ|イベントお知らせ|ご案内)\s*$/g, ' ')
+    .replace(/\s*(?:にて|で)\s*(?:開催|実施|予定)?\s*$/i, ' ')
+    .replace(/^[\s:：\-]+/, '')
+    .replace(/^[【\[]+/, '')
+    .replace(/[】\]]+$/, '')
+    .replace(/^(?:から|より|に|へ|で)\s*/g, '')
+    .replace(/\s*(?:で|にて|に|へ)\s*$/g, '')
+    .replace(/[\s、,。．]+$/g, '')
+    .replace(/^[\s、,。．]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!cleaned) return null
+  const compact = compactSearchText(cleaned)
+  if (!compact) return null
+  if (compact.length <= 1) return null
+  if (extractEventKeywordTitle(cleaned) && !/(会議室|イベントホール|ホール|スタジアム)/.test(cleaned)) return null
+  return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned
+}
+
+function isLocationGroundedInSource(location: string, sourceText: string): boolean {
+  const normalizedLocation = normalizeKeywordForSearch(location)
+  const normalizedSource = normalizeKeywordForSearch(sourceText)
+  const compactLocation = compactSearchText(location)
+  const compactSource = compactSearchText(sourceText)
+  if (normalizedLocation && normalizedSource.includes(normalizedLocation)) return true
+  if (compactLocation && compactSource.includes(compactLocation)) return true
+  return false
+}
+
+function escapeRegExp(value: string): string {
+  return String(value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function cleanCalendarTitle(raw: string): string {
@@ -2984,6 +3419,7 @@ async function createCalendarEventReply(
   return [
     '予定を登録しました。',
     `件名: ${result.summary}`,
+    ...(command.location ? [`場所: ${command.location}`] : []),
     `開始: ${startText}`,
     `終了: ${endText}`,
   ].join('\n')
@@ -3023,6 +3459,7 @@ async function createCalendarEvent(
     },
     body: JSON.stringify({
       summary: command.title,
+      ...(command.location ? { location: command.location } : {}),
       description: `LINE room_id: ${roomId}\nLINE user_id: ${userId ?? 'unknown'}\nsource: line-webhook`,
       start: {
         dateTime: startDateTimeLocal,
