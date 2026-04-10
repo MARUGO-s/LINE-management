@@ -285,7 +285,10 @@ Deno.serve(async (req) => {
     const supabase = createClient(supabaseUrl, supabaseKey)
     const lineAccessToken = Deno.env.get('LINE_CHANNEL_ACCESS_TOKEN') ?? ''
     const groqApiKey = Deno.env.get('GROQ_API_KEY') ?? ''
-    const aiAutoCreateEnabled = parseBooleanEnv(Deno.env.get('CALENDAR_AI_AUTO_CREATE_ENABLED'))
+    const aiAutoCreateEnvRaw = Deno.env.get('CALENDAR_AI_AUTO_CREATE_ENABLED')
+    const aiAutoCreateEnabled = aiAutoCreateEnvRaw == null || String(aiAutoCreateEnvRaw).trim() === ''
+      ? true
+      : parseBooleanEnv(aiAutoCreateEnvRaw)
     const calendarEnvState = loadCalendarEnv()
     const roomNameSyncDone = new Set<string>()
     const roomReplyPolicyCache = new Map<string, RoomReplyPolicy>()
@@ -549,11 +552,10 @@ Deno.serve(async (req) => {
                 if (pendingSaved) {
                   const basePrompt = buildPendingCalendarConfirmationPrompt(normalizedAiIntent, calendarEnvState.env.timezone)
                   const notices: string[] = []
-                  if (!aiAutoCreateEnabled) {
-                    notices.push('自動登録はOFFなので、確認後に登録します。')
-                  }
                   if (!roomReplyPolicy.calendarAiAutoCreateEnabled) {
                     notices.push('このルームの自動登録はOFFなので、確認後に登録します。')
+                  } else if (!aiAutoCreateEnabled) {
+                    notices.push('自動登録はOFFなので、確認後に登録します。')
                   }
                   if (isLikelyMultiEvent) {
                     notices.push('本文に複数の予定候補があるため、自動登録せず確認後に登録します。')
