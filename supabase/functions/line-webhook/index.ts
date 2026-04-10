@@ -180,7 +180,6 @@ const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
 const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 60
 const SEARCH_MAX_FETCH_ROWS = 800
 const SEARCH_MAX_SUMMARY_ROWS = 120
-const SEARCH_MAX_PREVIEW_ROWS = 5
 const SEARCH_AI_SUMMARY_MAX_HITS = 80
 const LINE_MEDIA_BUCKET = 'line-media'
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
@@ -438,7 +437,7 @@ Deno.serve(async (req) => {
               continue
             }
 
-            const replyMessage = await buildMessageSearchReply(
+            const replyMessages = await buildMessageSearchReply(
               messageSearchCommand,
               messageSearchError,
               supabase,
@@ -455,7 +454,7 @@ Deno.serve(async (req) => {
               console.error('Missing replyToken for message search.')
               continue
             }
-            const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
+            const replyResult = await replyLineMessage(replyToken, replyMessages, lineAccessToken)
             if (!replyResult.ok) {
               console.error('Failed to reply message search:', replyResult.error)
             }
@@ -1576,9 +1575,9 @@ async function buildMessageSearchReply(
   roomId: string,
   configuredRetentionDays: MessageRetentionDays,
   groqApiKey: string,
-): Promise<string> {
-  if (parseError) return parseError
-  if (!command) return '会話検索の意図を解釈できませんでした。'
+): Promise<string[]> {
+  if (parseError) return [parseError]
+  if (!command) return ['会話検索の意図を解釈できませんでした。']
 
   const effectiveDays = command.days > configuredRetentionDays ? configuredRetentionDays : command.days
   const sinceIso = new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
@@ -1597,7 +1596,7 @@ async function buildMessageSearchReply(
   const { data, error } = await query
 
   if (error) {
-    return `会話検索に失敗しました。${error.message}`
+    return [`会話検索に失敗しました。${error.message}`]
   }
 
   const rows: SearchMessageRow[] = Array.isArray(data)
@@ -1615,7 +1614,7 @@ async function buildMessageSearchReply(
     if (effectiveDays !== command.days) {
       lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
     }
-    return lines.join('\n')
+    return [lines.join('\n')]
   }
 
   const roomLabels = command.scope === 'all_rooms'
@@ -1636,11 +1635,13 @@ async function buildMessageSearchReply(
     groqApiKey,
   )
 
-  const previewRows = hits.slice(0, SEARCH_MAX_PREVIEW_ROWS)
   const scopeLabel = command.scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
   const lines: string[] = [
-    `会話検索結果（${scopeLabel} / 過去${effectiveDays}日 / キーワード: ${command.keyword}）`,
-    `一致: ${hits.length}件`,
+    '会話検索結果',
+    `対象: ${scopeLabel}`,
+    `期間: 過去${effectiveDays}日`,
+    `キーワード: ${command.keyword}`,
+    `一致件数: ${hits.length}件`,
   ]
   if (effectiveDays !== command.days) {
     lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
@@ -1657,13 +1658,11 @@ async function buildMessageSearchReply(
   }
   lines.push('')
   lines.push('一致メッセージ（新しい順）:')
-  for (let i = 0; i < previewRows.length; i += 1) {
-    lines.push(`${i + 1}. ${formatMessageSearchPreview(previewRows[i], command.scope === 'all_rooms')}`)
+  for (let i = 0; i < hits.length; i += 1) {
+    lines.push('')
+    lines.push(...formatMessageSearchPreview(hits[i], i + 1, command.scope === 'all_rooms'))
   }
-  if (hits.length > previewRows.length) {
-    lines.push(`…ほか ${hits.length - previewRows.length}件`)
-  }
-  return lines.join('\n')
+  return splitTextForLineReply(lines.join('\n'))
 }
 
 async function loadRoomLabelsForHits(
@@ -1693,15 +1692,37 @@ async function loadRoomLabelsForHits(
   return map
 }
 
-function formatMessageSearchPreview(row: SearchMessageRow, includeRoomLabel = false): string {
+function formatMessageSearchPreview(
+  row: SearchMessageRow,
+  index: number,
+  includeRoomLabel = false,
+): string[] {
   const date = formatSearchDateTime(row.created_at)
   const content = normalizeInlineText(String(row.content ?? ''))
-  const compact = content.length > 90 ? `${content.slice(0, 90)}...` : (content || '（内容なし）')
+  const compact = content.length > 180 ? `${content.slice(0, 180)}...` : (content || '（内容なし）')
+  const wrappedContent = wrapTextForLineDisplay(compact, 24)
+  const lines = [`${index}件目`]
   if (includeRoomLabel) {
     const roomLabel = normalizeInlineText(String(row.room_label ?? '')) || '（ルーム不明）'
-    return `ルーム:${roomLabel} / ${date} / ${compact}`
+    lines.push(`  ルーム: ${roomLabel}`)
   }
-  return `${date} ${compact}`
+  lines.push(`  日時: ${date}`)
+  lines.push('  内容:')
+  for (const line of wrappedContent) {
+    lines.push(`    ${line}`)
+  }
+  return lines
+}
+
+function wrapTextForLineDisplay(text: string, maxCharsPerLine: number): string[] {
+  const normalized = normalizeInlineText(String(text ?? ''))
+  if (!normalized) return ['（内容なし）']
+  const chars = Array.from(normalized)
+  const lines: string[] = []
+  for (let i = 0; i < chars.length; i += maxCharsPerLine) {
+    lines.push(chars.slice(i, i + maxCharsPerLine).join(''))
+  }
+  return lines.length > 0 ? lines : ['（内容なし）']
 }
 
 function formatSearchDateTime(iso: string): string {
@@ -4454,7 +4475,75 @@ function normalizeSpaces(text: string): string {
   return text.replace(/\u3000/g, ' ').trim()
 }
 
-async function replyLineMessage(replyToken: string, text: string, channelAccessToken: string): Promise<{ ok: true } | { ok: false; error: string }> {
+function splitTextForLineReply(text: string, maxLength = 4900): string[] {
+  const normalized = String(text ?? '').trim()
+  if (!normalized) return ['（空メッセージ）']
+
+  const chunks: string[] = []
+  let current = ''
+  const sourceLines = normalized.split('\n')
+
+  const flush = () => {
+    const trimmed = current.trim()
+    if (trimmed) chunks.push(trimmed)
+    current = ''
+  }
+
+  const appendLine = (line: string) => {
+    if (!current) {
+      current = line
+      return
+    }
+    const candidate = `${current}\n${line}`
+    if (candidate.length <= maxLength) {
+      current = candidate
+      return
+    }
+    flush()
+    current = line
+  }
+
+  for (const rawLine of sourceLines) {
+    let line = String(rawLine ?? '')
+    if (line.length === 0) {
+      appendLine('')
+      continue
+    }
+    while (line.length > maxLength) {
+      const segment = line.slice(0, maxLength)
+      appendLine(segment)
+      flush()
+      line = line.slice(maxLength)
+    }
+    appendLine(line)
+  }
+
+  flush()
+  return chunks.length > 0 ? chunks : ['（空メッセージ）']
+}
+
+async function replyLineMessage(
+  replyToken: string,
+  text: string | string[],
+  channelAccessToken: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const inputTexts = Array.isArray(text) ? text : [text]
+  const preparedTexts = inputTexts
+    .flatMap((item) => splitTextForLineReply(item, 4900))
+    .filter((item) => item.length > 0)
+  if (preparedTexts.length === 0) {
+    preparedTexts.push('（空メッセージ）')
+  }
+
+  const maxReplyMessages = 5
+  const replyTexts = preparedTexts.slice(0, maxReplyMessages)
+  if (preparedTexts.length > maxReplyMessages) {
+    const omitted = preparedTexts.length - maxReplyMessages
+    const notice = `\n\n※表示上限のため残り${omitted}メッセージ分を省略しました。検索条件を絞ってください。`
+    const last = replyTexts[maxReplyMessages - 1] ?? ''
+    replyTexts[maxReplyMessages - 1] = `${last.slice(0, Math.max(0, 4900 - notice.length))}${notice}`
+  }
+
   const response = await fetch('https://api.line.me/v2/bot/message/reply', {
     method: 'POST',
     headers: {
@@ -4463,7 +4552,7 @@ async function replyLineMessage(replyToken: string, text: string, channelAccessT
     },
     body: JSON.stringify({
       replyToken,
-      messages: [{ type: 'text', text: text.slice(0, 4900) }],
+      messages: replyTexts.map((value) => ({ type: 'text', text: value.slice(0, 4900) })),
     }),
   })
 
