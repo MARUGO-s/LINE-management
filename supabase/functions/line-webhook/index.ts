@@ -23,6 +23,16 @@ type CalendarCommand =
       location?: string
     }
   | {
+      kind: 'update'
+      eventId: string
+      title?: string
+      date?: string
+      time?: string
+      durationMin?: number
+      location?: string
+      clearLocation?: boolean
+    }
+  | {
       kind: 'list'
       scope: CalendarListScope
       date?: string
@@ -32,6 +42,7 @@ type CalendarCommand =
     }
 
 type CalendarCreateCommand = Extract<CalendarCommand, { kind: 'create' }>
+type CalendarUpdateCommand = Extract<CalendarCommand, { kind: 'update' }>
 
 type CalendarCommandParseResult = {
   matched: boolean
@@ -73,6 +84,28 @@ type PendingCalendarConfirmation = {
   duration_min: number
   confidence: number
   reason: string | null
+  expires_at: string
+}
+
+type PendingCalendarUpdateTargetEntry = {
+  event_id: string
+  summary: string
+}
+
+type PendingCalendarUpdateContext = {
+  id: string
+  conversation_key: string
+  target_events: PendingCalendarUpdateTargetEntry[]
+  expires_at: string
+}
+
+type PendingLibrarySearchConfirmation = {
+  id: string
+  conversation_key: string
+  keyword: string
+  search_days: MessageRetentionDays
+  search_scope: MessageSearchScope
+  retention_adjusted: boolean
   expires_at: string
 }
 
@@ -183,6 +216,9 @@ const AI_AUTO_CREATE_MAX_EVENTS = 5
 const PAST_EVENT_GRACE_MS = 5 * 60 * 1000
 const PENDING_CONFIRMATION_TTL_MIN = 30
 const CALENDAR_PENDING_TABLE = 'calendar_pending_confirmations'
+const CALENDAR_UPDATE_PENDING_TABLE = 'calendar_update_pending_targets'
+const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmations'
+const LINE_DOCUMENT_LIBRARY_FILENAME_MARKER = '[LINE]'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
 const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
 const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 365
@@ -360,6 +396,62 @@ Deno.serve(async (req) => {
             }
           }
 
+          if (calendarEnvState.ok) {
+            const updateConversationReply = await tryHandlePendingCalendarUpdateConversation(
+              text,
+              supabase,
+              calendarEnvState.env,
+              roomId,
+              userId,
+            )
+            if (updateConversationReply) {
+              if (!roomCanReply) {
+                continue
+              }
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply calendar update conversation.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for calendar update conversation.')
+                continue
+              }
+              const replyResult = await replyLineMessage(replyToken, updateConversationReply, lineAccessToken)
+              if (!replyResult.ok) {
+                console.error('Failed to reply calendar update conversation:', replyResult.error)
+              }
+              continue
+            }
+          }
+
+          if (roomReplyPolicy.messageSearchEnabled) {
+            const librarySearchReply = await tryHandlePendingLibrarySearchConfirmation(
+              text,
+              supabase,
+              roomId,
+              userId,
+              messageRetentionDays,
+            )
+            if (librarySearchReply) {
+              if (!roomCanReply) {
+                continue
+              }
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply library search confirmation.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for library search confirmation.')
+                continue
+              }
+              const replyResult = await replyLineMessage(replyToken, librarySearchReply, lineAccessToken)
+              if (!replyResult.ok) {
+                console.error('Failed to reply library search confirmation:', replyResult.error)
+              }
+              continue
+            }
+          }
+
           if (!!groqApiKey && text && !isExplicitBotCommandText(text)) {
             const primaryIntent = await extractPrimaryIntentWithGroq(
               text,
@@ -451,6 +543,7 @@ Deno.serve(async (req) => {
               messageSearchError,
               supabase,
               roomId,
+              userId,
               messageRetentionDays,
               groqApiKey,
             )
@@ -475,6 +568,7 @@ Deno.serve(async (req) => {
             const replyMessage = await buildCalendarReplyMessage(
               commandParse,
               calendarEnvState,
+              supabase,
               roomId,
               userId,
             )
@@ -516,7 +610,13 @@ Deno.serve(async (req) => {
               if (!roomCanReply) {
                 continue
               }
-              const replyMessage = await listCalendarEventsReply(aiCommand, calendarEnvState.env)
+              const replyMessage = await listCalendarEventsReply(
+                aiCommand,
+                calendarEnvState.env,
+                supabase,
+                roomId,
+                userId,
+              )
 
               if (!lineAccessToken) {
                 console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI list intent.')
@@ -1311,7 +1411,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
 function isExplicitBotCommandText(rawText: string): boolean {
   const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
   if (!compact) return false
-  if (/^予定(?:登録|追加|確認|一覧|報告)/.test(compact)) return true
+  if (/^予定(?:登録|追加|変更|確認|一覧|報告)/.test(compact)) return true
   if (/^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)) return true
   return false
 }
@@ -1598,16 +1698,29 @@ async function buildMessageSearchReply(
   parseError: string | null,
   supabase: ReturnType<typeof createClient>,
   roomId: string,
+  userId: string | null,
   configuredRetentionDays: MessageRetentionDays,
   groqApiKey: string,
 ): Promise<string[]> {
   if (parseError) return [parseError]
   if (!command) return ['会話検索の意図を解釈できませんでした。']
 
+  const { error: supersedeStaleLibraryPendingError } = await supabase
+    .from(LIBRARY_SEARCH_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('conversation_key', buildConversationKey(roomId, userId))
+    .eq('status', 'pending')
+  if (supersedeStaleLibraryPendingError && !isMissingLibraryPendingTableError(supersedeStaleLibraryPendingError)) {
+    console.error('Failed to supersede stale library search pending:', supersedeStaleLibraryPendingError)
+  }
+
   const requestedDays = command.days
-  const effectiveDays = configuredRetentionDays === 0
+  const effectiveDays = (configuredRetentionDays === 0
     ? requestedDays
-    : (requestedDays === 0 ? configuredRetentionDays : Math.min(requestedDays, configuredRetentionDays))
+    : (requestedDays === 0 ? configuredRetentionDays : Math.min(requestedDays, configuredRetentionDays))) as MessageRetentionDays
   const adjustedByRetention = configuredRetentionDays > 0 && (
     requestedDays === 0 || requestedDays > configuredRetentionDays
   )
@@ -1643,62 +1756,43 @@ async function buildMessageSearchReply(
       }))
     : []
 
-  let docQuery = supabase
-    .from('line_search_documents')
-    .select('room_id, original_file_name, mime_type, extracted_text, created_at')
-    .order('created_at', { ascending: false })
-    .limit(SEARCH_MAX_DOCUMENT_ROWS)
-  if (sinceIso) {
-    docQuery = docQuery.gte('created_at', sinceIso)
-  }
-  if (command.scope !== 'all_rooms') {
-    docQuery = docQuery.eq('room_id', roomId)
-  }
-  const { data: docData, error: docError } = await docQuery
-  if (docError) {
-    console.error('Failed to fetch document rows for message search:', docError.message)
-  }
-  const docRows: SearchDocumentRow[] = Array.isArray(docData)
-    ? docData.map((row: any) => ({
-        room_id: row?.room_id == null ? null : String(row.room_id),
-        original_file_name: String(row?.original_file_name ?? ''),
-        mime_type: String(row?.mime_type ?? ''),
-        extracted_text: String(row?.extracted_text ?? ''),
-        created_at: String(row?.created_at ?? ''),
-      }))
-    : []
-
   const hitsRaw = rows.filter((row) => messageMatchesKeyword(row.content, command.keyword))
-  const docHitsRaw = docRows.filter((row) => {
-    const searchable = `${row.original_file_name}\n${row.extracted_text}`
-    return messageMatchesKeyword(searchable, command.keyword)
-  })
-  if (hitsRaw.length === 0 && docHitsRaw.length === 0) {
+
+  if (hitsRaw.length === 0) {
     const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
-    const lines = [`「${command.keyword}」に一致する会話・資料はありません（${periodText}）`]
+    const pendingSaved = await savePendingLibrarySearchConfirmation(
+      supabase,
+      roomId,
+      userId,
+      command,
+      effectiveDays,
+      adjustedByRetention,
+    )
+    const lines: string[] = [
+      `「${command.keyword}」に一致する会話はありません（${periodText}）`,
+    ]
     if (adjustedByRetention) {
       lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
+    }
+    if (pendingSaved) {
+      lines.push('')
+      lines.push('資料ライブラリ（ファイル名に[LINE]を含む資料のみ）も検索しますか？')
+      lines.push('「はい」で検索 / 「いいえ」でキャンセル')
+      lines.push(`※${PENDING_CONFIRMATION_TTL_MIN}分以内にご返信ください`)
+    } else {
+      lines.push('')
+      lines.push('資料ライブラリへ進む確認を保存できませんでした。しばらくしてからもう一度お試しください。')
     }
     return [lines.join('\n')]
   }
 
-  const labelTargetRows: Array<{ room_id: string | null }> = [
-    ...hitsRaw.map((row) => ({ room_id: row.room_id })),
-    ...docHitsRaw.map((row) => ({ room_id: row.room_id })),
-  ]
   const roomLabels = command.scope === 'all_rooms'
-    ? await loadRoomLabelsForHits(supabase, labelTargetRows)
+    ? await loadRoomLabelsForHits(supabase, hitsRaw.map((row) => ({ room_id: row.room_id })))
     : new Map<string, string>()
   const hits = hitsRaw.map((row) => ({
     ...row,
     room_label: command.scope === 'all_rooms'
       ? (roomLabels.get(row.room_id) ?? row.room_id)
-      : null,
-  }))
-  const docHits = docHitsRaw.map((row) => ({
-    ...row,
-    room_label: command.scope === 'all_rooms'
-      ? (row.room_id ? (roomLabels.get(row.room_id) ?? row.room_id) : '共通資料')
       : null,
   }))
 
@@ -1713,21 +1807,17 @@ async function buildMessageSearchReply(
   const scopeLabel = command.scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
   const periodLabel = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
   const lines: string[] = [
-    '会話・資料検索結果',
+    '会話検索結果',
     `対象: ${scopeLabel}`,
     `期間: ${periodLabel}`,
     `キーワード: ${command.keyword}`,
     `会話一致: ${hits.length}件`,
-    `資料一致: ${docHits.length}件`,
   ]
   if (adjustedByRetention) {
     lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
   }
   if (rows.length >= SEARCH_MAX_FETCH_ROWS) {
     lines.push(`※検索対象が多いため、新しい順で先頭${SEARCH_MAX_FETCH_ROWS}件を対象にしています。`)
-  }
-  if (docRows.length >= SEARCH_MAX_DOCUMENT_ROWS) {
-    lines.push(`※資料件数が多いため、新しい順で先頭${SEARCH_MAX_DOCUMENT_ROWS}件を対象にしています。`)
   }
   if (summary) {
     lines.push('')
@@ -1742,14 +1832,6 @@ async function buildMessageSearchReply(
     for (let i = 0; i < hits.length; i += 1) {
       lines.push('')
       lines.push(...formatMessageSearchPreview(hits[i], i + 1, command.scope === 'all_rooms'))
-    }
-  }
-  if (docHits.length > 0) {
-    lines.push('')
-    lines.push('一致資料（新しい順）:')
-    for (let i = 0; i < docHits.length; i += 1) {
-      lines.push('')
-      lines.push(...formatDocumentSearchPreview(docHits[i], i + 1, command.keyword, command.scope === 'all_rooms'))
     }
   }
   return splitTextForLineReply(lines.join('\n'))
@@ -1806,6 +1888,95 @@ function formatDocumentSearchPreview(
     lines.push(`    ${line}`)
   }
   return lines
+}
+
+async function buildLineTaggedDocumentLibrarySearchReply(
+  command: MessageSearchCommand,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  effectiveDays: MessageRetentionDays,
+  retentionAdjusted: boolean,
+  configuredRetentionDays: MessageRetentionDays,
+): Promise<string[]> {
+  const sinceIso = effectiveDays > 0
+    ? new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
+    : null
+
+  let docQuery = supabase
+    .from('line_search_documents')
+    .select('room_id, original_file_name, mime_type, extracted_text, created_at')
+    .order('created_at', { ascending: false })
+    .limit(SEARCH_MAX_DOCUMENT_ROWS)
+  if (sinceIso) {
+    docQuery = docQuery.gte('created_at', sinceIso)
+  }
+  if (command.scope !== 'all_rooms') {
+    docQuery = docQuery.eq('room_id', roomId)
+  }
+  const { data: docData, error: docError } = await docQuery
+  if (docError) {
+    return [`資料ライブラリの検索に失敗しました。${docError.message}`]
+  }
+  const docRows: SearchDocumentRow[] = Array.isArray(docData)
+    ? docData.map((row: any) => ({
+        room_id: row?.room_id == null ? null : String(row.room_id),
+        original_file_name: String(row?.original_file_name ?? ''),
+        mime_type: String(row?.mime_type ?? ''),
+        extracted_text: String(row?.extracted_text ?? ''),
+        created_at: String(row?.created_at ?? ''),
+      }))
+    : []
+
+  const lineTaggedRows = docRows.filter((row) =>
+    row.original_file_name.includes(LINE_DOCUMENT_LIBRARY_FILENAME_MARKER),
+  )
+  const docHitsRaw = lineTaggedRows.filter((row) => {
+    const searchable = `${row.original_file_name}\n${row.extracted_text}`
+    return messageMatchesKeyword(searchable, command.keyword)
+  })
+
+  const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+  if (docHitsRaw.length === 0) {
+    const lines = [
+      `「${command.keyword}」に一致する[LINE]資料はありません（${periodText}）`,
+    ]
+    if (retentionAdjusted) {
+      lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
+    }
+    return splitTextForLineReply(lines.join('\n'))
+  }
+
+  const roomLabels = command.scope === 'all_rooms'
+    ? await loadRoomLabelsForHits(supabase, docHitsRaw.map((row) => ({ room_id: row.room_id })))
+    : new Map<string, string>()
+  const docHits = docHitsRaw.map((row) => ({
+    ...row,
+    room_label: command.scope === 'all_rooms'
+      ? (row.room_id ? (roomLabels.get(row.room_id) ?? row.room_id) : '共通資料')
+      : null,
+  }))
+
+  const scopeLabel = command.scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
+  const lines: string[] = [
+    '資料ライブラリ検索結果（ファイル名に[LINE]を含む資料のみ）',
+    `対象: ${scopeLabel}`,
+    `期間: ${periodText}`,
+    `キーワード: ${command.keyword}`,
+    `資料一致: ${docHits.length}件`,
+  ]
+  if (retentionAdjusted) {
+    lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
+  }
+  if (docRows.length >= SEARCH_MAX_DOCUMENT_ROWS) {
+    lines.push(`※資料件数が多いため、新しい順で先頭${SEARCH_MAX_DOCUMENT_ROWS}件を対象にしています（その中から[LINE]付きのみを表示）。`)
+  }
+  lines.push('')
+  lines.push('一致資料（新しい順）:')
+  for (let i = 0; i < docHits.length; i += 1) {
+    lines.push('')
+    lines.push(...formatDocumentSearchPreview(docHits[i], i + 1, command.keyword, command.scope === 'all_rooms'))
+  }
+  return splitTextForLineReply(lines.join('\n'))
 }
 
 function buildDocumentSearchSnippet(text: string, keyword: string): string {
@@ -2289,6 +2460,237 @@ function isMissingPendingTableError(error: any): boolean {
   if (code === '42P01') return true
   const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
   return text.includes('calendar_pending_confirmations') && (text.includes('does not exist') || text.includes('relation'))
+}
+
+function isMissingCalendarUpdatePendingTableError(error: any): boolean {
+  const code = String(error?.code ?? '')
+  if (code === '42P01') return true
+  const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
+  return text.includes('calendar_update_pending_targets')
+    && (text.includes('does not exist') || text.includes('relation'))
+}
+
+function normalizePendingCalendarUpdateTargetEntries(raw: unknown): PendingCalendarUpdateTargetEntry[] {
+  if (!Array.isArray(raw)) return []
+  const out: PendingCalendarUpdateTargetEntry[] = []
+  for (const item of raw) {
+    const eventId = String((item as any)?.event_id ?? '').trim()
+    if (!eventId) continue
+    const summary = cleanCalendarTitle(String((item as any)?.summary ?? ''))
+    out.push({
+      event_id: eventId,
+      summary: summary || '(無題)',
+    })
+  }
+  return out
+}
+
+async function fetchPendingCalendarUpdateContext(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingCalendarUpdateContext | null> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(CALENDAR_UPDATE_PENDING_TABLE)
+    .select('id, conversation_key, target_events_json, expires_at')
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    if (!isMissingCalendarUpdatePendingTableError(error)) {
+      console.error('Failed to fetch pending calendar update context:', error)
+    }
+    return null
+  }
+  if (!data) return null
+
+  const targetEvents = normalizePendingCalendarUpdateTargetEntries((data as any).target_events_json)
+  if (targetEvents.length === 0) return null
+
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    target_events: targetEvents,
+    expires_at: String((data as any).expires_at ?? ''),
+  }
+}
+
+async function resolvePendingCalendarUpdateContext(
+  supabase: ReturnType<typeof createClient>,
+  pending: PendingCalendarUpdateContext,
+  status: 'resolved' | 'cancelled' | 'expired' | 'superseded',
+): Promise<void> {
+  const { error } = await supabase
+    .from(CALENDAR_UPDATE_PENDING_TABLE)
+    .update({
+      status,
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('id', Number(pending.id))
+    .eq('status', 'pending')
+  if (error && !isMissingCalendarUpdatePendingTableError(error)) {
+    console.error('Failed to resolve pending calendar update context:', error)
+  }
+}
+
+async function savePendingCalendarUpdateContext(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  events: GoogleCalendarEvent[],
+): Promise<void> {
+  const entries = events
+    .map((event) => ({
+      event_id: String(event.id ?? '').trim(),
+      summary: cleanCalendarTitle(String(event.summary ?? '(無題)')),
+    }))
+    .filter((entry) => entry.event_id.length > 0)
+    .slice(0, 20)
+
+  if (entries.length === 0) return
+
+  const conversationKey = buildConversationKey(roomId, userId)
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + PENDING_CONFIRMATION_TTL_MIN * 60 * 1000).toISOString()
+
+  const { error: supersedeError } = await supabase
+    .from(CALENDAR_UPDATE_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: nowIso,
+    })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeError && !isMissingCalendarUpdatePendingTableError(supersedeError)) {
+    console.error('Failed to supersede pending calendar update context:', supersedeError)
+  }
+
+  const { error: insertError } = await supabase
+    .from(CALENDAR_UPDATE_PENDING_TABLE)
+    .insert({
+      conversation_key: conversationKey,
+      room_id: roomId,
+      user_id: userId,
+      target_events_json: entries,
+      status: 'pending',
+      expires_at: expiresAt,
+    })
+  if (insertError && !isMissingCalendarUpdatePendingTableError(insertError)) {
+    console.error('Failed to save pending calendar update context:', insertError)
+  }
+}
+
+function isMissingLibraryPendingTableError(error: any): boolean {
+  const code = String(error?.code ?? '')
+  if (code === '42P01') return true
+  const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
+  return text.includes('message_search_library_pending_confirmations')
+    && (text.includes('does not exist') || text.includes('relation'))
+}
+
+async function fetchPendingLibrarySearchConfirmation(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingLibrarySearchConfirmation | null> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(LIBRARY_SEARCH_PENDING_TABLE)
+    .select('id, conversation_key, keyword, search_days, search_scope, retention_adjusted, expires_at')
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    if (!isMissingLibraryPendingTableError(error)) {
+      console.error('Failed to fetch library search pending:', error)
+    }
+    return null
+  }
+  if (!data) return null
+  const daysRaw = Number((data as any).search_days)
+  const days = isSupportedMessageRetentionDays(daysRaw) ? daysRaw : DEFAULT_MESSAGE_RETENTION_DAYS
+  const scopeRaw = String((data as any).search_scope ?? '').trim()
+  const scope: MessageSearchScope = scopeRaw === 'current_room' ? 'current_room' : 'all_rooms'
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    keyword: String((data as any).keyword ?? ''),
+    search_days: days,
+    search_scope: scope,
+    retention_adjusted: Boolean((data as any).retention_adjusted),
+    expires_at: String((data as any).expires_at ?? ''),
+  }
+}
+
+async function resolvePendingLibrarySearchConfirmation(
+  supabase: ReturnType<typeof createClient>,
+  pending: PendingLibrarySearchConfirmation,
+  status: 'confirmed' | 'cancelled' | 'expired' | 'superseded',
+): Promise<void> {
+  const { error } = await supabase
+    .from(LIBRARY_SEARCH_PENDING_TABLE)
+    .update({
+      status,
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('id', Number(pending.id))
+    .eq('status', 'pending')
+  if (error && !isMissingLibraryPendingTableError(error)) {
+    console.error('Failed to resolve library search pending:', error)
+  }
+}
+
+async function savePendingLibrarySearchConfirmation(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  command: MessageSearchCommand,
+  effectiveSearchDays: MessageRetentionDays,
+  retentionAdjusted: boolean,
+): Promise<boolean> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + PENDING_CONFIRMATION_TTL_MIN * 60 * 1000).toISOString()
+
+  const { error: supersedeError } = await supabase
+    .from(LIBRARY_SEARCH_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: nowIso,
+    })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeError && !isMissingLibraryPendingTableError(supersedeError)) {
+    console.error('Failed to supersede library search pending:', supersedeError)
+  }
+
+  const { error: insertError } = await supabase
+    .from(LIBRARY_SEARCH_PENDING_TABLE)
+    .insert({
+      conversation_key: conversationKey,
+      room_id: roomId,
+      user_id: userId,
+      keyword: command.keyword,
+      search_days: effectiveSearchDays,
+      search_scope: command.scope,
+      retention_adjusted: retentionAdjusted,
+      status: 'pending',
+      expires_at: expiresAt,
+    })
+
+  if (insertError) {
+    if (!isMissingLibraryPendingTableError(insertError)) {
+      console.error('Failed to save library search pending:', insertError)
+    }
+    return false
+  }
+  return true
 }
 
 function encodeLegacyPendingContent(payload: {
@@ -2928,6 +3330,195 @@ async function tryHandlePendingCalendarConfirmation(
     lines.push(`場所: ${command.location}`)
   }
   return lines.join('\n')
+}
+
+function looksLikeCalendarUpdateConversationText(rawText: string): boolean {
+  const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
+  if (!compact) return false
+  if (/^予定変更/.test(compact)) return false
+  if (parseCalendarCommand(rawText).matched) return false
+  const hasChangeCue = /(変更|修正|更新|ずらして|ずらす|移動|直して|直す|変えて|変える|にして)/.test(compact)
+  const hasFieldCue = /(時間|時刻|開始|日付|日にち|日時|件名|タイトル|予定名|場所|会場|所要|分)/.test(compact)
+  return hasChangeCue && hasFieldCue
+}
+
+function extractPendingCalendarTargetIndex(rawText: string): number | null {
+  const normalized = normalizeForRuleParsing(rawText)
+  const match = normalized.match(/(\d{1,2})\s*件目/)
+  if (!match || !match[1]) return null
+  const idx = Number(match[1])
+  if (!Number.isInteger(idx) || idx <= 0) return null
+  return idx - 1
+}
+
+function extractCalendarDurationForUpdate(rawText: string): number | null {
+  const normalized = normalizeForRuleParsing(rawText)
+  const patterns = [
+    /(?:所要|時間幅|時間|duration)\s*(?:を|は|:|：)?\s*(\d{1,3})\s*分/i,
+    /(\d{1,3})\s*分\s*(?:に(?:変更|して|します|する)|でお願いします|です)/i,
+  ]
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern)
+    if (!match || !match[1]) continue
+    const value = Number(match[1])
+    if (!Number.isInteger(value) || value <= 0 || value > MAX_DURATION_MIN) continue
+    return value
+  }
+  return null
+}
+
+function buildCalendarUpdateCommandFromConversation(
+  rawText: string,
+  eventId: string,
+): { command: CalendarUpdateCommand | null; guidance?: string } {
+  const text = String(rawText ?? '').trim()
+  if (!text) return { command: null }
+
+  const slot = parseDateTimeSlotFromLine(text)
+  const dateFromSlot = slot?.date
+  const timeFromSlot = slot?.time
+  const durationFromSlot = slot?.durationMin
+  const dateOnly = dateFromSlot ? null : extractCorrectionDate(text)
+  const timeOnly = timeFromSlot ? null : extractCorrectionTime(text)
+  const explicitTitle = extractCorrectionTitle(text)
+  const location = extractCorrectionLocation(text)
+  const duration = durationFromSlot ?? extractCalendarDurationForUpdate(text)
+  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
+  const clearLocation = /(場所|会場).*(なし|未設定|クリア|削除|消去)/.test(compact)
+
+  const nextDate = dateFromSlot ?? dateOnly ?? undefined
+  const nextTime = timeFromSlot ?? timeOnly ?? undefined
+  const nextTitle = explicitTitle ? cleanCalendarTitle(explicitTitle) : undefined
+  const nextLocation = location ?? undefined
+  const nextDuration = (typeof duration === 'number' && Number.isInteger(duration) && duration > 0 && duration <= MAX_DURATION_MIN)
+    ? duration
+    : undefined
+
+  if (!nextDate && !nextTime && !nextTitle && !nextLocation && !clearLocation && typeof nextDuration === 'undefined') {
+    return {
+      command: null,
+      guidance: [
+        '変更内容を読み取れませんでした。',
+        '例: 「時間を19:00に変更」「2件目の日付を2026-05-20に変更」「件名を試飲会に変更」',
+      ].join('\n'),
+    }
+  }
+
+  return {
+    command: {
+      kind: 'update',
+      eventId,
+      ...(nextTitle ? { title: nextTitle } : {}),
+      ...(nextDate ? { date: nextDate } : {}),
+      ...(nextTime ? { time: nextTime } : {}),
+      ...(typeof nextDuration === 'number' ? { durationMin: nextDuration } : {}),
+      ...(nextLocation ? { location: nextLocation } : {}),
+      ...(clearLocation ? { clearLocation: true } : {}),
+    },
+  }
+}
+
+function selectCalendarUpdateTargetFromPending(
+  text: string,
+  pending: PendingCalendarUpdateContext,
+): { entry: PendingCalendarUpdateTargetEntry | null; requiresIndex: boolean } {
+  const index = extractPendingCalendarTargetIndex(text)
+  if (index != null) {
+    if (index < 0 || index >= pending.target_events.length) {
+      return { entry: null, requiresIndex: true }
+    }
+    return { entry: pending.target_events[index], requiresIndex: false }
+  }
+  if (pending.target_events.length === 1) {
+    return { entry: pending.target_events[0], requiresIndex: false }
+  }
+  return { entry: null, requiresIndex: true }
+}
+
+async function tryHandlePendingCalendarUpdateConversation(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  env: CalendarEnv,
+  roomId: string,
+  userId: string | null,
+): Promise<string | null> {
+  if (!looksLikeCalendarUpdateConversationText(text)) return null
+
+  const pending = await fetchPendingCalendarUpdateContext(supabase, roomId, userId)
+  if (!pending) return null
+
+  const expireAtMs = new Date(pending.expires_at).getTime()
+  if (!Number.isFinite(expireAtMs) || Date.now() >= expireAtMs) {
+    await resolvePendingCalendarUpdateContext(supabase, pending, 'expired')
+    return '変更対象の候補が期限切れです。もう一度「予定確認」を実行してから変更してください。'
+  }
+
+  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
+  if (/^(いいえ|no|n|キャンセル|中止|やめる)$/.test(compact)) {
+    await resolvePendingCalendarUpdateContext(supabase, pending, 'cancelled')
+    return '予定変更の操作をキャンセルしました。'
+  }
+
+  const selected = selectCalendarUpdateTargetFromPending(text, pending)
+  if (!selected.entry) {
+    if (selected.requiresIndex) {
+      return [
+        '変更する予定を指定してください。',
+        '例: 「1件目の時間を19:00に変更」「2件目の件名を試飲会に変更」',
+      ].join('\n')
+    }
+    return null
+  }
+
+  const updateCommand = buildCalendarUpdateCommandFromConversation(text, selected.entry.event_id)
+  if (!updateCommand.command) {
+    return updateCommand.guidance ?? null
+  }
+
+  return await updateCalendarEventReply(updateCommand.command, env)
+}
+
+async function tryHandlePendingLibrarySearchConfirmation(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  configuredRetentionDays: MessageRetentionDays,
+): Promise<string[] | null> {
+  const pending = await fetchPendingLibrarySearchConfirmation(supabase, roomId, userId)
+  if (!pending) return null
+
+  const expireAtMs = new Date(pending.expires_at).getTime()
+  if (!Number.isFinite(expireAtMs) || Date.now() >= expireAtMs) {
+    await resolvePendingLibrarySearchConfirmation(supabase, pending, 'expired')
+    return ['資料ライブラリ検索の確認が期限切れです。もう一度会話検索からやり直してください。']
+  }
+
+  const decision = normalizeConfirmationDecision(text)
+  if (decision === 'no') {
+    await resolvePendingLibrarySearchConfirmation(supabase, pending, 'cancelled')
+    return ['資料ライブラリ検索をキャンセルしました。']
+  }
+  if (decision !== 'yes') {
+    return null
+  }
+
+  const command: MessageSearchCommand = {
+    kind: 'search_messages',
+    keyword: pending.keyword,
+    days: pending.search_days,
+    scope: pending.search_scope,
+  }
+  const reply = await buildLineTaggedDocumentLibrarySearchReply(
+    command,
+    supabase,
+    roomId,
+    pending.search_days,
+    pending.retention_adjusted,
+    configuredRetentionDays,
+  )
+  await resolvePendingLibrarySearchConfirmation(supabase, pending, 'confirmed')
+  return reply
 }
 
 function isAcceptableAiListIntent(intent: AiListIntent): boolean {
@@ -3658,6 +4249,19 @@ function parseCalendarCommand(rawText: string): CalendarCommandParseResult {
     }
   }
 
+  if (text.startsWith('予定変更')) {
+    const body = text.replace(/^予定変更\s*/, '')
+    const updateCommand = parseCalendarUpdateCommand(body)
+    if (updateCommand.error) {
+      return {
+        matched: true,
+        command: null,
+        error: updateCommand.error,
+      }
+    }
+    return { matched: true, command: updateCommand.command, error: null }
+  }
+
   if (text.startsWith('予定確認') || text.startsWith('予定一覧') || text.startsWith('予定報告')) {
     const body = text.replace(/^予定(?:確認|一覧|報告)\s*/, '').trim()
     const listCommand = parseCalendarListScope(body)
@@ -3681,6 +4285,115 @@ function parseCalendarCommand(rawText: string): CalendarCommandParseResult {
   }
 
   return { matched: false, command: null, error: null }
+}
+
+function parseCalendarUpdateCommand(bodyRaw: string): {
+  command: CalendarUpdateCommand | null
+  error: string | null
+} {
+  const body = normalizeSpaces(bodyRaw)
+  if (!body) {
+    return {
+      command: null,
+      error: [
+        '形式エラーです。',
+        '例: 予定変更 <eventId> | 件名=試飲会(更新) | 時刻=19:00',
+        '例: 予定変更 <eventId> | 日付=2026-05-10 | 時刻=19:00 | 所要=90 | 場所=marugo',
+      ].join('\n'),
+    }
+  }
+
+  const parts = body.split('|').map((p) => p.trim()).filter((p) => p.length > 0)
+  if (parts.length < 2) {
+    return {
+      command: null,
+      error: [
+        '変更内容を指定してください。',
+        '例: 予定変更 <eventId> | 件名=試飲会(更新)',
+      ].join('\n'),
+    }
+  }
+
+  const eventId = parts[0]
+  if (!/^[a-zA-Z0-9@._-]+$/.test(eventId)) {
+    return { command: null, error: 'eventId の形式が不正です。予定一覧に表示された ID を指定してください。' }
+  }
+
+  let title: string | undefined
+  let date: string | undefined
+  let time: string | undefined
+  let durationMin: number | undefined
+  let location: string | undefined
+  let clearLocation = false
+
+  for (let i = 1; i < parts.length; i += 1) {
+    const segment = parts[i]
+    const eqIdx = segment.indexOf('=')
+    if (eqIdx <= 0) {
+      return { command: null, error: `変更指定は key=value 形式で入力してください: ${segment}` }
+    }
+    const rawKey = segment.slice(0, eqIdx).trim().toLowerCase()
+    const value = normalizeSpaces(segment.slice(eqIdx + 1)).trim()
+    if (!value) {
+      return { command: null, error: `値が空です: ${segment}` }
+    }
+
+    if (rawKey === '件名' || rawKey === 'タイトル' || rawKey === 'title') {
+      title = cleanCalendarTitle(value)
+      if (!title) return { command: null, error: '件名が不正です。' }
+      continue
+    }
+    if (rawKey === '日付' || rawKey === 'date') {
+      if (!isValidDate(value)) return { command: null, error: '日付は YYYY-MM-DD 形式で指定してください。' }
+      date = value
+      continue
+    }
+    if (rawKey === '時刻' || rawKey === '時間' || rawKey === 'time') {
+      if (!isValidTime(value)) return { command: null, error: '時刻は HH:mm 形式（24時間）で指定してください。' }
+      time = value
+      continue
+    }
+    if (rawKey === '所要' || rawKey === '所要分' || rawKey === 'duration' || rawKey === 'durationmin') {
+      const parsed = Number(value)
+      if (!Number.isInteger(parsed) || parsed <= 0 || parsed > MAX_DURATION_MIN) {
+        return { command: null, error: `所要時間は1〜${MAX_DURATION_MIN}分で指定してください。` }
+      }
+      durationMin = parsed
+      continue
+    }
+    if (rawKey === '場所' || rawKey === 'location') {
+      const compact = normalizeForRuleParsing(value).replace(/\s+/g, '')
+      if (/^(なし|空|未設定|クリア|削除|消去)$/.test(compact)) {
+        clearLocation = true
+        location = undefined
+      } else {
+        const cleanedLocation = cleanCalendarLocation(value)
+        if (!cleanedLocation) return { command: null, error: '場所の指定が不正です。' }
+        location = cleanedLocation
+        clearLocation = false
+      }
+      continue
+    }
+    return { command: null, error: `未対応の更新キーです: ${rawKey}` }
+  }
+
+  if (!title && !date && !time && typeof durationMin === 'undefined' && !location && !clearLocation) {
+    return { command: null, error: '変更項目がありません。件名・日付・時刻・所要・場所のいずれかを指定してください。' }
+  }
+
+  return {
+    command: {
+      kind: 'update',
+      eventId,
+      ...(title ? { title } : {}),
+      ...(date ? { date } : {}),
+      ...(time ? { time } : {}),
+      ...(typeof durationMin === 'number' ? { durationMin } : {}),
+      ...(location ? { location } : {}),
+      ...(clearLocation ? { clearLocation: true } : {}),
+    },
+    error: null,
+  }
 }
 
 function parseCalendarListScope(bodyRaw: string): Omit<Extract<CalendarCommand, { kind: 'list' }>, 'kind'> | null {
@@ -3884,6 +4597,7 @@ function canonicalizeListScopeText(raw: string): string {
 async function buildCalendarReplyMessage(
   parseResult: CalendarCommandParseResult,
   calendarEnvState: CalendarEnvState,
+  supabase: ReturnType<typeof createClient>,
   roomId: string,
   userId: string | null,
 ): Promise<string> {
@@ -3910,7 +4624,13 @@ async function buildCalendarReplyMessage(
         userId,
       )
     }
-    return await listCalendarEventsReply(parseResult.command, calendarEnvState.env)
+    if (parseResult.command.kind === 'update') {
+      return await updateCalendarEventReply(
+        parseResult.command,
+        calendarEnvState.env,
+      )
+    }
+    return await listCalendarEventsReply(parseResult.command, calendarEnvState.env, supabase, roomId, userId)
   } catch (err) {
     console.error('Calendar command failed:', err)
     return `カレンダー操作に失敗しました。${err instanceof Error ? err.message : String(err)}`
@@ -3963,6 +4683,124 @@ async function createCalendarEventReply(
     `開始: ${startText}`,
     `終了: ${endText}`,
   ].join('\n')
+}
+
+async function updateCalendarEventReply(
+  command: CalendarUpdateCommand,
+  env: CalendarEnv,
+): Promise<string> {
+  const result = await updateCalendarEvent(command, env)
+  if (!result.ok) {
+    return `予定変更に失敗しました。${result.error}`
+  }
+
+  const detail = formatEventDetailBlock(result.event, env.timezone)
+  return [
+    '予定を変更しました。',
+    `ID: ${result.event.id ?? command.eventId}`,
+    `件名: ${detail.title}`,
+    `日付: ${detail.date}`,
+    `時間: ${detail.time}`,
+    `内容: ${detail.content}`,
+  ].join('\n')
+}
+
+async function updateCalendarEvent(
+  command: CalendarUpdateCommand,
+  env: CalendarEnv,
+): Promise<{ ok: true; event: GoogleCalendarEvent } | { ok: false; error: string }> {
+  const accessToken = await fetchGoogleAccessToken(env)
+  const eventUrl = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events/${encodeURIComponent(command.eventId)}`
+  const eventResponse = await fetch(eventUrl, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+  })
+  if (!eventResponse.ok) {
+    const text = await eventResponse.text()
+    if (eventResponse.status === 404) {
+      return { ok: false, error: '指定した ID の予定が見つかりません。予定一覧の ID を確認してください。' }
+    }
+    return { ok: false, error: `Google Calendar API error (${eventResponse.status}): ${text}` }
+  }
+
+  const existing = await eventResponse.json() as GoogleCalendarEvent
+  const payload: Record<string, unknown> = {}
+  if (command.title) payload.summary = command.title
+  if (command.clearLocation) {
+    payload.location = ''
+  } else if (command.location) {
+    payload.location = command.location
+  }
+
+  const needsScheduleUpdate =
+    !!command.date
+    || !!command.time
+    || typeof command.durationMin === 'number'
+  if (needsScheduleUpdate) {
+    const existingStart = existing.start?.dateTime
+    const existingEnd = existing.end?.dateTime
+    if (!existingStart || !existingEnd) {
+      return { ok: false, error: '終日予定は LINE からの時間変更に未対応です。Google カレンダーで編集してください。' }
+    }
+    const existingStartDate = new Date(existingStart)
+    const existingEndDate = new Date(existingEnd)
+    if (Number.isNaN(existingStartDate.getTime()) || Number.isNaN(existingEndDate.getTime())) {
+      return { ok: false, error: '既存予定の日時が不正なため変更できません。' }
+    }
+
+    const fallbackDate = formatDateOnlyForLine(existingStartDate, env.timezone).replace(/\//g, '-')
+    const fallbackTime = formatTimeOnlyForLine(existingStartDate, env.timezone)
+    const fallbackDuration = Math.max(
+      1,
+      Math.min(
+        MAX_DURATION_MIN,
+        Math.round((existingEndDate.getTime() - existingStartDate.getTime()) / (60 * 1000)),
+      ),
+    )
+
+    const nextDate = command.date ?? fallbackDate
+    const nextTime = command.time ?? fallbackTime
+    const nextDuration = typeof command.durationMin === 'number' ? command.durationMin : fallbackDuration
+    if (!isValidDate(nextDate)) return { ok: false, error: '変更後の日付が不正です。' }
+    if (!isValidTime(nextTime)) return { ok: false, error: '変更後の時刻が不正です。' }
+    if (!Number.isInteger(nextDuration) || nextDuration <= 0 || nextDuration > MAX_DURATION_MIN) {
+      return { ok: false, error: `変更後の所要時間は1〜${MAX_DURATION_MIN}分で指定してください。` }
+    }
+
+    const nextEnd = addMinutesToLocalDateTime(nextDate, nextTime, nextDuration)
+    if (!nextEnd) return { ok: false, error: '変更後の終了時刻を計算できませんでした。' }
+    payload.start = {
+      dateTime: `${nextDate}T${nextTime}:00+09:00`,
+      timeZone: CALENDAR_CREATE_TIMEZONE,
+    }
+    payload.end = {
+      dateTime: `${nextEnd.date}T${nextEnd.time}:00+09:00`,
+      timeZone: CALENDAR_CREATE_TIMEZONE,
+    }
+  }
+
+  if (Object.keys(payload).length === 0) {
+    return { ok: false, error: '変更項目がありません。' }
+  }
+
+  const updateResponse = await fetch(eventUrl, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!updateResponse.ok) {
+    const text = await updateResponse.text()
+    return { ok: false, error: `Google Calendar API error (${updateResponse.status}): ${text}` }
+  }
+
+  const updated = await updateResponse.json() as GoogleCalendarEvent
+  return { ok: true, event: updated }
 }
 
 async function createCalendarEvent(
@@ -4060,6 +4898,9 @@ function addMinutesToLocalDateTime(
 async function listCalendarEventsReply(
   command: Extract<CalendarCommand, { kind: 'list' }>,
   env: CalendarEnv,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
 ): Promise<string> {
   const range = resolveListRange(command)
   const accessToken = await fetchGoogleAccessToken(env)
@@ -4099,6 +4940,8 @@ async function listCalendarEventsReply(
     return `予定はありません（${range.label}）`
   }
 
+  await savePendingCalendarUpdateContext(supabase, roomId, userId, items)
+
   const heading = command.keyword
     ? `予定一覧（${range.label} / キーワード: ${command.keyword}）`
     : `予定一覧（${range.label}）`
@@ -4108,6 +4951,7 @@ async function listCalendarEventsReply(
     const item = items[i]
     const detail = formatEventDetailBlock(item, env.timezone)
     lines.push(`${i + 1}.`)
+    lines.push(`  ID: ${item.id ?? '(ID不明)'}`)
     lines.push(`  日付: ${detail.date}`)
     lines.push(`  時間: ${detail.time}`)
     lines.push(`  予定: ${detail.title}`)
@@ -4115,6 +4959,12 @@ async function listCalendarEventsReply(
     if (i < items.length - 1) {
       lines.push('')
     }
+  }
+  lines.push('')
+  if (items.length === 1) {
+    lines.push('この予定を変更する場合は「時間を19:00に変更」のように続けて送ってください。')
+  } else {
+    lines.push('表示した予定を変更する場合は「2件目の時間を19:00に変更」のように送ってください。')
   }
   return lines.join('\n')
 }

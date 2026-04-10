@@ -1,362 +1,447 @@
-# LINE Management
+# LINE Management — 運用説明書
 
-LINEトークを取り込み、AIで意図判定し、
-- カレンダー登録/照会
-- 会話検索（トーク履歴 + 資料）
-- 定期要約配信
-- 翌日予定通知
-- Gmail予約メール通知
+LINE のトークを Supabase に蓄積し、**Groq（Llama 3.3）** で意図を判定して次を実行する運用アプリです。
 
-を実行する Supabase Edge Functions ベースの運用アプリです。
+- **Google Calendar** への予定登録・照会（自然文・コマンド両対応）
+- **会話検索**（トーク履歴＋アップロード資料の本文）
+- **定期要約配信**（全体ルーム／ルーム別）
+- **翌日予定通知**
+- **Gmail** の予約系メールを検知して LINE 通知
+- **LINE メディア**の取得・保存と、**資料ライブラリ**（TXT / PDF / Word / Excel）
 
----
-
-## 1. アーキテクチャ概要
-
-- 受信: `line-webhook`
-- 管理API: `admin-api`
-- 管理UI: `index.html`（静的） / `admin-ui`（Edge Function配信）
-- メディア/資料UI: `media.html`
-- 定期処理: `summary-cron`（要約・翌日予定） / `gmail-alert-cron`（Gmail予約通知）
-- 診断: `check-cron`
-- DB: Supabase Postgres（`line_messages` ほか）
-- Storage: `line-media`, `line-documents`
+バックエンドは **Supabase Edge Functions（Deno）**、データは **Postgres + Storage** です。
 
 ---
 
-## 2. このアプリでできること（機能網羅）
+## 目次
 
-### 2.1 LINE受信・保存
-
-- LINE Webhook（署名検証あり）でメッセージ受信
-- `line_messages` に全メッセージを保存（テキスト以外は説明タグで保存）
-- ルーム表示名の自動同期（group/room summary API）
-
-### 2.2 LINEメディア保存
-
-- 保存対象: `image`, `video`, `audio`, `file`
-- LINE Content API から実データ取得し Storage へ保存
-- メタ情報を `line_message_media` に保存
-- 制限:
-  - 1ファイル上限: 管理画面設定 `media_upload_max_mb`（1〜20MB、既定10MB未満）
-  - 絶対上限: 20MB（LINE側レスポンスヘッダ検査）
-  - 総容量上限: 500MB（超過時は保存スキップ/ロールバック）
-
-### 2.3 AI一次判定（テキスト）
-
-Groq による一次分類:
-- `create_calendar`
-- `list_calendar`
-- `search_messages`
-- `none`
-
-低信頼時は確認プロンプトを返す（設定条件あり）。
-
-### 2.4 予定登録（Google Calendar）
-
-- 明示コマンド: `予定登録 ...`, `予定追加 ...`
-- 自然文からのAI抽出登録
-- 日時・件名・場所の抽出
-- 件名は文脈重視で抽出（日時語を除外、汎用語のみにならないよう補正）
-- 場所は `「Xで試飲会」` 形式や `場所:` 行から推定
-- 複数予定文の自動登録（最大5件）
-
-### 2.5 予定確認（Google Calendar照会）
-
-- 明示コマンド: `予定確認`, `予定一覧`, `予定報告`
-- 自然文質問から照会スコープ推定
-- スコープ対応:
-  - 今日/明日/今週/来週
-  - 今月/来月
-  - 日付指定（YYYY-MM-DD / 4月10日 など）
-  - 年月指定/年指定
-  - 今後30日
-
-### 2.6 登録前確認フロー（pending）
-
-- 自動登録しないケースでは候補を提示し、`はい` で登録 / `いいえ` でキャンセル
-- pending有効期限: 30分
-- pending中に修正可能:
-  - 例: `場所をmarugoに変更`
-  - 例: `時間を19:00に変更`
-  - 例: `件名をシェフミーティングに変更`
-
-### 2.7 会話検索（トーク + 資料）
-
-- 明示コマンド/自然文の両対応
-- 検索対象:
-  - `line_messages.content`
-  - `line_search_documents`（ファイル名 + 抽出テキスト）
-- 期間指定:
-  - `60/120/180/365/730/1095日`
-  - `全期間`（0）
-- スコープ:
-  - このルーム
-  - 全ルーム横断
-- 一致件数が適量ならAI要約を付与
-
-### 2.8 定期要約配信（summary-cron）
-
-- 配信時刻は全体/ルーム別で設定可能（0〜23時）
-- 全体配信（`LINE_OVERALL_ROOM_ID`）
-- ルーム個別配信（`send_room_summary=true` のルーム）
-- 最終回集計モード:
-  - `independent`（各回独立）
-  - `daily_rollup`（1日最終回で日次集計）
-- 処理タイミング:
-  - `after_each_delivery`
-  - `end_of_day`
-
-### 2.9 翌日予定通知
-
-- 全体設定 + ルーム別ON/OFF
-- 指定時刻に翌日の予定を配信
-- `予定がある日だけ通知` オプション
-- 表示上限件数設定（1〜50）
-
-### 2.10 Gmail予約メール通知（リアルタイム）
-
-- 専用 `gmail-alert-cron` が毎分実行
-- Gmail unread から予約関連メールを抽出
-- ルール抽出 + 必要時AI抽出で予約情報を整形
-- 対象ルームへLINE push
-- 通知済みメールは `gmail_reservation_alert_logs` で重複防止
-
-### 2.11 管理画面（index.html / admin-ui）
-
-- 管理トークン認証（`x-admin-token`）
-- グローバル設定編集
-- ルーム個別設定の追加/更新/削除
-- ルーム行のドラッグ＆ドロップ並び替え（`room_sort_order` 永続化）
-- 配信ログ閲覧
-- 今すぐ要約実行（手動）
-- Gmail連携先確認
-- ストレージ使用量表示
-
-### 2.12 メディア/資料ビューア（media.html）
-
-- メディア一覧（種別・ルーム絞り込み、ページング）
-- メディア前後文脈表示
-- メディア削除
-- メディア容量進捗表示
-- メディアアップロード上限（MB）変更
-- 資料ライブラリ:
-  - アップロード（TXT/PDF/DOCX/XLSX）
-  - ルーム紐付け（または共通資料）
-  - 一覧/絞り込み/削除
-
-### 2.13 診断機能
-
-- `check-cron` で cron/job/設定状態を確認
-- `summary_settings` と cron 関数定義の確認
+1. [システム概要](#1-システム概要)
+2. [アーキテクチャ](#2-アーキテクチャ)
+3. [コンポーネント別の役割](#3-コンポーネント別の役割)
+4. [静的 UI の公開方法](#4-静的-ui-の公開方法)
+5. [LINE 上でできること（利用者向け）](#5-line-上でできること利用者向け)
+6. [ルーム設定と挙動マトリクス](#6-ルーム設定と挙動マトリクス)
+7. [AI（Groq）の役割と閾値](#7-aigroqの役割と閾値)
+8. [会話検索の仕様](#8-会話検索の仕様)
+9. [資料ライブラリと本文抽出](#9-資料ライブラリと本文抽出)
+10. [管理 API（admin-api）リファレンス](#10-管理-apiadmin-apiリファレンス)
+11. [データベース](#11-データベース)
+12. [Storage](#12-storage)
+13. [RPC（代表）](#13-rpc代表)
+14. [環境変数（Secrets）一覧](#14-環境変数secrets一覧)
+15. [セットアップとデプロイ](#15-セットアップとデプロイ)
+16. [スケジュール（pg_cron）と DB カスタム設定](#16-スケジュールpg_cronと-db-カスタム設定)
+17. [定数・上限値一覧](#17-定数上限値一覧)
+18. [セキュリティ](#18-セキュリティ)
+19. [GitHub Actions](#19-github-actions)
+20. [トラブルシューティング](#20-トラブルシューティング)
+21. [ローカル開発メモ](#21-ローカル開発メモ)
+22. [変更履歴（抜粋）](#22-変更履歴抜粋)
 
 ---
 
-## 3. 返信・自動登録の挙動（重要）
+## 1. システム概要
 
-ルーム設定の主キー:
-- `is_enabled`（有効）
-- `bot_reply_enabled`（自動応答）
-- `calendar_ai_auto_create_enabled`（AI自動登録）
-- `message_search_enabled`（会話検索応答）
+| 区分 | 内容 |
+|------|------|
+| 受信 | LINE Messaging API Webhook → `line-webhook` |
+| 管理 | ブラウザ UI → `admin-api`（JSON API） |
+| 定期 | `summary-cron`（要約・翌日通知・メッセージ保持クリーンアップ等）、`gmail-alert-cron`（Gmail 予約通知） |
+| 診断 | `check-cron`（DB 直結で cron / 設定スナップショット） |
+| データ | Postgres（メッセージ・設定・ログ・資料メタ等）、Storage（メディア・資料ファイル） |
 
-挙動の要点:
-
-- `is_enabled=false`
-  - 返信/AI判定/登録処理は実施しない
-  - ただしメッセージ保存とメディア保存は継続
-
-- `is_enabled=true` かつ `bot_reply_enabled=true`
-  - 通常の返信あり（確認メッセージ含む）
-  - AI自動登録は `calendar_ai_auto_create_enabled` と `CALENDAR_AI_AUTO_CREATE_ENABLED` の両方で制御
-
-- `is_enabled=true` かつ `bot_reply_enabled=false`
-  - 返信はしない（サイレント）
-  - 条件によりカレンダー登録だけ実行される（無言登録）
-
-- `message_search_enabled=false`
-  - 会話検索応答を返さない
-  - 低信頼の確認プロンプト抑止にも影響
+メッセージは原則すべて `line_messages` に保存されます。テキスト以外はプレースホルダ文＋メディアタグで保存し、画像等は Content API 経由で Storage に格納します。
 
 ---
 
-## 4. LINEコマンド仕様
+## 2. アーキテクチャ
 
-### 4.1 予定登録
-
-```text
-予定登録 2026-05-07 14:30 60 定例ミーティング
-```
-
-- 形式: `予定登録 YYYY-MM-DD HH:mm [durationMin] タイトル`
-- `durationMin` 省略時は60分
-
-### 4.2 予定確認
-
-```text
-予定確認 今日
-予定確認 来週
-予定確認 2026-05-07
-予定確認 2026年5月
-予定確認 今後
-```
-
-### 4.3 会話検索
-
-```text
-会話検索 試飲会
-会話検索 120日 発注
-会話検索 全期間 notebook lm
-会話検索 このルーム 人参
-会話検索 全ルーム 価格
-```
-
-### 4.4 pending確認中の修正
-
-```text
-場所をmarugoに変更
-時間を19:00に変更
-件名をシェフミーティングに変更
+```mermaid
+flowchart LR
+  subgraph clients [クライアント]
+    LINE[LINE アプリ]
+    Browser[ブラウザ管理UI]
+  end
+  subgraph edge [Supabase Edge Functions]
+    WH[line-webhook]
+    API[admin-api]
+    UI[admin-ui]
+    SUM[summary-cron]
+    GMAIL[gmail-alert-cron]
+    CHK[check-cron]
+  end
+  subgraph supa [Supabase]
+    PG[(Postgres)]
+    ST[(Storage)]
+    CRON[pg_cron]
+  end
+  subgraph ext [外部]
+    GCAL[Google Calendar]
+    GROQ[Groq API]
+    GAPI[Gmail API]
+  end
+  LINE --> WH
+  Browser --> API
+  Browser --> UI
+  WH --> PG
+  WH --> ST
+  WH --> GCAL
+  WH --> GROQ
+  API --> PG
+  API --> ST
+  SUM --> PG
+  SUM --> GROQ
+  SUM --> GCAL
+  GMAIL --> PG
+  GMAIL --> GAPI
+  GMAIL --> GROQ
+  CRON --> SUM
+  CRON --> GMAIL
+  CHK --> PG
 ```
 
 ---
 
-## 5. 管理API（admin-api）
+## 3. コンポーネント別の役割
 
-認証: すべて `x-admin-token` 必須
+### 3.1 `line-webhook`
 
-- `GET /state`
-  - 全体設定、ルーム設定、ルーム概要、配信ログ、ストレージ使用量
-- `GET /gmail/account`
-  - Gmail連携状態チェック
-- `GET /media`
-  - メディア一覧
-- `DELETE /media/:id`
-  - メディア削除
-- `GET /documents`
-  - 資料一覧
-- `POST /documents`
-  - 資料アップロード（TXT/PDF/DOCX/XLSX）
-- `DELETE /documents/:id`
-  - 資料削除
-- `PUT /settings/media-upload-limit`
-  - メディア上限MB変更
-- `PUT /auth/token`
-  - 管理トークン更新（DBにはハッシュ保存）
-- `PUT /settings/global`
-  - 全体設定更新
-- `PUT /settings/rooms`
-  - ルーム設定 upsert
-- `DELETE /settings/rooms/:room_id`
-  - ルーム設定のみ削除
-- `DELETE /rooms/:room_id`
-  - ルーム本体データ削除（messages/media/documents/settings）
-- `POST /actions/run-summary`
-  - 要約処理を手動実行
+- **POST** のみ。`LINE_CHANNEL_SECRET` 設定時は **署名ヘッダ必須**（欠如／不一致は 403）。
+- イベントごとに `line_messages` へ保存。テキスト以外は `toStoredMessageContent` により種別ごとの説明文（例: `【画像が送信されました】[[MEDIA:…]]`、位置情報・スタンプ等も区別）。
+- 保存対象メディア種別: `image`, `video`, `audio`, `file`（定数 `STORABLE_LINE_MEDIA_TYPES`）。取得後 `line-media` バケットへアップロードし `line_message_media` にメタデータ保存。
+- メディア: ルーム別・合計容量上限、1 ファイル上限（設定値と LINE 20MB 上限の両方）を実装。
+- テキストメッセージ: 明示コマンド解析、**pending カレンダー確認**、**Groq 一次意図判定**（calendar 作成／一覧／会話検索／none）、各種ヒューリスティック（単発・複数イベント告知、検索っぽい自然文など）。
+- 返信は LINE Reply API。最大 **5 メッセージ**に分割する制御あり。
 
----
+### 3.2 `admin-api`
 
-## 6. データモデル（主要テーブル/バケット）
+- すべて **`x-admin-token`** 必須。トークンは DB の **SHA-256 ハッシュ**と比較（`secureEqual`）。DB にハッシュが無い場合は `ADMIN_DASHBOARD_TOKEN`（平文）との照合のみ。
+- 設定・メディア・資料・ルーム削除・要約手動起動など REST 風エンドポイントを提供（詳細は [§10](#10-管理-apiadmin-apiリファレンス)）。
+- **資料 POST `/documents`**: `multipart/form-data` の **`file` のみ**受理（クライアントからの `extracted_text` は受け付けない）。サーバ側で TXT / PDF / DOCX / XLSX の本文抽出し `line_search_documents.extracted_text` に保存。
 
-### テーブル
+### 3.3 `admin-ui`
 
-- `line_messages`
-  - LINE受信メッセージ本体
-- `summary_settings`
-  - 全体設定（配信時刻、保持期間、翌日通知、管理トークンハッシュ等）
-- `room_summary_settings`
-  - ルーム個別設定（有効/自動応答/自動登録/会話検索/Gmail通知/並び順など）
-- `summary_delivery_logs`
-  - 配信/通知実行ログ
-- `calendar_pending_confirmations`
-  - カレンダー確認待ち候補
-- `line_message_media`
-  - LINEメディアメタデータ
-- `line_search_documents`
-  - 検索資料メタデータ（TXT/PDF/DOCX/XLSX）
-- `gmail_reservation_alert_logs`
-  - Gmail通知済み記録
+- Edge Function から **単一 HTML** を返す管理画面（`referrerPolicy: no-referrer`、外部 CDN フォント不使用）。
+- 内部で `admin-api` と同じオリジンの相対パスではなく、**Supabase Functions の URL** へ `fetch` する実装（デプロイ先 URL に依存）。
 
-### Storageバケット
+### 3.4 `summary-cron`
 
-- `line-media`
-- `line-documents`
+- pg_cron 等から定期起動。全体／ルーム別の **要約配信**、**翌日予定通知**、**メッセージ保持期間**に基づくクリーンアップ、`message_cleanup_timing` / `last_delivery_summary_mode` に応じた処理分岐。
+- 要約文面生成に **Groq**（`llama-3.3-70b-versatile`）を使用。
+- Gmail 関連の補助処理（環境変数に応じ）を含む場合あり（実装参照）。
 
-### 代表RPC
+### 3.5 `gmail-alert-cron`
 
-- `invoke_summary_cron(force_run boolean)`
-- `invoke_gmail_alert_cron()`
-- `get_room_overview()`
-- `get_storage_usage_stats()`
-- `get_line_media_usage_stats(...)`
-- `get_line_document_usage_stats(...)`
+- **毎分**想定で起動（pg_cron ジョブ `gmail-alert-cron-job`）。
+- Gmail API で unread を検索（デフォルトクエリ: `is:inbox is:unread newer_than:7d (予約 OR reservation OR booking)`）。ルール抽出に加え、設定により **Groq** で予約情報抽出。
+- 通知済みは `gmail_reservation_alert_logs` で重複防止。ルーム別 `gmail_reservation_alert_enabled` 等に連動。
+
+### 3.6 `check-cron`
+
+- 環境変数 **`SUPABASE_DB_URL`**（Postgres 接続文字列）必須。`postgresjs` で SSL 接続。
+- `cron.job` 一覧、`invoke_summary_cron` / `invoke_gmail_alert_cron` の定義先頭、`summary_settings`、`custom.*` 設定の有無などを JSON で返す診断用。**スキーマは変更しない。**
+
+### 3.7 リポジトリ内の静的ファイル
+
+| ファイル | 役割 |
+|----------|------|
+| `index.html` | 管理画面（プロジェクト URL 固定表示、`localStorage` に管理トークン） |
+| `media.html` | メディア一覧・容量・**資料ライブラリ**（アップロードは `admin-api` へ FormData） |
+| `admin-dashboard/index.html` | `../index.html` へリダイレクト |
+| `admin-dashboard/media.html` | `../media.html` へリダイレクト |
 
 ---
 
-## 7. 環境変数（Secrets）
+## 4. 静的 UI の公開方法
 
-### 7.1 必須（基本動作）
+Edge Functions のデプロイだけでは **`index.html` / `media.html` は自動では本番に載りません。** 次のいずれかで配信してください。
 
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `LINE_CHANNEL_SECRET`
-- `LINE_CHANNEL_ACCESS_TOKEN`
-- `LINE_OVERALL_ROOM_ID`
-- `ADMIN_DASHBOARD_TOKEN`
-- `GROQ_API_KEY`
+- **GitHub Pages**（本リポジトリのワークフロー `pages build and deployment` と併用）
+- 任意の静的ホスティング（S3 + CloudFront、Netlify、Vercel 等）
+- Supabase Storage 等への手動アップロード＋適切な CORS／認証設計
 
-### 7.2 Google Calendar連携
-
-- `GOOGLE_CALENDAR_ID`
-- `GOOGLE_SERVICE_ACCOUNT_EMAIL`
-- `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY`
-- `GOOGLE_CALENDAR_TIMEZONE`（省略時 `Asia/Tokyo`）
-
-### 7.3 Gmail通知
-
-- `GMAIL_ALERT_ENABLED`
-- `GMAIL_CLIENT_ID`
-- `GMAIL_CLIENT_SECRET`
-- `GMAIL_REFRESH_TOKEN`
-- `GMAIL_ALERT_QUERY`（任意）
-- `GMAIL_ALERT_MAX_MESSAGES`（任意）
-- `LINE_GMAIL_ALERT_ROOM_ID`（任意）
-- `GMAIL_ALERT_AI_ENABLED`（任意）
-- `GMAIL_ALERT_AI_MAX_BODY_CHARS`（任意）
-
-### 7.4 AI登録制御
-
-- `CALENDAR_AI_AUTO_CREATE_ENABLED`
-  - `false` で通常のAI自動登録を抑止
-  - ただしサイレント運用時の登録動作は別条件で発生し得る（現行仕様）
-
-### 7.5 診断
-
-- `SUPABASE_DB_URL`（`check-cron` 用）
+管理画面の API 呼び出し先は、HTML 内の **`FIXED_PROJECT_URL`**（または同等のベース URL）と、ブラウザに保存したトークンに依存します。リポジトリをフォーク／複製した場合は **自プロジェクトの Supabase URL に合わせて変更**してください。
 
 ---
 
-## 8. セットアップ
+## 5. LINE 上でできること（利用者向け）
 
-1. プロジェクトを Supabase にリンク
+### 5.1 明示コマンド（ルールベース優先）
 
-```bash
-supabase link --project-ref <project-ref>
-```
+- **予定登録**: `予定登録 YYYY-MM-DD HH:mm [durationMin] タイトル`、および `予定追加 …`（同一系）
+- **予定変更**: `予定変更 <eventId> | 件名=... | 日付=YYYY-MM-DD | 時刻=HH:mm | 所要=分 | 場所=...`（必要な項目だけ指定、`場所=なし` でクリア）
+- **予定確認**: `予定確認`, `予定一覧`, `予定報告` ＋ スコープ表現（今日／来週／日付 等）
+- **会話形式の予定変更**: 予定確認の直後30分以内は、`時間を19:00に変更` や `2件目の件名を...に変更` のように続けて変更可能
+- **会話検索**: `会話検索` / `トーク検索` / `履歴検索` / `チャット検索` ＋ `要約|確認` などのプレフィックスにマッチする場合も明示扱い（`isExplicitBotCommandText`）
 
-2. DBマイグレーション適用
+### 5.2 会話検索（ルールパース）
 
-```bash
-supabase db push
-```
+次を満たすと「会話検索コマンド」としてパースされます。
 
-3. Secrets設定
+- **明示**: 文頭付近に `会話|トーク|履歴|チャット` ＋ `検索|要約|確認|まとめ…` の組合せ、**または**
+- **自然文**: `会話|トーク|履歴|チャット|メッセージ|発言` かつ `検索|教えて|ありますか|記述|言及…` 等の意図語を含む
 
-```bash
-supabase secrets set KEY=VALUE --project-ref <project-ref>
-```
+**期間**（`detectMessageSearchDays`）: `全期間|無制限|すべて…` → 0 日。`60/120/180/365/730/1095` 日や `半年` `1年` 等の別表記。未指定時は DB の `message_retention_days` を既定に使用。
 
-4. Functionsデプロイ
+**スコープ**（`detectMessageSearchScope`）: `このルーム|このグループ|…` → `current_room`。`全ルーム|他ルーム|…` → `all_rooms`。**既定は `all_rooms`**。
+
+キーワードは上記語を除去して抽出。空ならエラーメッセージを返します。
+
+会話検索の実行順は次の通りです。
+
+- まず `line_messages`（保存済みの LINE 会話ログ）のみ検索
+- ヒットが 0 件のとき、**資料ライブラリ検索に進むかを確認**（`はい` / `いいえ`、30 分有効）
+- `はい` の場合のみ `line_search_documents` を検索（**`original_file_name` に `[LINE]` を含む資料だけ**を対象）
+
+### 5.3 登録前確認（pending）
+
+低信頼・要確認のカレンダー登録は `calendar_pending_confirmations` に保持。**有効期限 30 分**。ユーザーは `はい` / `いいえ` で確定・キャンセル。pending 中は「場所を…変更」「時間を…」「件名を…」などの **修正文**にも対応（実装: `looksLikePendingCorrectionText` 等）。
+
+また、次の pending も保持します。
+
+- `message_search_library_pending_confirmations`: 会話検索ヒット 0 件時の「資料ライブラリも検索するか」確認
+- `calendar_update_pending_targets`: 予定確認直後の会話形式変更（例: `2件目の時間を19:00に変更`）の対象候補
+
+### 5.4 自然文によるカレンダー／検索
+
+- Groq で `create_calendar` / `list_calendar` / `search_messages` / `none` を判定（詳細ルールはプロンプト内。業務連絡・周知・添付共有は基本 `none`）。
+- 一次判定がカレンダー作成を取りこぼした場合の **フォールバック**: 「単発イベント告知」「複数日程リスト」などのヒューリスティックで `forceAiCalendarCreate` 等を立てる経路あり。
+
+### 5.5 メッセージ種別の保存表現（検索対象の `content`）
+
+| LINE `type` | 保存例 |
+|-------------|--------|
+| `text` | 本文そのまま |
+| `image` / `video` / `audio` / `file` | `【…が送信されました】` ＋ `[[MEDIA:lineMessageId]]`（該当時） |
+| `location` | 位置情報の説明 |
+| `sticker` | スタンプ送信の説明 |
+| その他 | `【その他のメディア (type) が送信されました】` |
+
+---
+
+## 6. ルーム設定と挙動マトリクス
+
+`room_summary_settings` を中心に、次が LINE 応答・処理に効きます。
+
+| フラグ | 意味 |
+|--------|------|
+| `is_enabled` | ルームの Bot 処理全体の有効／無効 |
+| `bot_reply_enabled` | ユーザーへの **返信** の有無 |
+| `calendar_ai_auto_create_enabled` | AI による **自動カレンダー登録**（環境変数 `CALENDAR_AI_AUTO_CREATE_ENABLED` と併用） |
+| `message_search_enabled` | **会話検索の応答**（低信頼時の確認プロンプト抑止にも影響） |
+| `send_room_summary` | ルーム別要約配信 |
+| `gmail_reservation_alert_enabled` | Gmail 予約通知のルーム配信 |
+| `calendar_tomorrow_reminder_enabled` | 翌日予定通知（全体設定と組合せ） |
+
+**要点**
+
+- `is_enabled=false` → **返信・AI 判定・（通常の）登録処理はしない**。ただし **メッセージ保存とメディア保存は継続**。
+- `is_enabled=true` かつ `bot_reply_enabled=true` → 通常返信あり。
+- `is_enabled=true` かつ `bot_reply_enabled=false` → **サイレント**だが、条件により **カレンダー登録のみ**実行され得る。
+
+---
+
+## 7. AI（Groq）の役割と閾値
+
+- **API**: `https://api.groq.com/openai/v1/chat/completions`
+- **モデル（現行実装）**: **`llama-3.3-70b-versatile`**（`line-webhook` / `summary-cron` / `gmail-alert-cron`）
+- **温度**: 意図系は `0`
+
+`line-webhook` における信頼度の目安（定数）:
+
+| 定数 | 値 | 用途の一例 |
+|------|-----|------------|
+| `AI_MIN_CONFIDENCE` | 0.82 | 一次意図の採用 |
+| `AI_CONFIRMATION_MIN_CONFIDENCE` | 0.68 | 確認プロンプト |
+| `AI_LIST_MIN_CONFIDENCE` | 0.72 | カレンダー一覧系 |
+| `AI_MESSAGE_SEARCH_MIN_CONFIDENCE` | 0.72 | 会話検索の AI 抽出 |
+| `AI_PRIMARY_INTENT_MIN_CONFIDENCE` | 0.72 | 主意図 |
+| `AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE` | 0.60 | 主意図の確認 |
+| `GMAIL_ALERT_AI_MIN_CONFIDENCE`（gmail-alert-cron） | 0.55 | メール本文からの予約抽出 |
+
+`GROQ_API_KEY` が無い場合、Groq 依存の経路はスキップ／縮退します。
+
+---
+
+## 8. 会話検索の仕様
+
+### 8.1 データ取得
+
+- 第一段階は `line_messages` のみ対象（`created_at` で期間フィルタ後、**新しい順**に最大 **`SEARCH_MAX_FETCH_ROWS`（800）** 件）。
+- スコープが `current_room` のときは `room_id` で絞り込み。
+- 第一段階でヒット 0 件の場合のみ、確認応答を経て資料ライブラリ検索へ進む。
+- 資料ライブラリ検索では `line_search_documents` を期間フィルタ後に最大 **`SEARCH_MAX_DOCUMENT_ROWS`（300）** 件取得し、**ファイル名に `[LINE]` を含む資料のみ**対象にする。
+
+### 8.2 ヒット判定
+
+- 資料は `original_file_name + "\n" + extracted_text` を連結してキーワード照合。
+- キーワードは **空白・読点でトークン分割**し、**各トークンがすべて一致**すればヒット（AND）。トークンは `expandKeywordVariants` により **類義語展開**（例: `ミーティング` ↔ `meeting` ↔ `会議` 等のグループ、`KEYWORD_SYNONYM_GROUPS`）。
+- 正規化: Unicode NFKC、小文字化、記号・空白の調整、**コンパクト比較**（句読点・空白除去）による部分一致も併用。
+
+### 8.3 結果表示と要約
+
+- 件数が多い場合は **分割送信**と注釈。
+- メッセージ件数が 800 に達した場合、**「新しい順で先頭 800 件のみ対象」** の注釈を付与。
+- 資料検索に進んだ場合、資料 300 件上限の注釈を付与。
+- ヒットが適量のとき **Groq による要約**（要約対象行の上限: `SEARCH_MAX_SUMMARY_ROWS` 120、AI 入力用ヒット上限 `SEARCH_AI_SUMMARY_MAX_HITS` 80）。
+
+### 8.4 保持期間との関係
+
+DB の `message_retention_days` が 0 より大きいとき、ユーザーが **全期間（0 日）** を要求しても **設定値でクリップ**され、応答に注釈が付く場合があります。
+
+---
+
+## 9. 資料ライブラリと本文抽出
+
+### 9.1 アップロード
+
+- **経路**: 管理 UI（`media.html`）→ `POST /documents`（`admin-api`）。
+- **上限**: **20MB 未満**（バイト厳密、`DOCUMENT_UPLOAD_MAX_BYTES`）。
+- **許可 MIME / 拡張子**: `text/plain`（`.txt` 等）、`application/pdf`、`application/vnd.openxmlformats-officedocument.wordprocessingml.document`（`.docx`）、`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`（`.xlsx`）。**旧形式 `.doc` / `.xls` は非対応**。
+
+### 9.2 抽出（すべてサーバ側）
+
+| 形式 | 実装概要 |
+|------|-----------|
+| TXT | UTF-8 デコード（失敗時も fatal で落とさない） |
+| PDF | `pdfjs-dist`（esm.sh 経由で動的 import）最大 **120 ページ**、抽出文字列全体 **最大 25 万文字** |
+| DOCX | JSZip で OOXML 展開、`word/*.xml` を DOMParser で解析しテキスト化 |
+| XLSX | `sharedStrings.xml` ＋ `xl/worksheets/*.xml` からセル値を再構成 |
+
+- 抽出結果は **`normalizeExtractedText`** で長さカット（最大 **250,000 文字**）。
+- Office XML は **エントリ数・1 ファイルあたり展開サイズ**に上限あり（Zip 爆発対策）。
+
+### 9.3 検索との関係
+
+`line_search_documents.extracted_text` が会話検索の対象になるため、**クライアントで抽出したテキストを送る必要はありません**（送られても使わない設計）。
+
+---
+
+## 10. 管理 API（admin-api）リファレンス
+
+**認証**: 全エンドポイント `Header: x-admin-token: <token>`
+
+**CORS**: `Access-Control-Allow-Origin: *`（プリフライト対応）。
+
+| メソッド | パス | 説明 |
+|---------|------|------|
+| GET | `/state` | 全体設定、ルーム設定、`get_room_overview`、配信ログ（フィルタ後）、ストレージ使用量。クエリ: `logs_limit`（10–30、既定 30） |
+| GET | `/gmail/account` | Gmail OAuth 設定の有効性・プロフィール確認 |
+| GET | `/media` | メディア一覧。クエリ: `limit`（1–100、既定 24）、`offset`、`room_id`、`media_type`（image/video/audio/file）。署名付き URL・前後文脈付き |
+| DELETE | `/media/:id` | メディア削除（Storage + メタデータ） |
+| GET | `/documents` | 資料一覧。クエリ: `limit`（1–100、既定 20）、`offset`、`room_id`。スニペット・署名付きダウンロード URL |
+| POST | `/documents` | `multipart/form-data`: `file` 必須、`room_id` / `room_name` 任意 |
+| DELETE | `/documents/:id` | 資料削除 |
+| PUT | `/settings/media-upload-limit` | JSON: `media_upload_max_mb`（1–20） |
+| PUT | `/auth/token` | JSON: `new_token`（8 文字以上）→ DB ハッシュ更新 |
+| PUT | `/settings/global` | 全体設定 upsert（配信時刻、保持、翌日通知、rollup 等） |
+| PUT | `/settings/rooms` | ルーム設定 upsert |
+| DELETE | `/settings/rooms/:room_id` | ルーム設定行のみ削除 |
+| DELETE | `/rooms/:room_id` | **ルームのメッセージ・メディア・資料・設定を削除**（破壊的操作） |
+| POST | `/actions/run-summary` | JSON: `force`（boolean、省略時 true）→ `invoke_summary_cron` 実行とログ待機 |
+
+パスは `/functions/v1/admin-api` プレフィックスを除いた形でもルーティングされます（実装: `normalizePath`）。
+
+---
+
+## 11. データベース
+
+### 11.1 テーブル一覧と役割
+
+| テーブル | 役割 |
+|----------|------|
+| `line_messages` | LINE 受信メッセージ本体（`id` UUID、`room_id`, `user_id`, `content`, `created_at`, `processed`） |
+| `summary_settings` | **1 行固定**（`id=1`）全体設定: 配信時刻、有効フラグ、メッセージクリーンアップタイミング、要約モード、**メッセージ保持日数**、翌日通知、**メディアアップロード上限 MB**、管理トークン **ハッシュ** 等 |
+| `room_summary_settings` | ルーム別: 名称、有効、返信、要約、各種機能 ON/OFF、並び順、継承可能な時刻・モード |
+| `summary_delivery_logs` | 要約 cron 実行ログ（JST 時刻、ステータス、LINE 送信成否、`details` jsonb 等） |
+| `calendar_pending_confirmations` | カレンダー確認待ち（期限、ステータス、タイトル／日時／所要時間分等） |
+| `calendar_update_pending_targets` | 予定確認後の会話形式変更で使う対象候補（期限、対象イベント配列、ステータス） |
+| `message_search_library_pending_confirmations` | 会話検索ヒット 0 件時の資料検索確認（キーワード・期間・スコープ、期限、ステータス） |
+| `line_message_media` | LINE メディアの Storage メタデータ |
+| `line_search_documents` | 検索用資料（ファイル情報、**extracted_text**、`source` は `manual_upload` / `line_import` / `system_import`） |
+| `gmail_reservation_alert_logs` | Gmail メッセージ ID 単位の通知済み記録 |
+
+### 11.2 RLS
+
+各テーブルは RLS 有効。**`service_role` の JWT** を前提としたポリシー（Edge Functions はサービスロールで接続）。
+
+---
+
+## 12. Storage
+
+| バケット | 用途 | 備考 |
+|----------|------|------|
+| `line-media` | LINE から取得したメディア | マイグレーション上のバケット `file_size_limit` は 50MB 設定だが、**アプリ側で 20MB・合計 500MB** を強制 |
+| `line-documents` | 資料ファイル | **admin-api は 20MB 未満**でアップロード |
+
+---
+
+## 13. RPC（代表）
+
+| 名前 | 用途 |
+|------|------|
+| `invoke_summary_cron(force_run boolean)` | 要約・関連処理の手動／cron 起動 |
+| `invoke_summary_cron()` | 引数なし版（スケジュール用） |
+| `invoke_gmail_alert_cron()` | Gmail アラート Edge 起動 |
+| `get_room_overview()` | 管理画面用ルーム概要 |
+| `get_storage_usage_stats()` | DB／主要テーブルサイズ |
+| `get_line_media_usage_stats(filter_room_id, filter_media_type)` | メディア容量集計 |
+| `get_line_document_usage_stats(filter_room_id)` | 資料容量集計 |
+
+---
+
+## 14. 環境変数（Secrets）一覧
+
+### 14.1 必須に近い（基本動作）
+
+| 変数 | 用途 |
+|------|------|
+| `SUPABASE_URL` | Supabase プロジェクト URL（Edge に自動注入される場合あり） |
+| `SUPABASE_SERVICE_ROLE_KEY` | DB・Storage 管理（Edge に自動注入される場合あり） |
+| `LINE_CHANNEL_SECRET` | Webhook 署名 |
+| `LINE_CHANNEL_ACCESS_TOKEN` | 返信・Push |
+| `LINE_OVERALL_ROOM_ID` | 全体要約・フォールバック送信先 |
+| `ADMIN_DASHBOARD_TOKEN` | 管理 API ブレークグラス用／初期トークン |
+| `GROQ_API_KEY` | 意図判定・要約・検索要約・Gmail AI 抽出 |
+
+### 14.2 Google Calendar
+
+| 変数 | 用途 |
+|------|------|
+| `GOOGLE_CALENDAR_ID` | 書き込み先カレンダー |
+| `GOOGLE_SERVICE_ACCOUNT_EMAIL` | サービスアカウント |
+| `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY` | PEM（改行エスケープに注意） |
+| `GOOGLE_CALENDAR_TIMEZONE` | 省略時 `Asia/Tokyo` |
+
+### 14.3 Gmail 通知
+
+| 変数 | 用途 |
+|------|------|
+| `GMAIL_ALERT_ENABLED` | 機能 ON/OFF |
+| `GMAIL_CLIENT_ID` / `GMAIL_CLIENT_SECRET` / `GMAIL_REFRESH_TOKEN` | OAuth |
+| `GMAIL_ALERT_QUERY` | 検索クエリ（省略時デフォルト） |
+| `GMAIL_ALERT_MAX_MESSAGES` | 1 回あたり最大（アプリ側で上限クリップあり） |
+| `LINE_GMAIL_ALERT_ROOM_ID` | フォールバック送信ルーム |
+| `GMAIL_ALERT_AI_ENABLED` | AI 抽出の有効化 |
+| `GMAIL_ALERT_AI_MAX_BODY_CHARS` | AI に渡す本文最大長（上下限あり） |
+
+### 14.4 その他
+
+| 変数 | 用途 |
+|------|------|
+| `CALENDAR_AI_AUTO_CREATE_ENABLED` | `false` で AI 自動登録を環境全体で抑止（ルーム設定と併用） |
+| `SUPABASE_DB_URL` | **`check-cron` のみ必須**（postgres 接続文字列） |
+
+`.env.example` にローカル用の雛形あり。
+
+---
+
+## 15. セットアップとデプロイ
+
+1. `supabase link --project-ref <project-ref>`
+2. `supabase db push`
+3. `supabase secrets set KEY=VALUE --project-ref <project-ref>`（上記 Secrets）
+4. 関数デプロイ:
 
 ```bash
 supabase functions deploy line-webhook --project-ref <project-ref>
@@ -367,106 +452,128 @@ supabase functions deploy admin-ui --project-ref <project-ref>
 supabase functions deploy check-cron --project-ref <project-ref>
 ```
 
-5. LINE Developers で Webhook URL 設定
+5. LINE Developers で Webhook URL:
 
 ```text
 https://<project-ref>.supabase.co/functions/v1/line-webhook
 ```
 
----
-
-## 9. スケジュール運用（pg_cron）
-
-- `summary-cron-job`: 要約配信
-- `gmail-alert-cron-job`: 毎分実行のGmail通知
-
-推奨:
-- DBの `custom.edge_function_url` / `custom.gmail_alert_edge_function_url` / `custom.cron_auth_token` を適切に設定し、
-  フォールバック値に依存しない運用にする
+6. **静的 HTML** をホスティングし、必要なら **プロジェクト URL を HTML 内で一致**させる（[§4](#4-静的-ui-の公開方法)）。
 
 ---
 
-## 10. 管理UIの運用ポイント
+## 16. スケジュール（pg_cron）と DB カスタム設定
 
-- `index.html`:
-  - 静的管理画面（`Project URL` は固定表示）
-  - トークンはブラウザ `localStorage` 保存
-- `admin-dashboard/index.html`:
-  - 互換用リダイレクト（`../index.html` に転送）
-- `admin-ui`:
-  - Edge Function配信版UI
-- ルーム並び替え:
-  - ドラッグ＆ドロップで順序変更
-  - 変更時に `room_sort_order` を保存
-- テーブルUI:
-  - 横スクロール時に主要列を固定表示
+| ジョブ名 | スケジュール（マイグレーション既定） | 呼び出し |
+|----------|--------------------------------------|----------|
+| `summary-cron-job` | 毎時 `0 * * * *` | `select public.invoke_summary_cron();` |
+| `gmail-alert-cron-job` | 毎分 `* * * * *` | `select public.invoke_gmail_alert_cron();` |
+
+**推奨（本番）**
+
+- `custom.edge_function_url` … `summary-cron` の URL
+- `custom.gmail_alert_edge_function_url` … `gmail-alert-cron` の URL
+- `custom.cron_auth_token` … Edge 呼び出し用 Bearer（**マイグレーション内の anon JWT デフォルトに依存しない**）
+
+マイグレーションには **フォールバック URL／トークン**が含まれる場合があります。公開リポジトリでは **anon キーが履歴に残る**ため、運用上は **キーローテーション**と **Vault／DB 設定での上書き**を推奨します。
 
 ---
 
-## 11. 制限事項・既知仕様
+## 17. 定数・上限値一覧
 
-- LINE reply API制限に合わせ、返信は最大5メッセージに分割
-- 会話検索は大量ヒット時に分割・省略案内が入る
-- 資料アップロード上限は20MB未満（TXT/PDF/DOCX/XLSX）
-- 資料アップロードの本文抽出は `text/plain` / `application/pdf` / `application/vnd.openxmlformats-officedocument.wordprocessingml.document` / `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` に対応
-- PDF本文抽出はテキスト埋め込み型PDFが対象（画像のみPDFのOCRは未実装）
-- Word/Excelは `docx` / `xlsx` のみ本文抽出対象（旧形式 `doc` / `xls` は未対応）
-- メディア総容量キャップは500MB
+### 17.1 `line-webhook`（抜粋）
 
-## 11.1 設定値の制約
+| 項目 | 値 |
+|------|-----|
+| メディア 1 ファイル上限（絶対） | 20MB |
+| メディア合計上限 | 500MB |
+| 会話検索メッセージ取得 | 800 件 |
+| 会話検索資料取得 | 300 件 |
+| 検索要約用メッセージ | 最大 120 件まで要約入力 |
+| AI 要約用ヒット | 最大 80 |
+| pending 有効期限 | 30 分 |
+| AI 自動登録イベント数上限 | 5 件 |
+| 返信メッセージ分割 | 最大 5 |
 
-- `message_retention_days`: `0/60/120/180/365/730/1095`
+### 17.2 `admin-api`（資料）
+
+| 項目 | 値 |
+|------|-----|
+| アップロード上限 | 20MB |
+| 抽出テキスト最大 | 250,000 文字 |
+| PDF 最大ページ | 120 |
+| Office XML エントリ数上限等 | 実装定数参照（Zip 対策） |
+
+### 17.3 `gmail-alert-cron`（抜粋）
+
+| 項目 | 値 |
+|------|-----|
+| デフォルト取得件数上限 | 5 |
+| 設定可能上限（クリップ） | 20 |
+| AI 本文デフォルト / 範囲 | 6000 文字前後、1500–12000 |
+
+### 17.4 設定値の制約（API／DB）
+
+- `message_retention_days`: `0 / 60 / 120 / 180 / 365 / 730 / 1095`
 - `media_upload_max_mb`: `1..20`
 - `calendar_tomorrow_reminder_max_items`: `1..50`
 - `delivery_hours`, `calendar_tomorrow_reminder_hours`: `0..23` の整数配列
-- `daily_rollup` を使う場合:
-  - 全体設定: `message_cleanup_timing=end_of_day` が必須
-  - ルーム設定: `message_cleanup_timing=end_of_day` または `null(継承)` が必要
+- `daily_rollup` 利用時: 全体は `message_cleanup_timing=end_of_day` 必須。ルームは `end_of_day` または `null`（継承）
 
 ---
 
-## 12. セキュリティ
+## 18. セキュリティ
 
-- APIキー/秘密鍵はGitにコミットしない
-- `admin-api` は `x-admin-token` 必須
-- 管理トークンはDBにSHA-256ハッシュで保持（平文を保存しない）
-- 比較はタイミング攻撃耐性を意識した `secureEqual` を使用
-- UI通信は `referrerPolicy: no-referrer`
-- 外部CDNスクリプト依存を除去
-- GitHub Actions:
-  - Secret Scan（push/PR/週次）
-  - 月次ローテーションReminder Issue
+- **Git に秘密をコミットしない**（`.env` は `.gitignore`）。
+- **管理 API** は `x-admin-token` 必須、DB には **トークンハッシュのみ**。
+- **タイミング攻撃耐性**のある定時間比較（`secureEqual`）。
+- 管理 UI / メディア UI / `admin-ui` の fetch は **`referrerPolicy: no-referrer`**。
+- **外部 CDN のスクリプト・フォント依存を削減**（`media.html` の pdf.js 動的読み込み削除等）。
+- 資料アップロードは **サーバ側抽出のみ**（クライアント `extracted_text` 不信頼）。
+- **Gitleaks** による Secret Scan（`.gitleaks.toml`）。マイグレーション内の **意図的な anon JWT デフォルト**には `gitleaks:allow` コメントを付与済み。**本番では DB 設定で上書き**してください。
 
 ---
 
-## 13. トラブルシュート
+## 19. GitHub Actions
 
-- 予定登録できない
-  - `GOOGLE_CALENDAR_*` の不足、サービスアカウント共有設定を確認
-- 要約が配信されない
-  - `summary_settings.is_enabled`, 配信時刻、`LINE_OVERALL_ROOM_ID` を確認
-- 管理画面が401
-  - `ADMIN_DASHBOARD_TOKEN` / DBハッシュ更新後の入力値を確認
-- Gmail通知が来ない
-  - `GMAIL_ALERT_ENABLED`, OAuth情報, 対象ルーム設定を確認
-- cron状態を確認したい
-  - `check-cron` を実行し、job定義と設定を確認
+| ワークフロー | 内容 |
+|--------------|------|
+| `Secret Scan` | `gitleaks/gitleaks-action`（push / PR / 週次） |
+| `rotation-reminder` | 月次ローテーションリマインダ Issue |
+| `pages build and deployment` | 静的サイト（GitHub Pages） |
 
 ---
 
-## 14. 変更履歴（2026-04-11）
+## 20. トラブルシューティング
 
-### セキュリティ強化
+| 現象 | 確認 |
+|------|------|
+| 予定が登録されない | `GOOGLE_CALENDAR_*`、カレンダー共有、サービスアカウント権限 |
+| 要約が来ない | `summary_settings.is_enabled`、配信時刻、`LINE_OVERALL_ROOM_ID`、`summary-cron` ログ |
+| 管理 API が 401 | `ADMIN_DASHBOARD_TOKEN` と DB の `admin_dashboard_token_hash`、入力トークン |
+| Gmail 通知が来ない | `GMAIL_ALERT_ENABLED`、OAuth、ルームの `gmail_reservation_alert_enabled`、`gmail-alert-cron`／cron ジョブ |
+| cron 不安 | `check-cron` 実行、`SUPABASE_DB_URL`、`cron.job` の active |
+| 会話検索で資料がヒットしない | 期間内か、`extracted_text` が空でないか（画像 PDF・空ドキュメント）、資料は最大 300 件・新しい順 |
+| Secret Scan 失敗 | 新規に追加した文字列が JWT／API キー形式でないか、必要なら **Vault 化**または **gitleaks 設定の見直し**（安易な全域 allow は避ける） |
 
-- `media.html` の外部CDN `pdf.js` 動的読み込みを削除
-- 管理画面/メディア画面/API経由UIに `referrerPolicy: no-referrer` を適用
-- `index.html` / `media.html` / `admin-ui` の外部フォント `@import` を削除
-- 資料アップロード時、クライアント送信 `extracted_text` を受け付けない実装に変更
+---
 
-### 機能修正・品質改善
+## 21. ローカル開発メモ
 
-- 会話検索の期間条件を資料検索にも適用
-- 資料一覧ルーム名を `room_summary_settings` 優先で表示
-- 資料アップロード時の二重送信（`file` + `extracted_text`）を廃止
-- `admin-api` の資料アップロードでPDF本文抽出を実装（抽出テキストを `line_search_documents.extracted_text` に保存）
-- `admin-api` の資料アップロードでWord/Excel本文抽出を実装（`docx/xlsx` を `line_search_documents.extracted_text` に保存）
+- Supabase CLI でローカル起動する場合、`.env.example` を参考に **サービスロール**等を設定。
+- Edge Function の単体実行は `supabase functions serve`（バージョンに依存）。
+- `check-cron` は **本番／ステージングの DB URL** が無いと動作しない。
+
+---
+
+## 22. 変更履歴（抜粋）
+
+- **セキュリティ**: `media.html` の外部 pdf.js 削除、`referrerPolicy: no-referrer`、外部フォント `@import` 削除、資料 `extracted_text` のクライアント送信廃止。
+- **会話検索**: 第1段階は LINE 会話ログのみ検索し、ヒット 0 件時に確認後で資料ライブラリ検索へ遷移。資料側はファイル名に `[LINE]` を含むものだけを対象化。
+- **カレンダー**: `予定確認` 後の会話文（例: `2件目の時間を19:00に変更`）で、表示済み予定を会話方式で更新できるように拡張。
+- **資料**: `admin-api` で PDF / DOCX / XLSX のサーバ側本文抽出、`line_search_documents.extracted_text` へ保存。
+- **CI**: マイグレーション内 anon JWT に対する Gitleaks インライン allow（本番は DB 設定推奨）。
+
+---
+
+*この文書はリポジトリの実装（Edge Functions・マイグレーション）に基づきます。挙動の最終確認はデプロイ環境で行ってください。*
