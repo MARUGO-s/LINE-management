@@ -1,0 +1,1341 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>LINE Media Viewer</title>
+  <style>
+    :root {
+      --bg0: #061320;
+      --bg1: #173247;
+      --card: rgba(8, 21, 35, 0.84);
+      --line: rgba(155, 220, 255, 0.25);
+      --txt: #e7f6ff;
+      --sub: #a6cadf;
+      --ok: #69edbf;
+      --accent: #57d8ff;
+      --radius: 16px;
+      --shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--txt);
+      font-family: "Zen Kaku Gothic New", sans-serif;
+      background:
+        radial-gradient(900px 500px at -20% -10%, #215f84 0%, transparent 60%),
+        radial-gradient(900px 500px at 120% 0%, #185273 0%, transparent 55%),
+        linear-gradient(145deg, var(--bg0), var(--bg1));
+      padding: 20px;
+    }
+
+    .app {
+      max-width: 1320px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    .hero, .card {
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 18px 20px;
+      background: linear-gradient(160deg, rgba(87, 216, 255, 0.15), rgba(8, 21, 35, 0.65));
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-family: "Barlow Condensed", sans-serif;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      font-size: clamp(2rem, 3.2vw, 2.8rem);
+      line-height: 0.95;
+    }
+
+    .hero p {
+      margin: 10px 0 0;
+      color: var(--sub);
+    }
+
+    .status {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--sub);
+      font-size: 0.88rem;
+    }
+
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: rgba(8, 21, 35, 0.6);
+    }
+
+    .pill.ok {
+      color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+    }
+
+    .card {
+      background: var(--card);
+      padding: 16px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 9px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .input, .select, .button {
+      min-height: 39px;
+      border-radius: 11px;
+      border: 1px solid var(--line);
+      background: rgba(8, 21, 35, 0.6);
+      color: var(--txt);
+      padding: 0 11px;
+      font: inherit;
+    }
+
+    .input::placeholder { color: #83abc2; }
+
+    .button {
+      cursor: pointer;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .button.primary {
+      border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+      background: linear-gradient(180deg, rgba(87, 216, 255, 0.32), rgba(10, 116, 158, 0.32));
+    }
+
+    .button.danger {
+      border-color: rgba(255, 124, 159, 0.55);
+      color: #ffbdd0;
+      background: rgba(80, 10, 28, 0.4);
+    }
+
+    .button.link {
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .meta {
+      margin-top: 8px;
+      color: var(--sub);
+      font-size: 0.87rem;
+    }
+
+    .document-drop-zone {
+      margin-top: 10px;
+      border: 1px dashed rgba(155, 220, 255, 0.4);
+      border-radius: 12px;
+      background: rgba(5, 17, 28, 0.45);
+      padding: 14px 12px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+
+    .document-drop-zone:focus-visible {
+      outline: 2px solid rgba(87, 216, 255, 0.65);
+      outline-offset: 1px;
+    }
+
+    .document-drop-zone .drop-main {
+      color: #dff3ff;
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .document-drop-zone .drop-sub {
+      margin-top: 4px;
+      color: #8fb9d1;
+      font-size: 0.82rem;
+    }
+
+    .document-drop-zone.dragover {
+      border-color: rgba(87, 216, 255, 0.9);
+      background: rgba(16, 53, 77, 0.45);
+      transform: translateY(-1px);
+    }
+
+    .usage-wrap {
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid rgba(155, 220, 255, 0.22);
+      border-radius: 12px;
+      background: rgba(5, 17, 28, 0.55);
+    }
+
+    .usage-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 0.84rem;
+      color: #d7eeff;
+      margin-bottom: 8px;
+    }
+
+    .usage-track {
+      height: 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(155, 220, 255, 0.3);
+      background: rgba(2, 10, 18, 0.72);
+      overflow: hidden;
+    }
+
+    .usage-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #40d8ff, #55efc0);
+      transition: width 220ms ease;
+    }
+
+    .usage-fill.warn {
+      background: linear-gradient(90deg, #ffc062, #ff8e54);
+    }
+
+    .usage-fill.full {
+      background: linear-gradient(90deg, #ff7c9f, #ff5f78);
+    }
+
+    .usage-scale {
+      margin-top: 6px;
+      display: flex;
+      justify-content: space-between;
+      color: #8fbad2;
+      font-size: 0.77rem;
+    }
+
+    .list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .item {
+      border: 1px solid rgba(155, 220, 255, 0.22);
+      border-radius: 12px;
+      background: rgba(5, 17, 28, 0.65);
+      overflow: hidden;
+    }
+
+    .preview {
+      min-height: 160px;
+      max-height: 260px;
+      display: grid;
+      place-items: center;
+      background: rgba(0, 0, 0, 0.26);
+      border-bottom: 1px solid rgba(155, 220, 255, 0.14);
+    }
+
+    .preview img,
+    .preview video {
+      width: 100%;
+      max-height: 260px;
+      object-fit: contain;
+      display: block;
+      background: rgba(0, 0, 0, 0.18);
+    }
+
+    .preview audio {
+      width: calc(100% - 18px);
+      margin: 10px;
+    }
+
+    .preview .empty {
+      color: #8bb5ce;
+      font-size: 0.86rem;
+      padding: 18px;
+      text-align: center;
+    }
+
+    .item-body {
+      padding: 10px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .tag {
+      display: inline-block;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 3px 9px;
+      font-size: 0.72rem;
+      color: #9be8ff;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      width: fit-content;
+    }
+
+    .item-line {
+      font-size: 0.84rem;
+      color: #d8efff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .item-line.sub {
+      color: #93bdd5;
+    }
+
+    .item-line a {
+      color: #8de3ff;
+      text-decoration: underline;
+    }
+
+    .context-block {
+      margin-top: 2px;
+      border: 1px solid rgba(155, 220, 255, 0.18);
+      border-radius: 10px;
+      background: rgba(6, 24, 39, 0.58);
+      overflow: hidden;
+    }
+
+    .context-toggle {
+      cursor: pointer;
+      list-style: none;
+      font-size: 0.78rem;
+      color: #95c4dc;
+      padding: 7px 9px;
+      user-select: none;
+    }
+
+    .context-toggle::-webkit-details-marker {
+      display: none;
+    }
+
+    .context-toggle::before {
+      content: "▶";
+      display: inline-block;
+      margin-right: 6px;
+      font-size: 0.7rem;
+      transform: translateY(-1px);
+      transition: transform 120ms ease;
+    }
+
+    .context-block[open] .context-toggle::before {
+      transform: rotate(90deg) translateY(-1px);
+    }
+
+    .context-list {
+      display: grid;
+      gap: 7px;
+      padding: 0 9px 9px;
+    }
+
+    .context-row {
+      border-left: 2px solid rgba(87, 216, 255, 0.35);
+      padding-left: 7px;
+    }
+
+    .context-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #83b4cd;
+      font-size: 0.72rem;
+      margin-bottom: 2px;
+    }
+
+    .context-label {
+      display: inline-block;
+      min-width: 2.4em;
+      color: #a2dbff;
+    }
+
+    .context-text {
+      color: #d0ebfb;
+      font-size: 0.77rem;
+      line-height: 1.38;
+      word-break: break-word;
+    }
+
+    .item-actions {
+      margin-top: 4px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .item-actions .button {
+      min-height: 30px;
+      font-size: 0.76rem;
+      padding: 0 10px;
+    }
+
+    .pager {
+      margin-top: 12px;
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    @media (max-width: 760px) {
+      body { padding: 12px; }
+      .list { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="hero">
+      <h1>LINE Media Viewer</h1>
+      <p>LINEの添付ファイル（画像/動画/音声/ファイル）を表示します。</p>
+      <div class="status">
+        <span id="authState" class="pill">未接続</span>
+        <span id="lastRefresh" class="pill">最終更新: なし</span>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>接続</h2>
+      <div class="controls">
+        <input id="projectUrlInput" class="input" style="min-width:320px" type="text" readonly tabindex="-1" aria-readonly="true">
+        <input id="tokenInput" class="input" type="password" placeholder="ADMIN_DASHBOARD_TOKEN">
+        <button id="saveTokenBtn" class="button primary">保存して接続</button>
+        <button id="clearTokenBtn" class="button">削除</button>
+        <a class="button link" href="./index.html">管理画面に戻る</a>
+      </div>
+      <div class="meta">署名付きURLは一定時間で期限切れになります。見えなくなった場合は再読み込みしてください。</div>
+    </section>
+
+    <section class="card">
+      <h2>メディア一覧</h2>
+      <div class="controls">
+        <select id="typeFilter" class="select" aria-label="メディア種別">
+          <option value="">全種別</option>
+          <option value="image">画像</option>
+          <option value="video">動画</option>
+          <option value="audio">音声</option>
+          <option value="file">ファイル</option>
+        </select>
+        <select id="roomFilter" class="select" aria-label="ルームで絞り込み" style="min-width:240px">
+          <option value="">全ルーム</option>
+        </select>
+        <select id="limitSelect" class="select" aria-label="表示件数">
+          <option value="12">12件</option>
+          <option value="24" selected>24件</option>
+          <option value="48">48件</option>
+        </select>
+        <button id="applyFilterBtn" class="button primary">表示</button>
+        <button id="reloadBtn" class="button">再読み込み</button>
+      </div>
+      <div class="controls" style="margin-top:8px;">
+        <span class="meta" style="margin:0;">アップロード上限（MB未満）</span>
+        <input id="mediaUploadMaxMbInput" class="input" type="number" min="1" max="20" step="1" placeholder="10">
+        <button id="saveMediaUploadLimitBtn" class="button primary">上限を保存</button>
+        <span id="mediaUploadLimitMeta" class="meta" style="margin:0;"></span>
+      </div>
+      <div id="summary" class="meta">未取得</div>
+      <div id="usageWrap" class="usage-wrap">
+        <div class="usage-head">
+          <span>メディア容量使用率</span>
+          <span id="usageText">0 MB / 500 MB (0%)</span>
+        </div>
+        <div class="usage-track">
+          <div id="usageFill" class="usage-fill"></div>
+        </div>
+        <div class="usage-scale">
+          <span>0 MB</span>
+          <span id="usageCapLabel">500 MB</span>
+        </div>
+      </div>
+      <div id="mediaList" class="list"></div>
+      <div class="pager">
+        <button id="prevBtn" class="button">前へ</button>
+        <button id="nextBtn" class="button">次へ</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>資料ライブラリ（TXT / PDF / Word / Excel）</h2>
+      <div class="controls">
+        <select id="documentUploadRoomSelect" class="select" aria-label="資料の紐付けルーム" style="min-width:240px">
+          <option value="">共通資料（ルーム未指定）</option>
+        </select>
+        <input id="documentFileInput" class="input" type="file" accept=".txt,.pdf,.docx,.xlsx,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+        <button id="uploadDocumentBtn" class="button primary">資料をアップロード</button>
+      </div>
+      <div id="documentDropZone" class="document-drop-zone" role="button" tabindex="0" aria-label="資料をドラッグ＆ドロップまたはクリックして選択">
+        <div class="drop-main">ここにTXT/PDF/Word/Excelをドラッグ＆ドロップ</div>
+        <div class="drop-sub">クリックしてファイル選択もできます</div>
+      </div>
+      <div id="documentSelectedMeta" class="meta">選択中: なし</div>
+      <div class="meta">TXT/PDF/DOCX/XLSX は抽出できた本文を検索対象化します（画像だけのPDFは抽出できない場合があります）。</div>
+      <div class="controls" style="margin-top:10px;">
+        <select id="documentRoomFilter" class="select" aria-label="資料ルームで絞り込み" style="min-width:240px">
+          <option value="">全ルーム</option>
+        </select>
+        <select id="documentLimitSelect" class="select" aria-label="資料の表示件数">
+          <option value="12" selected>12件</option>
+          <option value="24">24件</option>
+          <option value="48">48件</option>
+        </select>
+        <button id="applyDocumentFilterBtn" class="button primary">表示</button>
+        <button id="reloadDocumentsBtn" class="button">再読み込み</button>
+      </div>
+      <div id="documentSummary" class="meta">未取得</div>
+      <div id="documentList" class="list"></div>
+      <div class="pager">
+        <button id="documentPrevBtn" class="button">前へ</button>
+        <button id="documentNextBtn" class="button">次へ</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const STORE_TOKEN_KEY = 'line_summary_admin_token';
+    const FIXED_PROJECT_URL = 'https://jhpmzqxqvapdkyvvhyra.supabase.co';
+
+    const state = {
+      offset: 0,
+      limit: 24,
+      total: 0,
+      hasMore: false,
+      docsOffset: 0,
+      docsLimit: 12,
+      docsTotal: 0,
+      docsHasMore: false,
+      selectedDocumentFile: null,
+      documentDropDepth: 0,
+    };
+
+    const dom = {
+      authState: document.getElementById('authState'),
+      lastRefresh: document.getElementById('lastRefresh'),
+      projectUrlInput: document.getElementById('projectUrlInput'),
+      tokenInput: document.getElementById('tokenInput'),
+      saveTokenBtn: document.getElementById('saveTokenBtn'),
+      clearTokenBtn: document.getElementById('clearTokenBtn'),
+      typeFilter: document.getElementById('typeFilter'),
+      roomFilter: document.getElementById('roomFilter'),
+      limitSelect: document.getElementById('limitSelect'),
+      applyFilterBtn: document.getElementById('applyFilterBtn'),
+      reloadBtn: document.getElementById('reloadBtn'),
+      mediaUploadMaxMbInput: document.getElementById('mediaUploadMaxMbInput'),
+      saveMediaUploadLimitBtn: document.getElementById('saveMediaUploadLimitBtn'),
+      mediaUploadLimitMeta: document.getElementById('mediaUploadLimitMeta'),
+      summary: document.getElementById('summary'),
+      usageWrap: document.getElementById('usageWrap'),
+      usageText: document.getElementById('usageText'),
+      usageFill: document.getElementById('usageFill'),
+      usageCapLabel: document.getElementById('usageCapLabel'),
+      mediaList: document.getElementById('mediaList'),
+      prevBtn: document.getElementById('prevBtn'),
+      nextBtn: document.getElementById('nextBtn'),
+      documentUploadRoomSelect: document.getElementById('documentUploadRoomSelect'),
+      documentFileInput: document.getElementById('documentFileInput'),
+      documentDropZone: document.getElementById('documentDropZone'),
+      documentSelectedMeta: document.getElementById('documentSelectedMeta'),
+      uploadDocumentBtn: document.getElementById('uploadDocumentBtn'),
+      documentRoomFilter: document.getElementById('documentRoomFilter'),
+      documentLimitSelect: document.getElementById('documentLimitSelect'),
+      applyDocumentFilterBtn: document.getElementById('applyDocumentFilterBtn'),
+      reloadDocumentsBtn: document.getElementById('reloadDocumentsBtn'),
+      documentSummary: document.getElementById('documentSummary'),
+      documentList: document.getElementById('documentList'),
+      documentPrevBtn: document.getElementById('documentPrevBtn'),
+      documentNextBtn: document.getElementById('documentNextBtn'),
+    };
+    const MEDIA_CAP_DEFAULT_BYTES = 500 * 1024 * 1024;
+    const DOCUMENT_UPLOAD_ALLOWED_EXTENSIONS = new Set(['txt', 'pdf', 'docx', 'xlsx']);
+    const DOCUMENT_UPLOAD_ALLOWED_MIME_TYPES = new Set([
+      'text/plain',
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ]);
+
+    function getToken() {
+      return localStorage.getItem(STORE_TOKEN_KEY) || '';
+    }
+
+    function setToken(value) {
+      if (value) localStorage.setItem(STORE_TOKEN_KEY, value);
+      else localStorage.removeItem(STORE_TOKEN_KEY);
+      updateAuthState();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function formatDate(value) {
+      if (!value) return '-';
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return '-';
+      return d.toLocaleString('ja-JP', { hour12: false });
+    }
+
+    function formatBytes(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) return '-';
+      if (n < 1024) return Math.floor(n) + ' B';
+      if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+      if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB';
+      return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    }
+
+    function getFileExtension(fileName) {
+      const name = String(fileName || '').trim();
+      const idx = name.lastIndexOf('.');
+      if (idx < 0 || idx === name.length - 1) return '';
+      return name.slice(idx + 1).toLowerCase();
+    }
+
+    function isSupportedDocumentFile(file) {
+      if (!(file instanceof File)) return false;
+      const ext = getFileExtension(file.name);
+      const mimeType = String(file.type || '').split(';')[0].trim().toLowerCase();
+      return DOCUMENT_UPLOAD_ALLOWED_EXTENSIONS.has(ext) || DOCUMENT_UPLOAD_ALLOWED_MIME_TYPES.has(mimeType);
+    }
+
+    function syncDocumentInputFile(file) {
+      if (!dom.documentFileInput) return;
+      if (!(file instanceof File)) {
+        dom.documentFileInput.value = '';
+        return;
+      }
+      if (typeof DataTransfer !== 'undefined') {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        dom.documentFileInput.files = dt.files;
+      }
+    }
+
+    function updateSelectedDocumentMeta() {
+      if (!dom.documentSelectedMeta) return;
+      const file = state.selectedDocumentFile;
+      if (!(file instanceof File)) {
+        dom.documentSelectedMeta.textContent = '選択中: なし';
+        return;
+      }
+      dom.documentSelectedMeta.textContent = '選択中: ' + file.name + '（' + formatBytes(file.size) + '）';
+    }
+
+    function clearSelectedDocumentFile() {
+      state.selectedDocumentFile = null;
+      syncDocumentInputFile(null);
+      updateSelectedDocumentMeta();
+    }
+
+    function setSelectedDocumentFile(file) {
+      if (!(file instanceof File)) {
+        clearSelectedDocumentFile();
+        return;
+      }
+      if (!isSupportedDocumentFile(file)) {
+        throw new Error('TXT / PDF / DOCX / XLSX ファイルを選択してください。');
+      }
+      state.selectedDocumentFile = file;
+      syncDocumentInputFile(file);
+      updateSelectedDocumentMeta();
+    }
+
+    function dragEventHasFiles(event) {
+      const types = event && event.dataTransfer ? event.dataTransfer.types : null;
+      if (!types || typeof types[Symbol.iterator] !== 'function') return false;
+      for (const t of types) {
+        if (t === 'Files') return true;
+      }
+      return false;
+    }
+
+    function compactContextText(value, maxChars) {
+      const src = String(value || '').replace(/\s+/g, ' ').trim();
+      if (!src) return '';
+      const max = Number.isFinite(Number(maxChars)) && Number(maxChars) > 0 ? Number(maxChars) : 72;
+      if (src.length <= max) return src;
+      return src.slice(0, max).trimEnd() + '…';
+    }
+
+    function safeDownloadName(value, fallback) {
+      const normalized = String(value || '')
+        .replace(/[\\/:*?"<>|]+/g, '_')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const src = normalized || String(fallback || 'line-media');
+      return src.length <= 120 ? src : src.slice(0, 120).trimEnd();
+    }
+
+    function buildContextRowHtml(label, at, text) {
+      const normalizedText = compactContextText(text, 88);
+      if (!normalizedText) return '';
+      const ts = formatDate(at);
+      return [
+        '<div class="context-row">',
+        '<div class="context-meta">',
+        '<span class="context-label">', escapeHtml(label), '</span>',
+        '<span>', escapeHtml(ts), '</span>',
+        '</div>',
+        '<div class="context-text">', escapeHtml(normalizedText), '</div>',
+        '</div>',
+      ].join('');
+    }
+
+    function updateAuthState() {
+      const hasToken = !!getToken();
+      dom.authState.textContent = hasToken ? '接続準備OK' : '未接続';
+      dom.authState.className = hasToken ? 'pill ok' : 'pill';
+    }
+
+    async function api(path, options) {
+      const token = getToken();
+      if (!token) throw new Error('先に管理トークンを保存してください。');
+      const req = options || {};
+      const url = FIXED_PROJECT_URL.replace(/\/+$/, '') + '/functions/v1/admin-api' + path;
+      const isFormDataBody = req.body instanceof FormData;
+      const headers = {
+        'x-admin-token': token,
+        ...(isFormDataBody ? {} : { 'Content-Type': 'application/json' }),
+        ...(req.headers || {}),
+      };
+      const res = await fetch(url, {
+        method: req.method || 'GET',
+        headers: headers,
+        body: req.body,
+        referrerPolicy: 'no-referrer',
+        cache: 'no-store',
+      });
+      const text = await res.text();
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch (_) {
+        body = { raw: text };
+      }
+      if (!res.ok) {
+        throw new Error(body.error || ('API error: ' + res.status));
+      }
+      return body;
+    }
+
+    function buildQuery() {
+      const params = new URLSearchParams();
+      params.set('limit', String(state.limit));
+      params.set('offset', String(state.offset));
+      const type = String(dom.typeFilter.value || '').trim();
+      const roomId = String(dom.roomFilter.value || '').trim();
+      if (type) params.set('media_type', type);
+      if (roomId) params.set('room_id', roomId);
+      params.set('_ts', String(Date.now()));
+      return '/media?' + params.toString();
+    }
+
+    function setRoomFilterOptions(options) {
+      const prevMediaValue = String(dom.roomFilter.value || '');
+      const prevDocFilterValue = String(dom.documentRoomFilter.value || '');
+      const prevDocUploadValue = String(dom.documentUploadRoomSelect.value || '');
+
+      function refillSelect(selectEl, emptyLabel) {
+        selectEl.innerHTML = '';
+        const allOption = document.createElement('option');
+        allOption.value = '';
+        allOption.textContent = emptyLabel;
+        selectEl.appendChild(allOption);
+        for (const option of options) {
+          const roomId = String(option && option.room_id || '').trim();
+          const roomLabel = String(option && option.label || '').trim();
+          if (!roomId || !roomLabel) continue;
+          const el = document.createElement('option');
+          el.value = roomId;
+          el.textContent = roomLabel;
+          selectEl.appendChild(el);
+        }
+      }
+
+      refillSelect(dom.roomFilter, '全ルーム');
+      refillSelect(dom.documentRoomFilter, '全ルーム');
+      refillSelect(dom.documentUploadRoomSelect, '共通資料（ルーム未指定）');
+
+      dom.roomFilter.value = Array.from(dom.roomFilter.options).some(function(opt) { return opt.value === prevMediaValue; })
+        ? prevMediaValue
+        : '';
+      dom.documentRoomFilter.value = Array.from(dom.documentRoomFilter.options).some(function(opt) { return opt.value === prevDocFilterValue; })
+        ? prevDocFilterValue
+        : '';
+      dom.documentUploadRoomSelect.value = Array.from(dom.documentUploadRoomSelect.options).some(function(opt) { return opt.value === prevDocUploadValue; })
+        ? prevDocUploadValue
+        : '';
+    }
+
+    function collectRoomFilterOptions(stateBody) {
+      const nameByRoomId = new Map();
+
+      function upsertRoom(roomIdValue, roomNameValue) {
+        const roomId = String(roomIdValue || '').trim();
+        if (!roomId) return;
+        const roomName = String(roomNameValue || '').trim();
+        const existing = nameByRoomId.get(roomId);
+        if (!existing) {
+          nameByRoomId.set(roomId, roomName || roomId);
+          return;
+        }
+        if (existing === roomId && roomName) {
+          nameByRoomId.set(roomId, roomName);
+        }
+      }
+
+      const roomSettings = Array.isArray(stateBody && stateBody.room_settings) ? stateBody.room_settings : [];
+      for (const row of roomSettings) {
+        upsertRoom(row && row.room_id, row && row.room_name);
+      }
+
+      const roomOverview = Array.isArray(stateBody && stateBody.room_overview) ? stateBody.room_overview : [];
+      for (const row of roomOverview) {
+        upsertRoom(row && row.room_id, row && row.room_name);
+      }
+
+      const baseList = Array.from(nameByRoomId.entries()).map(function(entry) {
+        return { room_id: entry[0], room_name: entry[1] };
+      });
+      baseList.sort(function(a, b) {
+        return String(a.room_name || '').localeCompare(String(b.room_name || ''), 'ja');
+      });
+
+      const nameCount = new Map();
+      for (const row of baseList) {
+        const key = String(row.room_name || '').trim();
+        nameCount.set(key, (nameCount.get(key) || 0) + 1);
+      }
+
+      return baseList.map(function(row) {
+        const roomId = String(row.room_id || '').trim();
+        const roomName = String(row.room_name || '').trim() || roomId;
+        const duplicate = (nameCount.get(roomName) || 0) > 1;
+        const shortId = roomId.length > 8 ? (roomId.slice(0, 8) + '…') : roomId;
+        const label = duplicate ? (roomName + ' [' + shortId + ']') : roomName;
+        return { room_id: roomId, label: label };
+      });
+    }
+
+    async function loadRoomFilterOptions() {
+      try {
+        const stateBody = await api('/state?logs_limit=10');
+        const options = collectRoomFilterOptions(stateBody);
+        setRoomFilterOptions(options);
+      } catch (error) {
+        console.warn('ルーム一覧の取得に失敗しました:', error);
+        setRoomFilterOptions([]);
+      }
+    }
+
+    function renderMediaItem(item) {
+      const type = String(item.media_type || 'file');
+      const signedUrl = String(item.signed_url || '');
+      const downloadUrl = String(item.download_url || signedUrl || '');
+      const name = item.original_file_name ? String(item.original_file_name) : '(名称なし)';
+      const downloadName = safeDownloadName(name === '(名称なし)' ? '' : name, String(item.line_message_id || 'line-media'));
+      const mime = item.mime_type ? String(item.mime_type) : '-';
+      const beforeContext = buildContextRowHtml('直前', item.context_before_at, item.context_before_text);
+      const afterContext = buildContextRowHtml('直後', item.context_after_at, item.context_after_text);
+      const contextBlock = (beforeContext || afterContext)
+        ? [
+          '<details class="context-block">',
+          '<summary class="context-toggle">前後の会話</summary>',
+          '<div class="context-list">',
+          beforeContext,
+          afterContext,
+          '</div>',
+          '</details>',
+        ].join('')
+        : '';
+
+      let preview = '<div class="empty">プレビュー不可</div>';
+      if (!signedUrl) {
+        preview = '<div class="empty">URL生成失敗（再読み込みしてください）</div>';
+      } else if (type === 'image') {
+        preview = '<a href="' + escapeHtml(signedUrl) + '" target="_blank" rel="noopener noreferrer"><img loading="lazy" src="' + escapeHtml(signedUrl) + '" alt="image"></a>';
+      } else if (type === 'video') {
+        preview = '<video controls preload="metadata" src="' + escapeHtml(signedUrl) + '"></video>';
+      } else if (type === 'audio') {
+        preview = '<audio controls preload="metadata" src="' + escapeHtml(signedUrl) + '"></audio>';
+      } else {
+        preview = '<div class="empty"><a href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a></div>';
+      }
+
+      const downloadAction = downloadUrl
+        ? '<a class="button" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a>'
+        : '';
+
+      return [
+        '<article class="item">',
+        '<div class="preview">', preview, '</div>',
+        '<div class="item-body">',
+        '<span class="tag">' + escapeHtml(type) + '</span>',
+        '<div class="item-line" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</div>',
+        '<div class="item-line sub" title="ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '">ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '</div>',
+        '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item.created_at)) + '</div>',
+        '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
+        '<div class="item-line sub" title="' + escapeHtml(mime) + '">MIME: ' + escapeHtml(mime) + '</div>',
+        '<div class="item-line sub" title="' + escapeHtml(String(item.line_message_tag || '')) + '">タグ: ' + escapeHtml(String(item.line_message_tag || '-')) + '</div>',
+        contextBlock,
+        '<div class="item-actions">' + downloadAction + '<button class="button danger media-delete-btn" type="button" data-media-id="' + escapeHtml(String(item.id || '')) + '">削除</button></div>',
+        '</div>',
+        '</article>',
+      ].join('');
+    }
+
+    function updatePager() {
+      dom.prevBtn.disabled = state.offset <= 0;
+      dom.nextBtn.disabled = !state.hasMore;
+    }
+
+    function updateDocumentPager() {
+      dom.documentPrevBtn.disabled = state.docsOffset <= 0;
+      dom.documentNextBtn.disabled = !state.docsHasMore;
+    }
+
+    function renderUsageBar(totalBytes, capBytes) {
+      const cap = Number.isFinite(Number(capBytes)) && Number(capBytes) > 0
+        ? Number(capBytes)
+        : MEDIA_CAP_DEFAULT_BYTES;
+      const used = Number.isFinite(Number(totalBytes)) && Number(totalBytes) > 0
+        ? Number(totalBytes)
+        : 0;
+      const ratioRaw = cap > 0 ? (used / cap) : 0;
+      const ratio = Math.max(0, Math.min(1, ratioRaw));
+      const percent = Math.round(ratioRaw * 1000) / 10;
+
+      dom.usageCapLabel.textContent = formatBytes(cap);
+      dom.usageText.textContent = formatBytes(used) + ' / ' + formatBytes(cap) + ' (' + percent + '%)';
+      dom.usageFill.style.width = (ratio * 100) + '%';
+      dom.usageFill.classList.remove('warn', 'full');
+      if (ratioRaw >= 1) {
+        dom.usageFill.classList.add('full');
+      } else if (ratioRaw >= 0.85) {
+        dom.usageFill.classList.add('warn');
+      }
+    }
+
+    async function loadMedia() {
+      const result = await api(buildQuery());
+      const items = Array.isArray(result.items) ? result.items : [];
+      state.total = Number(result.total || 0);
+      state.hasMore = !!result.has_more;
+
+      if (items.length === 0) {
+        dom.mediaList.innerHTML = '<div class="item"><div class="preview"><div class="empty">該当データなし</div></div></div>';
+      } else {
+        dom.mediaList.innerHTML = items.map(renderMediaItem).join('');
+      }
+
+      const from = state.total === 0 ? 0 : state.offset + 1;
+      const to = Math.min(state.offset + items.length, state.total);
+      const filteredTotalBytes = Number(result.total_file_bytes || 0);
+      const filteredTotalCount = Number(result.total_file_count || state.total || 0);
+      const allTotalBytes = Number(result.all_file_bytes || filteredTotalBytes || 0);
+      const allTotalCount = Number(result.all_file_count || filteredTotalCount || 0);
+      const capBytes = Number(result.media_storage_cap_bytes || MEDIA_CAP_DEFAULT_BYTES);
+      const uploadLimitMb = Number(result.media_upload_max_mb || 10);
+      const uploadLimitMbSafe = Number.isInteger(uploadLimitMb) ? uploadLimitMb : 10;
+      dom.mediaUploadMaxMbInput.value = String(uploadLimitMbSafe);
+      dom.mediaUploadLimitMeta.textContent = '現在: ' + uploadLimitMbSafe + 'MB未満';
+      const hasFilter = String(dom.typeFilter.value || '').trim() || String(dom.roomFilter.value || '').trim();
+      dom.summary.textContent =
+        '表示: ' + from + '-' + to + ' / 全' + state.total + '件'
+        + ' | この条件の合計: ' + formatBytes(filteredTotalBytes) + '（' + filteredTotalCount + '件）'
+        + (hasFilter ? (' | 全体合計: ' + formatBytes(allTotalBytes) + '（' + allTotalCount + '件）') : '')
+        + ' | アップロード上限: ' + uploadLimitMbSafe + 'MB未満';
+      renderUsageBar(allTotalBytes, capBytes);
+      dom.lastRefresh.textContent = '最終更新: ' + formatDate(result.generated_at || new Date().toISOString());
+      updatePager();
+    }
+
+    async function loadFirstPage() {
+      state.offset = 0;
+      state.limit = Number(dom.limitSelect.value || 24);
+      await loadMedia();
+    }
+
+    function buildDocumentQuery() {
+      const params = new URLSearchParams();
+      params.set('limit', String(state.docsLimit));
+      params.set('offset', String(state.docsOffset));
+      const roomId = String(dom.documentRoomFilter.value || '').trim();
+      if (roomId) params.set('room_id', roomId);
+      params.set('_ts', String(Date.now()));
+      return '/documents?' + params.toString();
+    }
+
+    function renderDocumentItem(item) {
+      const fileName = String(item && item.original_file_name || '(名称なし)');
+      const roomName = String(item && item.room_name || '共通資料');
+      const mimeType = String(item && item.mime_type || '-');
+      const snippet = String(item && item.snippet || '').trim();
+      const excerpt = snippet ? snippet : '本文抽出なし（ファイル名一致または未抽出）';
+      const downloadUrl = String(item && item.signed_url || '');
+      const downloadName = safeDownloadName(fileName === '(名称なし)' ? '' : fileName, 'line-document');
+      const extractedCharCount = Number(item && item.extracted_char_count || 0);
+      const hasExtractedText = !!(item && item.has_extracted_text);
+      const downloadAction = downloadUrl
+        ? '<a class="button" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a>'
+        : '';
+      return [
+        '<article class="item">',
+        '<div class="preview"><div class="empty">資料</div></div>',
+        '<div class="item-body">',
+        '<span class="tag">' + escapeHtml(mimeType) + '</span>',
+        '<div class="item-line" title="' + escapeHtml(fileName) + '">' + escapeHtml(fileName) + '</div>',
+        '<div class="item-line sub">ルーム: ' + escapeHtml(roomName) + '</div>',
+        '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item && item.created_at)) + '</div>',
+        '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item && item.file_size_bytes)) + '</div>',
+        '<div class="item-line sub">抽出: ' + escapeHtml(hasExtractedText ? (extractedCharCount + '文字') : 'なし') + '</div>',
+        '<div class="item-line sub" title="' + escapeHtml(excerpt) + '">抜粋: ' + escapeHtml(excerpt) + '</div>',
+        '<div class="item-actions">' + downloadAction + '<button class="button danger document-delete-btn" type="button" data-document-id="' + escapeHtml(String(item && item.id || '')) + '">削除</button></div>',
+        '</div>',
+        '</article>',
+      ].join('');
+    }
+
+    async function loadDocuments() {
+      const result = await api(buildDocumentQuery());
+      const items = Array.isArray(result.items) ? result.items : [];
+      state.docsTotal = Number(result.total || 0);
+      state.docsHasMore = !!result.has_more;
+
+      if (items.length === 0) {
+        dom.documentList.innerHTML = '<div class="item"><div class="preview"><div class="empty">該当データなし</div></div></div>';
+      } else {
+        dom.documentList.innerHTML = items.map(renderDocumentItem).join('');
+      }
+
+      const from = state.docsTotal === 0 ? 0 : state.docsOffset + 1;
+      const to = Math.min(state.docsOffset + items.length, state.docsTotal);
+      const filteredTotalBytes = Number(result.total_file_bytes || 0);
+      const filteredTotalCount = Number(result.total_file_count || state.docsTotal || 0);
+      const allTotalBytes = Number(result.all_file_bytes || filteredTotalBytes || 0);
+      const allTotalCount = Number(result.all_file_count || filteredTotalCount || 0);
+      const hasFilter = String(dom.documentRoomFilter.value || '').trim();
+      dom.documentSummary.textContent =
+        '表示: ' + from + '-' + to + ' / 全' + state.docsTotal + '件'
+        + ' | この条件の合計: ' + formatBytes(filteredTotalBytes) + '（' + filteredTotalCount + '件）'
+        + (hasFilter ? (' | 全体合計: ' + formatBytes(allTotalBytes) + '（' + allTotalCount + '件）') : '');
+      updateDocumentPager();
+    }
+
+    async function loadFirstDocumentPage() {
+      state.docsOffset = 0;
+      state.docsLimit = Number(dom.documentLimitSelect.value || 12);
+      await loadDocuments();
+    }
+
+    async function deleteDocumentItem(documentId) {
+      const id = Number(documentId);
+      if (!Number.isInteger(id) || id <= 0) throw new Error('削除対象の資料IDが不正です。');
+      const ok = window.confirm('この資料を削除します。よろしいですか？');
+      if (!ok) return;
+      await api('/documents/' + encodeURIComponent(String(id)), { method: 'DELETE' });
+      await loadDocuments();
+      if (state.docsTotal > 0 && state.docsOffset >= state.docsTotal && state.docsOffset > 0) {
+        state.docsOffset = Math.max(0, state.docsOffset - state.docsLimit);
+        await loadDocuments();
+      }
+    }
+
+    async function uploadDocument() {
+      const inputFiles = dom.documentFileInput.files;
+      const file = state.selectedDocumentFile || (inputFiles && inputFiles.length > 0 ? inputFiles[0] : null);
+      if (!(file instanceof File)) {
+        throw new Error('アップロードするファイルを選択してください。');
+      }
+      if (!isSupportedDocumentFile(file)) {
+        throw new Error('TXT / PDF / DOCX / XLSX ファイルを選択してください。');
+      }
+      const roomId = String(dom.documentUploadRoomSelect.value || '').trim();
+      const formData = new FormData();
+      formData.append('file', file);
+      if (roomId) {
+        formData.append('room_id', roomId);
+      }
+
+      await api('/documents', {
+        method: 'POST',
+        body: formData,
+      });
+      clearSelectedDocumentFile();
+      await loadFirstDocumentPage();
+      alert('資料をアップロードしました。');
+    }
+
+    async function deleteMediaItem(mediaId) {
+      const id = Number(mediaId);
+      if (!Number.isInteger(id) || id <= 0) throw new Error('削除対象のIDが不正です。');
+      const ok = window.confirm('このメディアを削除します。よろしいですか？');
+      if (!ok) return;
+      await api('/media/' + encodeURIComponent(String(id)), { method: 'DELETE' });
+      await loadMedia();
+      if (state.total > 0 && state.offset >= state.total && state.offset > 0) {
+        state.offset = Math.max(0, state.offset - state.limit);
+        await loadMedia();
+      }
+    }
+
+    async function saveMediaUploadLimit() {
+      const mb = Number(dom.mediaUploadMaxMbInput.value || 0);
+      if (!Number.isInteger(mb) || mb < 1 || mb > 20) {
+        throw new Error('アップロード上限は 1〜20 MB の整数で入力してください。');
+      }
+      await api('/settings/media-upload-limit', {
+        method: 'PUT',
+        body: JSON.stringify({ media_upload_max_mb: mb }),
+      });
+      await loadMedia();
+      alert('メディアアップロード上限を保存しました。');
+    }
+
+    dom.saveTokenBtn.addEventListener('click', async function() {
+      setToken(String(dom.tokenInput.value || '').trim());
+      dom.tokenInput.value = '';
+      try {
+        await loadRoomFilterOptions();
+        await loadFirstPage();
+        await loadFirstDocumentPage();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.clearTokenBtn.addEventListener('click', function() {
+      setToken('');
+      state.offset = 0;
+      state.hasMore = false;
+      state.total = 0;
+      state.docsOffset = 0;
+      state.docsHasMore = false;
+      state.docsTotal = 0;
+      state.documentDropDepth = 0;
+      if (dom.documentDropZone) {
+        dom.documentDropZone.classList.remove('dragover');
+      }
+      clearSelectedDocumentFile();
+      dom.mediaList.innerHTML = '';
+      dom.documentList.innerHTML = '';
+      dom.summary.textContent = '未取得';
+      dom.documentSummary.textContent = '未取得';
+      dom.mediaUploadLimitMeta.textContent = '';
+      setRoomFilterOptions([]);
+      renderUsageBar(0, MEDIA_CAP_DEFAULT_BYTES);
+      dom.lastRefresh.textContent = '最終更新: なし';
+      updatePager();
+      updateDocumentPager();
+    });
+
+    dom.applyFilterBtn.addEventListener('click', async function() {
+      try {
+        await loadFirstPage();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.reloadBtn.addEventListener('click', async function() {
+      try {
+        await loadMedia();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.saveMediaUploadLimitBtn.addEventListener('click', async function() {
+      try {
+        await saveMediaUploadLimit();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.prevBtn.addEventListener('click', async function() {
+      if (state.offset <= 0) return;
+      state.offset = Math.max(0, state.offset - state.limit);
+      try {
+        await loadMedia();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.nextBtn.addEventListener('click', async function() {
+      if (!state.hasMore) return;
+      state.offset += state.limit;
+      try {
+        await loadMedia();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.documentFileInput.addEventListener('change', function() {
+      const files = dom.documentFileInput.files;
+      const file = files && files.length > 0 ? files[0] : null;
+      try {
+        setSelectedDocumentFile(file);
+      } catch (error) {
+        clearSelectedDocumentFile();
+        alert(error.message || String(error));
+      }
+    });
+
+    if (dom.documentDropZone) {
+      dom.documentDropZone.addEventListener('click', function() {
+        dom.documentFileInput.click();
+      });
+
+      dom.documentDropZone.addEventListener('keydown', function(event) {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        dom.documentFileInput.click();
+      });
+
+      dom.documentDropZone.addEventListener('dragenter', function(event) {
+        if (!dragEventHasFiles(event)) return;
+        event.preventDefault();
+        state.documentDropDepth += 1;
+        dom.documentDropZone.classList.add('dragover');
+      });
+
+      dom.documentDropZone.addEventListener('dragover', function(event) {
+        if (!dragEventHasFiles(event)) return;
+        event.preventDefault();
+        if (event.dataTransfer) {
+          event.dataTransfer.dropEffect = 'copy';
+        }
+        dom.documentDropZone.classList.add('dragover');
+      });
+
+      dom.documentDropZone.addEventListener('dragleave', function(event) {
+        if (!dragEventHasFiles(event)) return;
+        event.preventDefault();
+        state.documentDropDepth = Math.max(0, state.documentDropDepth - 1);
+        if (state.documentDropDepth === 0) {
+          dom.documentDropZone.classList.remove('dragover');
+        }
+      });
+
+      dom.documentDropZone.addEventListener('drop', function(event) {
+        if (!dragEventHasFiles(event)) return;
+        event.preventDefault();
+        state.documentDropDepth = 0;
+        dom.documentDropZone.classList.remove('dragover');
+        const files = event.dataTransfer ? event.dataTransfer.files : null;
+        const file = files && files.length > 0 ? files[0] : null;
+        try {
+          setSelectedDocumentFile(file);
+        } catch (error) {
+          clearSelectedDocumentFile();
+          alert(error.message || String(error));
+        }
+      });
+    }
+
+    dom.uploadDocumentBtn.addEventListener('click', async function() {
+      try {
+        await uploadDocument();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.applyDocumentFilterBtn.addEventListener('click', async function() {
+      try {
+        await loadFirstDocumentPage();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.reloadDocumentsBtn.addEventListener('click', async function() {
+      try {
+        await loadDocuments();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.documentPrevBtn.addEventListener('click', async function() {
+      if (state.docsOffset <= 0) return;
+      state.docsOffset = Math.max(0, state.docsOffset - state.docsLimit);
+      try {
+        await loadDocuments();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.documentNextBtn.addEventListener('click', async function() {
+      if (!state.docsHasMore) return;
+      state.docsOffset += state.docsLimit;
+      try {
+        await loadDocuments();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.mediaList.addEventListener('click', async function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.classList.contains('media-delete-btn')) return;
+      const mediaId = target.getAttribute('data-media-id') || '';
+      try {
+        await deleteMediaItem(mediaId);
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.documentList.addEventListener('click', async function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.classList.contains('document-delete-btn')) return;
+      const documentId = target.getAttribute('data-document-id') || '';
+      try {
+        await deleteDocumentItem(documentId);
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    (function init() {
+      dom.projectUrlInput.value = FIXED_PROJECT_URL;
+      updateAuthState();
+      updatePager();
+      updateDocumentPager();
+      setRoomFilterOptions([]);
+      dom.mediaUploadMaxMbInput.value = '10';
+      dom.mediaUploadLimitMeta.textContent = '現在: 10MB未満';
+      clearSelectedDocumentFile();
+      renderUsageBar(0, MEDIA_CAP_DEFAULT_BYTES);
+      if (getToken()) {
+        Promise.all([loadRoomFilterOptions(), loadFirstPage(), loadFirstDocumentPage()]).catch(function(error) {
+          alert(error.message || String(error));
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
