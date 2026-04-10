@@ -28,7 +28,7 @@ begin
   end if;
 
   if cron_auth_token is null then
-    cron_auth_token := 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpocG16cXhxdmFwZGt5dnZoeXJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1MTg2MDMsImV4cCI6MjA4OTA5NDYwM30.OKZtSANaGsqOVLK1bqjYEeVvSMvRp8uFsIsjiscgpI0';
+    cron_auth_token := 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpocG16cXhxdmFwZGt5dnZoeXJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1MTg2MDMsImV4cCI6MjA4OTA5NDYwM30.OKZtSANaGsqOVLK1bqjYEeVvSMvRp8uFsIsjiscgpI0'; -- gitleaks:allow (Supabase anon JWT default in migration; use vault in prod)
   end if;
 
   select net.http_post(
