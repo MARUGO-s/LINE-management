@@ -659,6 +659,16 @@ const html = String.raw`<!doctype html>
           </table>
         </div>
       </section>
+
+      <section class="card">
+        <h2>ユーザー権限（LINE user 単位）</h2>
+        <p class="muted" style="margin:0 0 8px 0;"><code>/permissions/users</code> の一覧を JSON で編集します。未登録ユーザーは既定で許可扱いです。</p>
+        <textarea id="userPermissionsJson" class="input" style="min-height:220px;font-family:ui-monospace, SFMono-Regular, Menlo, monospace;" spellcheck="false"></textarea>
+        <div class="controls" style="margin-top:8px;">
+          <button id="reloadUserPermissionsBtn" class="button">再読込</button>
+          <button id="saveUserPermissionsBtn" class="button primary">ユーザー権限を保存</button>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -713,6 +723,9 @@ const html = String.raw`<!doctype html>
       storageUsageDetails: document.getElementById('storageUsageDetails'),
       roomTableBody: document.getElementById('roomTableBody'),
       logTableBody: document.getElementById('logTableBody'),
+      userPermissionsJson: document.getElementById('userPermissionsJson'),
+      reloadUserPermissionsBtn: document.getElementById('reloadUserPermissionsBtn'),
+      saveUserPermissionsBtn: document.getElementById('saveUserPermissionsBtn'),
       newRoomId: document.getElementById('newRoomId'),
       newRoomName: document.getElementById('newRoomName'),
       newRoomHours: document.getElementById('newRoomHours'),
@@ -737,6 +750,7 @@ const html = String.raw`<!doctype html>
     let autoRefreshTimer = null;
     let isStateLoading = false;
     let currentState = null;
+    let isGlobalDirty = false;
     let isRoomDirty = false;
     const roomAutoSaveInFlight = new Set();
 
@@ -866,8 +880,11 @@ const html = String.raw`<!doctype html>
         'Content-Type': 'application/json',
       }, request.headers || {});
 
+      const finalPath = (request.method || 'GET').toUpperCase() === 'GET' && path.startsWith('/state')
+        ? (path.includes('?') ? (path + '&_ts=' + Date.now()) : (path + '?_ts=' + Date.now()))
+        : path;
       const response = await fetch(
-        API_BASE + path,
+        API_BASE + finalPath,
         Object.assign({}, request, { headers, cache: 'no-store', referrerPolicy: 'no-referrer' }),
       );
       const text = await response.text();
@@ -904,6 +921,10 @@ const html = String.raw`<!doctype html>
 
     function markRoomDirty() {
       isRoomDirty = true;
+    }
+
+    function markGlobalDirty() {
+      isGlobalDirty = true;
     }
 
     function isAutoSaveToggle(target) {
@@ -960,7 +981,7 @@ const html = String.raw`<!doctype html>
       stopAutoRefresh();
       if (!token()) return;
       autoRefreshTimer = window.setTimeout(async function() {
-        if (!isEditingRoomForm() && !isRoomDirty) {
+        if (!isEditingRoomForm() && !isGlobalDirty && !isRoomDirty) {
           await safeLoadState({ silent: true });
         }
         scheduleAutoRefresh();
@@ -1062,6 +1083,11 @@ const html = String.raw`<!doctype html>
         })
         .join(' | ');
       dom.storageUsageDetails.textContent = 'テーブル内訳: ' + detailText + ' | 更新: ' + formatDate(generatedAt);
+    }
+
+    function renderUserPermissions(items) {
+      const rows = Array.isArray(items) ? items : [];
+      dom.userPermissionsJson.value = JSON.stringify(rows, null, 2);
     }
 
     function renderRooms(roomOverview, roomSettings) {
@@ -1219,8 +1245,56 @@ const html = String.raw`<!doctype html>
       renderGlobal(state.global_settings || {});
       renderLogs(state.delivery_logs || []);
       renderRooms(state.room_overview || [], state.room_settings || []);
+      renderUserPermissions(state.user_permissions || []);
       renderStorageUsage(state.storage_usage, state.storage_usage_error, state.generated_at);
       dom.lastRefresh.textContent = '最終更新: ' + formatDate(state.generated_at);
+      isGlobalDirty = false;
+    }
+
+    async function saveUserPermissionsFromJson() {
+      const raw = String(dom.userPermissionsJson.value || '').trim();
+      if (!raw) {
+        throw new Error('ユーザー権限JSONが空です。');
+      }
+      let rows = null;
+      try {
+        rows = JSON.parse(raw);
+      } catch (_) {
+        throw new Error('ユーザー権限JSONの形式が不正です。');
+      }
+      if (!Array.isArray(rows)) {
+        throw new Error('ユーザー権限JSONは配列で指定してください。');
+      }
+      const parseStrictBool = function(value, key, index) {
+        if (typeof value !== 'boolean') {
+          throw new Error('ユーザー権限JSON[' + index + '].' + key + ' は true/false のみ指定できます。');
+        }
+        return value;
+      };
+      for (let index = 0; index < rows.length; index += 1) {
+        const row = rows[index];
+        if (!row || typeof row !== 'object') continue;
+        const lineUserId = String(row.line_user_id || '').trim();
+        if (!lineUserId) {
+          throw new Error('ユーザー権限JSON[' + index + '].line_user_id は必須です。');
+        }
+        await api('/permissions/users', {
+          method: 'PUT',
+          body: JSON.stringify({
+            line_user_id: lineUserId,
+            display_name: typeof row.display_name === 'string' ? row.display_name : null,
+            is_active: parseStrictBool(row.is_active, 'is_active', index),
+            can_message_search: parseStrictBool(row.can_message_search, 'can_message_search', index),
+            can_library_search: parseStrictBool(row.can_library_search, 'can_library_search', index),
+            can_calendar_create: parseStrictBool(row.can_calendar_create, 'can_calendar_create', index),
+            can_calendar_update: parseStrictBool(row.can_calendar_update, 'can_calendar_update', index),
+            can_media_access: parseStrictBool(row.can_media_access, 'can_media_access', index),
+            note: typeof row.note === 'string' ? row.note : null,
+          }),
+        });
+      }
+      await safeLoadState();
+      alert('ユーザー権限を保存しました。');
     }
 
     async function saveGlobal() {
@@ -1244,6 +1318,7 @@ const html = String.raw`<!doctype html>
         method: 'PUT',
         body: JSON.stringify(payload),
       });
+      isGlobalDirty = false;
       await safeLoadState();
       alert('全体設定を保存しました。');
     }
@@ -1528,6 +1603,22 @@ const html = String.raw`<!doctype html>
       }
     });
 
+    dom.reloadUserPermissionsBtn.addEventListener('click', async function() {
+      try {
+        await safeLoadState();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
+    dom.saveUserPermissionsBtn.addEventListener('click', async function() {
+      try {
+        await saveUserPermissionsFromJson();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
     dom.runNowBtn.addEventListener('click', async function() {
       try {
         await runNow();
@@ -1558,6 +1649,22 @@ const html = String.raw`<!doctype html>
       } catch (e) {
         alert(e.message || String(e));
       }
+    });
+
+    [
+      dom.globalEnabled,
+      dom.globalHoursInput,
+      dom.messageCleanupTiming,
+      dom.lastDeliverySummaryMode,
+      dom.messageRetentionDays,
+      dom.tomorrowReminderEnabled,
+      dom.tomorrowReminderHoursInput,
+      dom.tomorrowReminderOnlyIfEvents,
+      dom.tomorrowReminderMaxItems,
+    ].forEach(function(el) {
+      if (!el) return;
+      el.addEventListener('input', markGlobalDirty);
+      el.addEventListener('change', markGlobalDirty);
     });
 
     dom.addRoomBtn.addEventListener('click', async function() {
@@ -1725,13 +1832,13 @@ const html = String.raw`<!doctype html>
     document.addEventListener('visibilitychange', function() {
       if (!token()) return;
       scheduleAutoRefresh();
-      if (document.visibilityState === 'visible' && !isEditingRoomForm() && !isRoomDirty) {
+      if (document.visibilityState === 'visible' && !isEditingRoomForm() && !isGlobalDirty && !isRoomDirty) {
         safeLoadState({ silent: true });
       }
     });
 
     window.addEventListener('focus', function() {
-      if (!token() || isEditingRoomForm() || isRoomDirty) return;
+      if (!token() || isEditingRoomForm() || isGlobalDirty || isRoomDirty) return;
       safeLoadState({ silent: true });
     });
 

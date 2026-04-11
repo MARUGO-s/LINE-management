@@ -208,6 +208,15 @@ type RoomReplyPolicy = {
   calendarSilentAutoRegisterEnabled: boolean
 }
 
+type LineUserPermissionPolicy = {
+  isActive: boolean
+  canMessageSearch: boolean
+  canLibrarySearch: boolean
+  canCalendarCreate: boolean
+  canCalendarUpdate: boolean
+  canMediaAccess: boolean
+}
+
 type CalendarSourceMeta = {
   roomName: string | null
   userName: string | null
@@ -372,6 +381,7 @@ Deno.serve(async (req) => {
     const calendarEnvState = loadCalendarEnv()
     const roomNameSyncDone = new Set<string>()
     const roomReplyPolicyCache = new Map<string, RoomReplyPolicy>()
+    const lineUserPermissionCache = new Map<string, LineUserPermissionPolicy>()
     const messageRetentionDays = await loadMessageRetentionDays(supabase)
     const mediaUploadMaxBytes = await loadMediaUploadMaxBytes(supabase)
 
@@ -400,9 +410,15 @@ Deno.serve(async (req) => {
       if (isDirectUserChat) {
         roomReplyPolicy = buildDirectUserRoomPolicy(roomReplyPolicy)
       }
+      const lineUserPermission = await loadLineUserPermissionPolicy(
+        supabase,
+        userId,
+        lineUserPermissionCache,
+      )
       const shouldPersistMessage = shouldPersistLineMessage(source, event.message)
       const storableMediaType = normalizeStorableLineMediaType(event.message?.type)
-      const shouldStoreMediaFile = !!storableMediaType && roomReplyPolicy.mediaFileAccessEnabled
+      const canUseMedia = roomReplyPolicy.mediaFileAccessEnabled && lineUserPermission.canMediaAccess && lineUserPermission.isActive
+      const shouldStoreMediaFile = !!storableMediaType && canUseMedia
 
       if (event.message?.type === 'text') {
         if (lineAccessToken && !senderDisplayName) {
@@ -413,8 +429,23 @@ Deno.serve(async (req) => {
           userName: senderDisplayName,
         }
         const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
+        const userIsActive = lineUserPermission.isActive
+        const canMessageSearch = userIsActive && roomReplyPolicy.messageSearchEnabled && lineUserPermission.canMessageSearch
+        const canLibrarySearch = userIsActive && roomReplyPolicy.messageSearchLibraryEnabled && lineUserPermission.canLibrarySearch
+        const canCalendarCreate = userIsActive && roomReplyPolicy.calendarAiAutoCreateEnabled && lineUserPermission.canCalendarCreate
+        const canCalendarUpdate = userIsActive && lineUserPermission.canCalendarUpdate
         const text = String(event.message.text ?? '').trim()
         const quotedMessageId = extractQuotedLineMessageId(event.message)
+        if (!userIsActive) {
+          if (roomCanReply && lineAccessToken && replyToken) {
+            await replyLineMessage(
+              replyToken,
+              'このアカウントは現在Bot利用権限がないため、実行できません。',
+              lineAccessToken,
+            )
+          }
+          continue
+        }
         if (!isDirectUserChat && roomReplyPolicy.requiresRegistration && roomCanReply) {
           if (!lineAccessToken) {
             console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room registration guidance.')
@@ -497,7 +528,7 @@ Deno.serve(async (req) => {
             }
           }
 
-          if (calendarEnvState.ok) {
+          if (calendarEnvState.ok && canCalendarUpdate) {
             const updateConversationReply = await tryHandlePendingCalendarUpdateConversation(
               text,
               supabase,
@@ -534,7 +565,7 @@ Deno.serve(async (req) => {
             }
           }
 
-          if (roomReplyPolicy.messageSearchEnabled && roomReplyPolicy.messageSearchLibraryEnabled) {
+          if (canMessageSearch && canLibrarySearch) {
             const librarySearchReply = await tryHandlePendingLibrarySearchConfirmation(
               text,
               supabase,
@@ -579,7 +610,7 @@ Deno.serve(async (req) => {
                 : AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE
               if (primaryIntent.confidence >= primaryMinConfidence) {
                 forceAiMessageSearch = primaryIntent.intent === 'search_messages'
-                forceAiCalendarList = primaryIntent.intent === 'list_calendar'
+                forceAiCalendarList = primaryIntent.intent === 'list_calendar' && canCalendarUpdate
                 forceAiCalendarCreate = primaryIntent.intent === 'create_calendar' && !isOperationalCoordination
               } else if (primaryIntent.confidence >= primaryConfirmMinConfidence) {
                 if (isRoomInteractiveReplyEnabled(roomReplyPolicy)) {
@@ -649,7 +680,7 @@ Deno.serve(async (req) => {
           }
 
           if (messageSearchCommand || messageSearchError) {
-            if (!roomReplyPolicy.messageSearchEnabled) {
+            if (!canMessageSearch) {
               continue
             }
             if (!roomCanReply) {
@@ -662,7 +693,7 @@ Deno.serve(async (req) => {
               supabase,
               roomId,
               userId,
-              roomReplyPolicy.messageSearchLibraryEnabled,
+              canLibrarySearch,
               messageRetentionDays,
               groqApiKey,
             )
@@ -684,6 +715,10 @@ Deno.serve(async (req) => {
 
           const commandParse = parseCalendarCommand(text)
           if (commandParse.matched) {
+            const command = commandParse.command
+            if (command?.kind === 'create' && !canCalendarCreate) continue
+            if (command?.kind === 'update' && !canCalendarUpdate) continue
+            if (command?.kind === 'list' && !canCalendarUpdate) continue
             const replyMessage = await buildCalendarReplyMessage(
               commandParse,
               calendarEnvState,
@@ -719,7 +754,7 @@ Deno.serve(async (req) => {
             continue
           }
 
-          if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && forceAiCalendarList) {
+          if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && forceAiCalendarList && canCalendarUpdate) {
             const aiListIntent = await extractCalendarListIntentWithGroq(
               text,
               calendarEnvState.env.timezone,
@@ -795,23 +830,26 @@ Deno.serve(async (req) => {
                 : AI_CONFIRMATION_MIN_CONFIDENCE
               const canAutoCreate =
                 aiAutoCreateEnabled &&
-                roomReplyPolicy.calendarAiAutoCreateEnabled &&
+                canCalendarCreate &&
                 normalizedAiIntent &&
                 isHighConfidenceAiCalendarIntent(normalizedAiIntent, createMinConfidence) &&
                 resolvedDetails?.titleSource !== 'default' &&
                 !isLikelyMultiEvent
               const shouldSilentAutoCreateHighConfidence =
+                canCalendarCreate &&
                 roomReplyPolicy.calendarSilentAutoRegisterEnabled &&
                 normalizedAiIntent &&
                 isHighConfidenceAiCalendarIntent(normalizedAiIntent, createMinConfidence) &&
                 resolvedDetails?.titleSource !== 'default' &&
                 !isLikelyMultiEvent
               const shouldSilentAutoCreateProvisional =
+                canCalendarCreate &&
                 roomReplyPolicy.calendarSilentAutoRegisterEnabled &&
                 normalizedAiIntent &&
                 !shouldSilentAutoCreateHighConfidence &&
                 isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)
               const shouldAutoCreateWithoutReply =
+                canCalendarCreate &&
                 !roomReplyPolicy.calendarSilentAutoRegisterEnabled &&
                 !roomCanReply &&
                 normalizedAiIntent &&
@@ -895,7 +933,7 @@ Deno.serve(async (req) => {
                 if (!silentResult.ok) {
                   console.error('Silent auto-create failed:', silentResult.error)
                 }
-              } else if (normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)) {
+              } else if (roomCanReply && canCalendarCreate && normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)) {
                 const pendingSaved = await savePendingCalendarConfirmation(
                   supabase,
                   roomId,
@@ -919,7 +957,7 @@ Deno.serve(async (req) => {
           if (
             !aiAutoCreateReply &&
             roomCanReply &&
-            roomReplyPolicy.messageSearchEnabled &&
+            canMessageSearch &&
             shouldOfferMessageSearchGuidance(text)
           ) {
             aiAutoCreateReply = buildMessageSearchGuidanceReply(text)
@@ -1703,6 +1741,49 @@ async function loadRoomReplyPolicy(
     console.error(`Unexpected error while loading room reply policy for ${normalizedRoomId}:`, err)
     cache.set(normalizedRoomId, fallbackPolicy)
     return fallbackPolicy
+  }
+}
+
+async function loadLineUserPermissionPolicy(
+  supabase: ReturnType<typeof createClient>,
+  lineUserId: string | null,
+  cache: Map<string, LineUserPermissionPolicy>,
+): Promise<LineUserPermissionPolicy> {
+  const fallback: LineUserPermissionPolicy = {
+    isActive: true,
+    canMessageSearch: true,
+    canLibrarySearch: true,
+    canCalendarCreate: true,
+    canCalendarUpdate: true,
+    canMediaAccess: true,
+  }
+  const normalizedUserId = String(lineUserId ?? '').trim()
+  if (!normalizedUserId) return fallback
+  if (cache.has(normalizedUserId)) return cache.get(normalizedUserId) ?? fallback
+
+  try {
+    const { data, error } = await supabase
+      .from('line_user_permissions')
+      .select('is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access')
+      .eq('line_user_id', normalizedUserId)
+      .maybeSingle()
+    if (error || !data) {
+      cache.set(normalizedUserId, fallback)
+      return fallback
+    }
+    const policy: LineUserPermissionPolicy = {
+      isActive: data?.is_active !== false,
+      canMessageSearch: data?.can_message_search !== false,
+      canLibrarySearch: data?.can_library_search !== false,
+      canCalendarCreate: data?.can_calendar_create !== false,
+      canCalendarUpdate: data?.can_calendar_update !== false,
+      canMediaAccess: data?.can_media_access !== false,
+    }
+    cache.set(normalizedUserId, policy)
+    return policy
+  } catch (_err) {
+    cache.set(normalizedUserId, fallback)
+    return fallback
   }
 }
 
@@ -4000,30 +4081,8 @@ async function savePendingCalendarConfirmation(
       console.error('Failed to save pending confirmation:', insertError)
       return false
     }
-    const payloadContent = encodeLegacyPendingContent({
-      conversationKey,
-      sourceText,
-      title: cleanCalendarTitle(intent.title),
-      location: intent.location ?? null,
-      date: intent.date,
-      time: intent.time,
-      durationMin: intent.durationMin,
-      confidence: intent.confidence,
-      reason: intent.reason || null,
-      expiresAt,
-    })
-    const { error: fallbackInsertError } = await supabase
-      .from('line_messages')
-      .insert({
-        room_id: roomId,
-        user_id: userId,
-        content: payloadContent,
-        processed: true,
-      })
-    if (fallbackInsertError) {
-      console.error('Failed to save legacy pending confirmation:', fallbackInsertError)
-      return false
-    }
+    console.error('Pending table is missing; legacy fallback is disabled. Apply DB migrations.', insertError)
+    return false
   }
   return true
 }

@@ -69,6 +69,18 @@ type DocumentListRow = {
   created_at: string
   updated_at: string
 }
+type LineUserPermissionRow = {
+  line_user_id: string
+  display_name: string | null
+  is_active: boolean
+  can_message_search: boolean
+  can_library_search: boolean
+  can_calendar_create: boolean
+  can_calendar_update: boolean
+  can_media_access: boolean
+  note: string | null
+  updated_at: string
+}
 
 const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
 const MEDIA_LIST_DEFAULT_LIMIT = 24
@@ -88,6 +100,8 @@ const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordproces
 const XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 const DOCUMENT_ARCHIVE_MAX_XML_ENTRIES = 120
 const DOCUMENT_ARCHIVE_ENTRY_MAX_BYTES = 8 * 1024 * 1024
+const USER_PERMISSION_LIST_DEFAULT_LIMIT = 100
+const USER_PERMISSION_LIST_MAX_LIMIT = 300
 type MediaUsageStats = {
   total_files: number
   total_bytes: number
@@ -156,6 +170,11 @@ Deno.serve(async (req) => {
     if (req.method === "GET" && path === "/state") {
       const state = await fetchState(supabase, url)
       return json(state, 200)
+    }
+
+    if (req.method === "GET" && path === "/permissions/users") {
+      const users = await fetchLineUserPermissions(supabase, url)
+      return json(users, 200)
     }
 
     if (req.method === "GET" && path === "/gmail/account") {
@@ -319,6 +338,31 @@ Deno.serve(async (req) => {
       return json({ room_settings: data }, 200)
     }
 
+    if (req.method === "PUT" && path === "/permissions/users") {
+      const body = await parseJson(req)
+      const payload = buildLineUserPermissionPayload(body)
+      const { data, error } = await supabase
+        .from("line_user_permissions")
+        .upsert({
+          line_user_id: payload.line_user_id,
+          display_name: payload.display_name,
+          is_active: payload.is_active,
+          can_message_search: payload.can_message_search,
+          can_library_search: payload.can_library_search,
+          can_calendar_create: payload.can_calendar_create,
+          can_calendar_update: payload.can_calendar_update,
+          can_media_access: payload.can_media_access,
+          note: payload.note,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "line_user_id" })
+        .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, note, updated_at")
+        .single()
+      if (error) {
+        throw { status: 500, message: `Failed to upsert line user permission: ${error.message}` } satisfies AppError
+      }
+      return json({ user_permission: data }, 200)
+    }
+
     if (req.method === "DELETE" && path.startsWith("/settings/rooms/")) {
       const roomId = decodeURIComponent(path.replace("/settings/rooms/", ""))
       if (!roomId) {
@@ -334,6 +378,21 @@ Deno.serve(async (req) => {
         throw { status: 500, message: `Failed to delete room settings: ${error.message}` } satisfies AppError
       }
       return json({ success: true, room_id: roomId }, 200)
+    }
+
+    if (req.method === "DELETE" && path.startsWith("/permissions/users/")) {
+      const lineUserId = decodeURIComponent(path.replace("/permissions/users/", "")).trim()
+      if (!lineUserId) {
+        throw { status: 400, message: "line_user_id is required." } satisfies AppError
+      }
+      const { error } = await supabase
+        .from("line_user_permissions")
+        .delete()
+        .eq("line_user_id", lineUserId)
+      if (error) {
+        throw { status: 500, message: `Failed to delete line user permission: ${error.message}` } satisfies AppError
+      }
+      return json({ success: true, line_user_id: lineUserId }, 200)
     }
 
     if (req.method === "DELETE" && path.startsWith("/rooms/")) {
@@ -528,7 +587,7 @@ async function fetchState(
   const logsFetchLimit = logsLimit * 8
 
   const globalSettings = await fetchGlobalSettings(supabase)
-  const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState] = await Promise.all([
+  const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState, userPermissionsRes] = await Promise.all([
     supabase
       .from("room_summary_settings")
       .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, calendar_silent_auto_register_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
@@ -540,6 +599,11 @@ async function fetchState(
       .order("id", { ascending: false })
       .limit(logsFetchLimit),
     fetchStorageUsageState(supabase),
+    supabase
+      .from("line_user_permissions")
+      .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, note, updated_at")
+      .order("updated_at", { ascending: false })
+      .limit(USER_PERMISSION_LIST_MAX_LIMIT),
   ])
 
   if (roomSettingsRes.error) {
@@ -551,6 +615,9 @@ async function fetchState(
   if (logsRes.error) {
     throw { status: 500, message: `Failed to fetch delivery logs: ${logsRes.error.message}` } satisfies AppError
   }
+  if (userPermissionsRes.error) {
+    throw { status: 500, message: `Failed to fetch user permissions: ${userPermissionsRes.error.message}` } satisfies AppError
+  }
 
   const filteredLogs = (logsRes.data ?? [])
     .filter((row) => isActionableDeliveryLogStatus(row.status, row.details))
@@ -559,10 +626,49 @@ async function fetchState(
   return {
     global_settings: globalSettings,
     room_settings: roomSettingsRes.data ?? [],
+    user_permissions: userPermissionsRes.data ?? [],
     room_overview: roomOverviewRes.data ?? [],
     delivery_logs: filteredLogs,
     storage_usage: storageUsageState.stats,
     storage_usage_error: storageUsageState.error,
+    generated_at: new Date().toISOString(),
+  }
+}
+
+async function fetchLineUserPermissions(
+  supabase: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const limit = clampInt(url.searchParams.get("limit"), USER_PERMISSION_LIST_DEFAULT_LIMIT, 1, USER_PERMISSION_LIST_MAX_LIMIT)
+  const offset = clampInt(url.searchParams.get("offset"), 0, 0, 1000000)
+  const q = String(url.searchParams.get("q") ?? "").trim()
+
+  let query = supabase
+    .from("line_user_permissions")
+    .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, note, updated_at", { count: "exact" })
+    .order("updated_at", { ascending: false })
+    .range(offset, offset + limit - 1)
+
+  if (q) {
+    const escaped = q.replaceAll("%", "\\%").replaceAll("_", "\\_")
+    query = query.or(`line_user_id.ilike.%${escaped}%,display_name.ilike.%${escaped}%`)
+  }
+
+  const { data, error, count } = await query
+  if (error) {
+    throw { status: 500, message: `Failed to fetch user permissions: ${error.message}` } satisfies AppError
+  }
+
+  const rows = Array.isArray(data) ? data : []
+  const safeTotal = Number.isFinite(Number(count)) ? Number(count) : rows.length
+  const nextOffset = offset + rows.length
+  return {
+    items: rows,
+    total: safeTotal,
+    limit,
+    offset,
+    has_more: nextOffset < safeTotal,
+    next_offset: nextOffset < safeTotal ? nextOffset : null,
     generated_at: new Date().toISOString(),
   }
 }
@@ -2423,6 +2529,37 @@ function buildRoomSettingsPayload(body: unknown): {
     delivery_hours: deliveryHours,
     message_cleanup_timing: roomCleanupTiming,
     last_delivery_summary_mode: roomSummaryMode,
+  }
+}
+
+function buildLineUserPermissionPayload(body: unknown): LineUserPermissionRow {
+  if (!isRecord(body)) {
+    throw { status: 400, message: "Invalid JSON body." } satisfies AppError
+  }
+  const lineUserId = String(body.line_user_id ?? "").trim()
+  if (!lineUserId) {
+    throw { status: 400, message: "line_user_id is required." } satisfies AppError
+  }
+  const ensureBoolean = (value: unknown, key: string, fallback: boolean): boolean => {
+    if (value == null) return fallback
+    if (typeof value !== "boolean") {
+      throw { status: 400, message: `${key} must be boolean when provided.` } satisfies AppError
+    }
+    return value
+  }
+  const displayNameRaw = typeof body.display_name === "string" ? body.display_name.trim() : ""
+  const noteRaw = typeof body.note === "string" ? body.note.trim() : ""
+  return {
+    line_user_id: lineUserId,
+    display_name: displayNameRaw || null,
+    is_active: ensureBoolean(body.is_active, "is_active", true),
+    can_message_search: ensureBoolean(body.can_message_search, "can_message_search", true),
+    can_library_search: ensureBoolean(body.can_library_search, "can_library_search", true),
+    can_calendar_create: ensureBoolean(body.can_calendar_create, "can_calendar_create", true),
+    can_calendar_update: ensureBoolean(body.can_calendar_update, "can_calendar_update", true),
+    can_media_access: ensureBoolean(body.can_media_access, "can_media_access", true),
+    note: noteRaw || null,
+    updated_at: new Date().toISOString(),
   }
 }
 
