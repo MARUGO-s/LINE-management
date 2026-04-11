@@ -453,8 +453,8 @@ const html = String.raw`<!doctype html>
       white-space: nowrap;
     }
 
-    .user-permissions-table th:nth-child(1), .user-permissions-table td:nth-child(1) { width: 280px; }
-    .user-permissions-table th:nth-child(2), .user-permissions-table td:nth-child(2) { width: 170px; }
+    .user-permissions-table th:nth-child(1), .user-permissions-table td:nth-child(1) { width: 120px; text-align: center; }
+    .user-permissions-table th:nth-child(2), .user-permissions-table td:nth-child(2) { width: 260px; }
     .user-permissions-table th:nth-child(3), .user-permissions-table td:nth-child(3) { width: 80px; text-align: center; }
     .user-permissions-table th:nth-child(4), .user-permissions-table td:nth-child(4) { width: 90px; text-align: center; }
     .user-permissions-table th:nth-child(5), .user-permissions-table td:nth-child(5) { width: 90px; text-align: center; }
@@ -704,8 +704,8 @@ const html = String.raw`<!doctype html>
           <table class="user-permissions-table">
             <thead>
               <tr>
-                <th>LINE user ID</th>
-                <th>表示名</th>
+                <th>ID</th>
+                <th>LINEユーザー名</th>
                 <th>利用可</th>
                 <th>会話検索</th>
                 <th>資料検索</th>
@@ -1158,8 +1158,9 @@ const html = String.raw`<!doctype html>
       for (const row of rows) {
         const tr = document.createElement('tr');
         tr.dataset.lineUserId = String(row.line_user_id || '').trim();
+        tr.dataset.displayName = String(row.display_name || '').trim();
         tr.innerHTML =
-          '<td><code>' + escapeHtml(row.line_user_id || '-') + '</code></td>' +
+          '<td><button class="button user-show-id" type="button">ID表示</button></td>' +
           '<td>' + escapeHtml(row.display_name || '-') + '</td>' +
           '<td><input class="user-permission-check user-is-active" type="checkbox" ' + (row.is_active !== false ? 'checked' : '') + '></td>' +
           '<td><input class="user-permission-check user-can-message-search" type="checkbox" ' + (row.can_message_search !== false ? 'checked' : '') + '></td>' +
@@ -1172,6 +1173,17 @@ const html = String.raw`<!doctype html>
         dom.userPermissionTableBody.appendChild(tr);
       }
       isUserPermissionDirty = false;
+    }
+
+    function openLineUserIdModal(tr) {
+      const lineUserId = String(tr.dataset.lineUserId || '').trim() || '-';
+      const displayName = String(tr.dataset.displayName || '').trim() || '(未設定)';
+      const titleEl = document.getElementById('roomIdModalTitle');
+      if (titleEl) titleEl.textContent = 'LINEユーザーID';
+      dom.roomIdModalName.textContent = '表示名: ' + displayName;
+      dom.roomIdModalValue.textContent = lineUserId;
+      dom.roomIdModal.classList.add('open');
+      dom.roomIdModal.setAttribute('aria-hidden', 'false');
     }
 
     function renderRooms(roomOverview, roomSettings) {
@@ -1248,6 +1260,8 @@ const html = String.raw`<!doctype html>
       const roomId = tr.dataset.roomId || '-';
       const nameInput = tr.querySelector('.room-name');
       const roomName = nameInput ? nameInput.value.trim() : '';
+      const titleEl = document.getElementById('roomIdModalTitle');
+      if (titleEl) titleEl.textContent = 'ルームID';
       dom.roomIdModalName.textContent = '表示名: ' + (roomName || '(未設定)');
       dom.roomIdModalValue.textContent = roomId;
       dom.roomIdModal.classList.add('open');
@@ -1393,6 +1407,7 @@ const html = String.raw`<!doctype html>
         + '\n検出: ' + Number(stats.scanned_user_ids || 0) + '件'
         + '\n新規追加: ' + Number(stats.inserted || 0) + '件'
         + '\n既存: ' + Number(stats.already_existing || 0) + '件'
+        + '\n表示名更新: ' + Number(stats.display_name_updated || 0) + '件'
       );
     }
 
@@ -1731,9 +1746,13 @@ const html = String.raw`<!doctype html>
     dom.userPermissionTableBody.addEventListener('click', async function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (!target.classList.contains('user-save-row')) return;
       const tr = target.closest('tr');
       if (!tr) return;
+      if (target.classList.contains('user-show-id')) {
+        openLineUserIdModal(tr);
+        return;
+      }
+      if (!target.classList.contains('user-save-row')) return;
       try {
         await saveSingleUserPermissionRow(tr);
         alert('ユーザー権限を保存しました。');

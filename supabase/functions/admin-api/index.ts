@@ -711,31 +711,44 @@ async function backfillLineUserPermissionsFromMessages(
       scanned_user_ids: 0,
       inserted: 0,
       already_existing: 0,
+      display_name_updated: 0,
     }
   }
 
-  const existingSet = new Set<string>()
+  const existingNameByUserId = new Map<string, string | null>()
   for (let i = 0; i < allUserIds.length; i += pageSize) {
     const chunk = allUserIds.slice(i, i + pageSize)
     const { data: existingRows, error: existingError } = await supabase
       .from("line_user_permissions")
-      .select("line_user_id")
+      .select("line_user_id, display_name")
       .in("line_user_id", chunk)
     if (existingError) {
       throw { status: 500, message: `Failed to inspect existing user permissions: ${existingError.message}` } satisfies AppError
     }
     for (const row of existingRows ?? []) {
       const lineUserId = String((row as { line_user_id?: unknown })?.line_user_id ?? "").trim()
-      if (lineUserId) existingSet.add(lineUserId)
+      if (!lineUserId) continue
+      const displayName = String((row as { display_name?: unknown })?.display_name ?? "").trim()
+      existingNameByUserId.set(lineUserId, displayName || null)
     }
   }
+
+  const existingSet = new Set(Array.from(existingNameByUserId.keys()))
+  const lineAccessToken = String(Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "").trim()
+  const idsNeedingDisplayName = allUserIds.filter((lineUserId) => {
+    const displayName = existingNameByUserId.get(lineUserId)
+    return !displayName
+  })
+  const fetchedDisplayNameByUserId = lineAccessToken
+    ? await fetchLineDisplayNamesByUserIds(idsNeedingDisplayName, lineAccessToken)
+    : new Map<string, string>()
 
   const now = new Date().toISOString()
   const inserts = allUserIds
     .filter((id) => !existingSet.has(id))
     .map((lineUserId) => ({
       line_user_id: lineUserId,
-      display_name: null,
+      display_name: fetchedDisplayNameByUserId.get(lineUserId) ?? null,
       is_active: true,
       can_message_search: true,
       can_library_search: true,
@@ -755,10 +768,71 @@ async function backfillLineUserPermissionsFromMessages(
     }
   }
 
+  let displayNameUpdated = 0
+  const existingNeedDisplayNameIds = allUserIds.filter((lineUserId) => {
+    if (!existingSet.has(lineUserId)) return false
+    const currentName = existingNameByUserId.get(lineUserId)
+    return !currentName && !!fetchedDisplayNameByUserId.get(lineUserId)
+  })
+  for (const lineUserId of existingNeedDisplayNameIds) {
+    const displayName = fetchedDisplayNameByUserId.get(lineUserId)
+    if (!displayName) continue
+    const { error: updateError } = await supabase
+      .from("line_user_permissions")
+      .update({
+        display_name: displayName,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("line_user_id", lineUserId)
+    if (updateError) {
+      throw { status: 500, message: `Failed to update display_name for ${lineUserId}: ${updateError.message}` } satisfies AppError
+    }
+    displayNameUpdated += 1
+  }
+
   return {
     scanned_user_ids: allUserIds.length,
     inserted: inserts.length,
     already_existing: allUserIds.length - inserts.length,
+    display_name_updated: displayNameUpdated,
+  }
+}
+
+async function fetchLineDisplayNamesByUserIds(
+  lineUserIds: string[],
+  lineAccessToken: string,
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>()
+  for (const lineUserId of lineUserIds) {
+    const userId = String(lineUserId ?? "").trim()
+    if (!userId) continue
+    const displayName = await fetchLineDisplayNameByUserId(userId, lineAccessToken)
+    if (displayName) {
+      result.set(userId, displayName)
+    }
+  }
+  return result
+}
+
+async function fetchLineDisplayNameByUserId(
+  lineUserId: string,
+  lineAccessToken: string,
+): Promise<string | null> {
+  try {
+    const response = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(lineUserId)}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${lineAccessToken}`,
+      },
+    })
+    if (!response.ok) {
+      return null
+    }
+    const body = await response.json()
+    const displayName = String(body?.displayName ?? "").trim()
+    return displayName || null
+  } catch {
+    return null
   }
 }
 
