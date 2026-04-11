@@ -442,6 +442,39 @@ const html = String.raw`<!doctype html>
       white-space: nowrap;
     }
 
+    .user-permissions-table {
+      width: max(100%, 1480px);
+      min-width: 1480px;
+      table-layout: fixed;
+    }
+
+    .user-permissions-table th,
+    .user-permissions-table td {
+      white-space: nowrap;
+    }
+
+    .user-permissions-table th:nth-child(1), .user-permissions-table td:nth-child(1) { width: 280px; }
+    .user-permissions-table th:nth-child(2), .user-permissions-table td:nth-child(2) { width: 170px; }
+    .user-permissions-table th:nth-child(3), .user-permissions-table td:nth-child(3) { width: 80px; text-align: center; }
+    .user-permissions-table th:nth-child(4), .user-permissions-table td:nth-child(4) { width: 90px; text-align: center; }
+    .user-permissions-table th:nth-child(5), .user-permissions-table td:nth-child(5) { width: 90px; text-align: center; }
+    .user-permissions-table th:nth-child(6), .user-permissions-table td:nth-child(6) { width: 90px; text-align: center; }
+    .user-permissions-table th:nth-child(7), .user-permissions-table td:nth-child(7) { width: 90px; text-align: center; }
+    .user-permissions-table th:nth-child(8), .user-permissions-table td:nth-child(8) { width: 90px; text-align: center; }
+    .user-permissions-table th:nth-child(9), .user-permissions-table td:nth-child(9) { width: 310px; }
+    .user-permissions-table th:nth-child(10), .user-permissions-table td:nth-child(10) { width: 140px; }
+
+    .user-permission-check {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent-strong);
+    }
+
+    .user-note-input {
+      width: 100%;
+      min-width: 0;
+    }
+
     .modal-backdrop {
       position: fixed;
       inset: 0;
@@ -666,11 +699,29 @@ const html = String.raw`<!doctype html>
 
       <section class="card permissions">
         <h2>ユーザー権限（LINE user 単位）</h2>
-        <p class="muted" style="margin:0 0 8px 0;"><code>/permissions/users</code> の一覧を JSON で編集します。未登録ユーザーは既定で許可扱いです。</p>
-        <textarea id="userPermissionsJson" class="input" style="min-height:220px;font-family:ui-monospace, SFMono-Regular, Menlo, monospace;" spellcheck="false"></textarea>
+        <p class="muted" style="margin:0 0 8px 0;">Botに友だち追加・メッセージ送信したLINEユーザーが表示されます。チェックで機能権限を付与し保存してください。</p>
+        <div class="table-wrap">
+          <table class="user-permissions-table">
+            <thead>
+              <tr>
+                <th>LINE user ID</th>
+                <th>表示名</th>
+                <th>利用可</th>
+                <th>会話検索</th>
+                <th>資料検索</th>
+                <th>予定作成</th>
+                <th>予定更新</th>
+                <th>メディア</th>
+                <th>メモ</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="userPermissionTableBody"></tbody>
+          </table>
+        </div>
         <div class="controls" style="margin-top:8px;">
           <button id="reloadUserPermissionsBtn" class="button">再読込</button>
-          <button id="saveUserPermissionsBtn" class="button primary">ユーザー権限を保存</button>
+          <button id="saveUserPermissionsBtn" class="button primary">変更を保存</button>
         </div>
       </section>
     </main>
@@ -727,7 +778,7 @@ const html = String.raw`<!doctype html>
       storageUsageDetails: document.getElementById('storageUsageDetails'),
       roomTableBody: document.getElementById('roomTableBody'),
       logTableBody: document.getElementById('logTableBody'),
-      userPermissionsJson: document.getElementById('userPermissionsJson'),
+      userPermissionTableBody: document.getElementById('userPermissionTableBody'),
       reloadUserPermissionsBtn: document.getElementById('reloadUserPermissionsBtn'),
       saveUserPermissionsBtn: document.getElementById('saveUserPermissionsBtn'),
       newRoomId: document.getElementById('newRoomId'),
@@ -756,6 +807,7 @@ const html = String.raw`<!doctype html>
     let currentState = null;
     let isGlobalDirty = false;
     let isRoomDirty = false;
+    let isUserPermissionDirty = false;
     const roomAutoSaveInFlight = new Set();
 
     function token() {
@@ -931,6 +983,10 @@ const html = String.raw`<!doctype html>
       isGlobalDirty = true;
     }
 
+    function markUserPermissionDirty() {
+      isUserPermissionDirty = true;
+    }
+
     function isAutoSaveToggle(target) {
       return target.classList.contains('room-enabled')
         || target.classList.contains('room-send-summary')
@@ -985,7 +1041,7 @@ const html = String.raw`<!doctype html>
       stopAutoRefresh();
       if (!token()) return;
       autoRefreshTimer = window.setTimeout(async function() {
-        if (!isEditingRoomForm() && !isGlobalDirty && !isRoomDirty) {
+        if (!isEditingRoomForm() && !isGlobalDirty && !isRoomDirty && !isUserPermissionDirty) {
           await safeLoadState({ silent: true });
         }
         scheduleAutoRefresh();
@@ -1091,7 +1147,29 @@ const html = String.raw`<!doctype html>
 
     function renderUserPermissions(items) {
       const rows = Array.isArray(items) ? items : [];
-      dom.userPermissionsJson.value = JSON.stringify(rows, null, 2);
+      dom.userPermissionTableBody.innerHTML = '';
+      if (rows.length === 0) {
+        dom.userPermissionTableBody.innerHTML = '<tr><td class="empty" colspan="10">友だち追加済みユーザーはまだありません。</td></tr>';
+        isUserPermissionDirty = false;
+        return;
+      }
+      for (const row of rows) {
+        const tr = document.createElement('tr');
+        tr.dataset.lineUserId = String(row.line_user_id || '').trim();
+        tr.innerHTML =
+          '<td><code>' + escapeHtml(row.line_user_id || '-') + '</code></td>' +
+          '<td>' + escapeHtml(row.display_name || '-') + '</td>' +
+          '<td><input class="user-permission-check user-is-active" type="checkbox" ' + (row.is_active !== false ? 'checked' : '') + '></td>' +
+          '<td><input class="user-permission-check user-can-message-search" type="checkbox" ' + (row.can_message_search !== false ? 'checked' : '') + '></td>' +
+          '<td><input class="user-permission-check user-can-library-search" type="checkbox" ' + (row.can_library_search !== false ? 'checked' : '') + '></td>' +
+          '<td><input class="user-permission-check user-can-calendar-create" type="checkbox" ' + (row.can_calendar_create !== false ? 'checked' : '') + '></td>' +
+          '<td><input class="user-permission-check user-can-calendar-update" type="checkbox" ' + (row.can_calendar_update !== false ? 'checked' : '') + '></td>' +
+          '<td><input class="user-permission-check user-can-media-access" type="checkbox" ' + (row.can_media_access !== false ? 'checked' : '') + '></td>' +
+          '<td><input class="input user-note-input" type="text" value="' + escapeHtml(row.note || '') + '" placeholder="メモ"></td>' +
+          '<td><button class="button primary user-save-row">保存</button></td>';
+        dom.userPermissionTableBody.appendChild(tr);
+      }
+      isUserPermissionDirty = false;
     }
 
     function renderRooms(roomOverview, roomSettings) {
@@ -1255,47 +1333,47 @@ const html = String.raw`<!doctype html>
       isGlobalDirty = false;
     }
 
-    async function saveUserPermissionsFromJson() {
-      const raw = String(dom.userPermissionsJson.value || '').trim();
-      if (!raw) {
-        throw new Error('ユーザー権限JSONが空です。');
-      }
-      let rows = null;
-      try {
-        rows = JSON.parse(raw);
-      } catch (_) {
-        throw new Error('ユーザー権限JSONの形式が不正です。');
-      }
-      if (!Array.isArray(rows)) {
-        throw new Error('ユーザー権限JSONは配列で指定してください。');
-      }
-      const parseStrictBool = function(value, key, index) {
-        if (typeof value !== 'boolean') {
-          throw new Error('ユーザー権限JSON[' + index + '].' + key + ' は true/false のみ指定できます。');
-        }
-        return value;
+    function buildUserPermissionPayloadFromRow(tr) {
+      const lineUserId = String(tr.dataset.lineUserId || '').trim();
+      const noteInput = tr.querySelector('.user-note-input');
+      const isActiveInput = tr.querySelector('.user-is-active');
+      const canMessageSearchInput = tr.querySelector('.user-can-message-search');
+      const canLibrarySearchInput = tr.querySelector('.user-can-library-search');
+      const canCalendarCreateInput = tr.querySelector('.user-can-calendar-create');
+      const canCalendarUpdateInput = tr.querySelector('.user-can-calendar-update');
+      const canMediaAccessInput = tr.querySelector('.user-can-media-access');
+      if (!lineUserId) throw new Error('line_user_id の取得に失敗しました。');
+      return {
+        line_user_id: lineUserId,
+        is_active: !!(isActiveInput && isActiveInput.checked),
+        can_message_search: !!(canMessageSearchInput && canMessageSearchInput.checked),
+        can_library_search: !!(canLibrarySearchInput && canLibrarySearchInput.checked),
+        can_calendar_create: !!(canCalendarCreateInput && canCalendarCreateInput.checked),
+        can_calendar_update: !!(canCalendarUpdateInput && canCalendarUpdateInput.checked),
+        can_media_access: !!(canMediaAccessInput && canMediaAccessInput.checked),
+        note: noteInput ? String(noteInput.value || '').trim() || null : null,
       };
-      for (let index = 0; index < rows.length; index += 1) {
-        const row = rows[index];
-        if (!row || typeof row !== 'object') continue;
-        const lineUserId = String(row.line_user_id || '').trim();
-        if (!lineUserId) {
-          throw new Error('ユーザー権限JSON[' + index + '].line_user_id は必須です。');
-        }
-        await api('/permissions/users', {
-          method: 'PUT',
-          body: JSON.stringify({
-            line_user_id: lineUserId,
-            display_name: typeof row.display_name === 'string' ? row.display_name : null,
-            is_active: parseStrictBool(row.is_active, 'is_active', index),
-            can_message_search: parseStrictBool(row.can_message_search, 'can_message_search', index),
-            can_library_search: parseStrictBool(row.can_library_search, 'can_library_search', index),
-            can_calendar_create: parseStrictBool(row.can_calendar_create, 'can_calendar_create', index),
-            can_calendar_update: parseStrictBool(row.can_calendar_update, 'can_calendar_update', index),
-            can_media_access: parseStrictBool(row.can_media_access, 'can_media_access', index),
-            note: typeof row.note === 'string' ? row.note : null,
-          }),
-        });
+    }
+
+    async function saveSingleUserPermissionRow(tr, options) {
+      const opts = options || {};
+      const payload = buildUserPermissionPayloadFromRow(tr);
+      await api('/permissions/users', {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      if (opts.reload !== false) {
+        await safeLoadState();
+      }
+    }
+
+    async function saveAllUserPermissions() {
+      const rows = Array.from(dom.userPermissionTableBody.querySelectorAll('tr[data-line-user-id]'));
+      if (rows.length === 0) {
+        throw new Error('保存対象のユーザー権限がありません。');
+      }
+      for (const tr of rows) {
+        await saveSingleUserPermissionRow(tr, { reload: false });
       }
       await safeLoadState();
       alert('ユーザー権限を保存しました。');
@@ -1592,11 +1670,13 @@ const html = String.raw`<!doctype html>
       stopAutoRefresh();
       dom.logTableBody.innerHTML = '';
       dom.roomTableBody.innerHTML = '';
+      dom.userPermissionTableBody.innerHTML = '';
       dom.globalMeta.textContent = '';
       dom.storageUsageSummary.textContent = '';
       dom.storageUsageDetails.textContent = '';
       dom.lastRefresh.textContent = '最終更新: なし';
       renderGmailAccountState(null);
+      isUserPermissionDirty = false;
     });
 
     dom.reloadBtn.addEventListener('click', async function() {
@@ -1617,10 +1697,36 @@ const html = String.raw`<!doctype html>
 
     dom.saveUserPermissionsBtn.addEventListener('click', async function() {
       try {
-        await saveUserPermissionsFromJson();
+        await saveAllUserPermissions();
       } catch (e) {
         alert(e.message || String(e));
       }
+    });
+
+    dom.userPermissionTableBody.addEventListener('click', async function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.classList.contains('user-save-row')) return;
+      const tr = target.closest('tr');
+      if (!tr) return;
+      try {
+        await saveSingleUserPermissionRow(tr);
+        alert('ユーザー権限を保存しました。');
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
+    dom.userPermissionTableBody.addEventListener('input', function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.closest('tr')) markUserPermissionDirty();
+    });
+
+    dom.userPermissionTableBody.addEventListener('change', function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.closest('tr')) markUserPermissionDirty();
     });
 
     dom.runNowBtn.addEventListener('click', async function() {
@@ -1836,13 +1942,13 @@ const html = String.raw`<!doctype html>
     document.addEventListener('visibilitychange', function() {
       if (!token()) return;
       scheduleAutoRefresh();
-      if (document.visibilityState === 'visible' && !isEditingRoomForm() && !isGlobalDirty && !isRoomDirty) {
+      if (document.visibilityState === 'visible' && !isEditingRoomForm() && !isGlobalDirty && !isRoomDirty && !isUserPermissionDirty) {
         safeLoadState({ silent: true });
       }
     });
 
     window.addEventListener('focus', function() {
-      if (!token() || isEditingRoomForm() || isGlobalDirty || isRoomDirty) return;
+      if (!token() || isEditingRoomForm() || isGlobalDirty || isRoomDirty || isUserPermissionDirty) return;
       safeLoadState({ silent: true });
     });
 

@@ -382,18 +382,26 @@ Deno.serve(async (req) => {
     const roomNameSyncDone = new Set<string>()
     const roomReplyPolicyCache = new Map<string, RoomReplyPolicy>()
     const lineUserPermissionCache = new Map<string, LineUserPermissionPolicy>()
+    const lineUserSeededCache = new Set<string>()
     const messageRetentionDays = await loadMessageRetentionDays(supabase)
     const mediaUploadMaxBytes = await loadMediaUploadMaxBytes(supabase)
 
     for (const event of events) {
+      const source = event.source || {}
+      const sourceType = String(source?.type ?? '').trim().toLowerCase()
+      const userId = source.userId ? String(source.userId) : null
+      await ensureLineUserPermissionSeed(
+        supabase,
+        lineAccessToken,
+        source,
+        userId,
+        lineUserSeededCache,
+      )
       if (event.type !== 'message') continue
 
       // Determine room/group ID or user ID as fallback
-      const source = event.source || {}
-      const sourceType = String(source?.type ?? '').trim().toLowerCase()
       const isDirectUserChat = sourceType === 'user'
       const roomId = String(source.groupId || source.roomId || source.userId || 'unknown')
-      const userId = source.userId ? String(source.userId) : null
       const replyToken = String(event.replyToken ?? '')
       let aiAutoCreateReply: string | null = null
       let senderDisplayName: string | null = null
@@ -1574,6 +1582,70 @@ async function fetchLineMessageSenderDisplayName(source: any, lineAccessToken: s
   }
 
   return null
+}
+
+async function ensureLineUserPermissionSeed(
+  supabase: ReturnType<typeof createClient>,
+  lineAccessToken: string,
+  source: any,
+  lineUserId: string | null,
+  cache: Set<string>,
+): Promise<void> {
+  const normalizedUserId = String(lineUserId ?? '').trim()
+  if (!normalizedUserId) return
+  if (cache.has(normalizedUserId)) return
+  cache.add(normalizedUserId)
+
+  const displayName = lineAccessToken
+    ? await fetchLineConversationDisplayName({ ...source, type: 'user', userId: normalizedUserId }, lineAccessToken)
+    : null
+
+  const { data: existing, error: existingError } = await supabase
+    .from('line_user_permissions')
+    .select('line_user_id, display_name')
+    .eq('line_user_id', normalizedUserId)
+    .maybeSingle()
+  if (existingError) {
+    console.error(`Failed to inspect line_user_permissions for ${normalizedUserId}:`, existingError.message)
+    return
+  }
+
+  if (existing?.line_user_id) {
+    if (!existing.display_name && displayName) {
+      const { error: updateError } = await supabase
+        .from('line_user_permissions')
+        .update({
+          display_name: displayName,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('line_user_id', normalizedUserId)
+      if (updateError) {
+        console.error(`Failed to backfill display_name for ${normalizedUserId}:`, updateError.message)
+      }
+    }
+    return
+  }
+
+  const { error: insertError } = await supabase
+    .from('line_user_permissions')
+    .insert({
+      line_user_id: normalizedUserId,
+      display_name: displayName,
+      is_active: true,
+      can_message_search: true,
+      can_library_search: true,
+      can_calendar_create: true,
+      can_calendar_update: true,
+      can_media_access: true,
+      note: null,
+      updated_at: new Date().toISOString(),
+    })
+  if (insertError) {
+    const code = String((insertError as any)?.code ?? '')
+    if (code !== '23505') {
+      console.error(`Failed to create line_user_permissions for ${normalizedUserId}:`, insertError.message)
+    }
+  }
 }
 
 async function fetchLineJson(url: string, lineAccessToken: string): Promise<any | null> {
