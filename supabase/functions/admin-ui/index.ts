@@ -1351,6 +1351,7 @@ const html = String.raw`<!doctype html>
 
     function buildUserPermissionPayloadFromRow(tr) {
       const lineUserId = String(tr.dataset.lineUserId || '').trim();
+      const displayNameRaw = String(tr.dataset.displayName || '').trim();
       const noteInput = tr.querySelector('.user-note-input');
       const isActiveInput = tr.querySelector('.user-is-active');
       const canMessageSearchInput = tr.querySelector('.user-can-message-search');
@@ -1361,6 +1362,7 @@ const html = String.raw`<!doctype html>
       if (!lineUserId) throw new Error('line_user_id の取得に失敗しました。');
       return {
         line_user_id: lineUserId,
+        display_name: (displayNameRaw && displayNameRaw !== '-') ? displayNameRaw : null,
         is_active: !!(isActiveInput && isActiveInput.checked),
         can_message_search: !!(canMessageSearchInput && canMessageSearchInput.checked),
         can_library_search: !!(canLibrarySearchInput && canLibrarySearchInput.checked),
