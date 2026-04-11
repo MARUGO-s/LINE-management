@@ -590,28 +590,60 @@ const html = String.raw`<!doctype html>
       white-space: nowrap;
     }
 
-    .user-permissions-table {
-      width: max(100%, 1660px);
-      min-width: 1660px;
-      table-layout: fixed;
+    .user-permission-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      gap: 12px;
     }
 
-    .user-permissions-table th,
-    .user-permissions-table td {
+    .user-permission-card {
+      border: 1px solid rgba(149, 219, 255, 0.18);
+      border-radius: 12px;
+      background: rgba(7, 20, 34, 0.72);
+      padding: 12px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .user-permission-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .user-permission-name {
+      font-weight: 700;
+      color: #d7edff;
+      overflow: hidden;
+      text-overflow: ellipsis;
       white-space: nowrap;
     }
 
-    .user-permissions-table th:nth-child(1), .user-permissions-table td:nth-child(1) { width: 120px; text-align: center; }
-    .user-permissions-table th:nth-child(2), .user-permissions-table td:nth-child(2) { width: 260px; }
-    .user-permissions-table th:nth-child(3), .user-permissions-table td:nth-child(3) { width: 80px; text-align: center; }
-    .user-permissions-table th:nth-child(4), .user-permissions-table td:nth-child(4) { width: 90px; text-align: center; }
-    .user-permissions-table th:nth-child(5), .user-permissions-table td:nth-child(5) { width: 90px; text-align: center; }
-    .user-permissions-table th:nth-child(6), .user-permissions-table td:nth-child(6) { width: 90px; text-align: center; }
-    .user-permissions-table th:nth-child(7), .user-permissions-table td:nth-child(7) { width: 90px; text-align: center; }
-    .user-permissions-table th:nth-child(8), .user-permissions-table td:nth-child(8) { width: 90px; text-align: center; }
-    .user-permissions-table th:nth-child(9), .user-permissions-table td:nth-child(9) { width: 220px; text-align: center; }
-    .user-permissions-table th:nth-child(10), .user-permissions-table td:nth-child(10) { width: 270px; }
-    .user-permissions-table th:nth-child(11), .user-permissions-table td:nth-child(11) { width: 140px; text-align: center; }
+    .user-permission-controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .user-permission-control {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border: 1px solid rgba(149, 219, 255, 0.12);
+      border-radius: 9px;
+      padding: 6px 8px;
+      font-size: 0.78rem;
+      color: #b8dbef;
+    }
+
+    .user-permission-foot {
+      display: grid;
+      grid-template-columns: 200px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+    }
 
     .user-permission-check {
       width: 18px;
@@ -656,6 +688,15 @@ const html = String.raw`<!doctype html>
     .room-scope-badge.warn {
       color: #ffd27d;
       border-color: rgba(255, 210, 125, 0.36);
+    }
+
+    @media (max-width: 960px) {
+      .user-permission-controls {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .user-permission-foot {
+        grid-template-columns: 1fr;
+      }
     }
 
     .room-scope-modal-list {
@@ -934,26 +975,7 @@ const html = String.raw`<!doctype html>
       <section class="card permissions">
         <h2>ユーザー権限（LINE user 単位）</h2>
         <p class="muted" style="margin:0 0 8px 0;">Botに友だち追加・メッセージ送信したLINEユーザーが表示されます。チェック変更はその場で即時保存されます。</p>
-        <div class="table-wrap">
-          <table class="user-permissions-table">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>LINEユーザー名</th>
-                <th>利用可</th>
-                <th>会話検索</th>
-                <th>資料検索</th>
-                <th>予定作成</th>
-                <th>予定更新</th>
-                <th>メディア</th>
-                <th>検索対象ルーム</th>
-                <th>メモ</th>
-                <th>状態</th>
-              </tr>
-            </thead>
-            <tbody id="userPermissionTableBody"></tbody>
-          </table>
-        </div>
+        <div id="userPermissionTableBody" class="user-permission-grid"></div>
         <div class="controls" style="margin-top:8px;">
           <button id="reloadUserPermissionsBtn" class="button">再読込</button>
           <button id="backfillUserPermissionsBtn" class="button">既存ユーザー取込</button>
@@ -1566,35 +1588,42 @@ const html = String.raw`<!doctype html>
       const rows = Array.isArray(items) ? items : [];
       dom.userPermissionTableBody.innerHTML = '';
       if (rows.length === 0) {
-        dom.userPermissionTableBody.innerHTML = '<tr><td class="empty" colspan="11">友だち追加済みユーザーはまだありません。</td></tr>';
+        dom.userPermissionTableBody.innerHTML = '<div class="empty">友だち追加済みユーザーはまだありません。</div>';
         isUserPermissionDirty = false;
         return;
       }
       for (const row of rows) {
-        const tr = document.createElement('tr');
-        tr.dataset.lineUserId = String(row.line_user_id || '').trim();
-        tr.dataset.displayName = String(row.display_name || '').trim();
+        const card = document.createElement('div');
+        card.className = 'user-permission-card';
+        card.dataset.lineUserId = String(row.line_user_id || '').trim();
+        card.dataset.displayName = String(row.display_name || '').trim();
         const excludedRoomIds = Array.isArray(row.excluded_message_search_room_ids)
           ? row.excluded_message_search_room_ids.map(function(v) { return String(v || '').trim(); }).filter(function(v) { return !!v; })
           : [];
-        tr.dataset.excludedMessageSearchRoomIds = JSON.stringify(excludedRoomIds);
+        card.dataset.excludedMessageSearchRoomIds = JSON.stringify(excludedRoomIds);
         const scopeBadgeClass = excludedRoomIds.length > 0 ? 'room-scope-badge warn' : 'room-scope-badge';
         const scopeBadgeText = excludedRoomIds.length > 0
           ? ('除外 ' + excludedRoomIds.length + '件')
           : '全ルーム対象';
-        tr.innerHTML =
-          '<td><button class="button user-show-id" type="button">ID表示</button></td>' +
-          '<td>' + escapeHtml(row.display_name || '-') + '</td>' +
-          '<td><input class="user-permission-check user-is-active" type="checkbox" ' + (row.is_active !== false ? 'checked' : '') + '></td>' +
-          '<td><input class="user-permission-check user-can-message-search" type="checkbox" ' + (row.can_message_search !== false ? 'checked' : '') + '></td>' +
-          '<td><input class="user-permission-check user-can-library-search" type="checkbox" ' + (row.can_library_search !== false ? 'checked' : '') + '></td>' +
-          '<td><input class="user-permission-check user-can-calendar-create" type="checkbox" ' + (row.can_calendar_create !== false ? 'checked' : '') + '></td>' +
-          '<td><input class="user-permission-check user-can-calendar-update" type="checkbox" ' + (row.can_calendar_update !== false ? 'checked' : '') + '></td>' +
-          '<td><input class="user-permission-check user-can-media-access" type="checkbox" ' + (row.can_media_access !== false ? 'checked' : '') + '></td>' +
-          '<td><div class="user-room-scope-cell"><button class="button user-room-scope" type="button">ルーム選択</button><div class="' + scopeBadgeClass + '">' + escapeHtml(scopeBadgeText) + '</div></div></td>' +
-          '<td><input class="input user-note-input" type="text" value="' + escapeHtml(row.note || '') + '" placeholder="メモ"></td>' +
-          '<td><span class="tag ok">自動保存</span></td>';
-        dom.userPermissionTableBody.appendChild(tr);
+        card.innerHTML =
+          '<div class="user-permission-header">' +
+          '<div class="user-permission-name">' + escapeHtml(row.display_name || '-') + '</div>' +
+          '<div><button class="button user-show-id" type="button">ID表示</button></div>' +
+          '</div>' +
+          '<div class="user-permission-controls">' +
+          '<label class="user-permission-control"><span>利用可</span><input class="user-permission-check user-is-active" type="checkbox" ' + (row.is_active !== false ? 'checked' : '') + '></label>' +
+          '<label class="user-permission-control"><span>会話検索</span><input class="user-permission-check user-can-message-search" type="checkbox" ' + (row.can_message_search !== false ? 'checked' : '') + '></label>' +
+          '<label class="user-permission-control"><span>資料検索</span><input class="user-permission-check user-can-library-search" type="checkbox" ' + (row.can_library_search !== false ? 'checked' : '') + '></label>' +
+          '<label class="user-permission-control"><span>予定作成</span><input class="user-permission-check user-can-calendar-create" type="checkbox" ' + (row.can_calendar_create !== false ? 'checked' : '') + '></label>' +
+          '<label class="user-permission-control"><span>予定更新</span><input class="user-permission-check user-can-calendar-update" type="checkbox" ' + (row.can_calendar_update !== false ? 'checked' : '') + '></label>' +
+          '<label class="user-permission-control"><span>メディア</span><input class="user-permission-check user-can-media-access" type="checkbox" ' + (row.can_media_access !== false ? 'checked' : '') + '></label>' +
+          '</div>' +
+          '<div class="user-permission-foot">' +
+          '<div class="user-room-scope-cell"><button class="button user-room-scope" type="button">ルーム選択</button><div class="' + scopeBadgeClass + '">' + escapeHtml(scopeBadgeText) + '</div></div>' +
+          '<input class="input user-note-input" type="text" value="' + escapeHtml(row.note || '') + '" placeholder="メモ">' +
+          '</div>' +
+          '<div><span class="tag ok">自動保存</span></div>';
+        dom.userPermissionTableBody.appendChild(card);
       }
       isUserPermissionDirty = false;
     }
@@ -2320,14 +2349,14 @@ const html = String.raw`<!doctype html>
     dom.userPermissionTableBody.addEventListener('click', async function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      const tr = target.closest('tr');
-      if (!tr) return;
+      const card = target.closest('.user-permission-card');
+      if (!card) return;
       if (target.classList.contains('user-show-id')) {
-        openLineUserIdModal(tr);
+        openLineUserIdModal(card);
         return;
       }
       if (target.classList.contains('user-room-scope')) {
-        openUserRoomScopeModal(tr);
+        openUserRoomScopeModal(card);
         return;
       }
     });
@@ -2335,20 +2364,20 @@ const html = String.raw`<!doctype html>
     dom.userPermissionTableBody.addEventListener('input', function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (target.closest('tr')) markUserPermissionDirty();
+      if (target.closest('.user-permission-card')) markUserPermissionDirty();
     });
 
     dom.userPermissionTableBody.addEventListener('change', function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      const tr = target.closest('tr');
-      if (!tr) return;
+      const card = target.closest('.user-permission-card');
+      if (!card) return;
       if (
         target.classList.contains('user-permission-check') ||
         target.classList.contains('user-note-input')
       ) {
         markUserPermissionDirty();
-        saveSingleUserPermissionRow(tr, { reload: false }).catch(function(e) {
+        saveSingleUserPermissionRow(card, { reload: false }).catch(function(e) {
           alert(e.message || String(e));
           safeLoadState({ silent: true });
         });
