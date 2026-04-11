@@ -388,8 +388,8 @@ const html = String.raw`<!doctype html>
     }
 
     .log-table {
-      width: max(100%, 1320px);
-      min-width: 1320px;
+      width: 100%;
+      min-width: 0;
       table-layout: fixed;
     }
 
@@ -514,24 +514,25 @@ const html = String.raw`<!doctype html>
     }
 
     .log-table th:nth-child(1),
-    .log-table td:nth-child(1) { width: 170px; }
+    .log-table td:nth-child(1) { width: 164px; }
     .log-table th:nth-child(2),
-    .log-table td:nth-child(2) { width: 280px; }
+    .log-table td:nth-child(2) { width: 210px; }
+    .log-table th:nth-child(3),
+    .log-table td:nth-child(3) {
+      width: 220px;
+      white-space: normal;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
     .log-table th:nth-child(4),
     .log-table td:nth-child(4) {
-      width: 110px;
+      width: 95px;
       white-space: nowrap;
     }
     .log-table th:nth-child(5),
     .log-table td:nth-child(5) {
-      width: 80px;
+      width: 62px;
       white-space: nowrap;
-    }
-    .log-table th:nth-child(3),
-    .log-table td:nth-child(3) {
-      white-space: normal;
-      word-break: normal;
-      overflow-wrap: break-word;
     }
 
     .log-table .tag {
