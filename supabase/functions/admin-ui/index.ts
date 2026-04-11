@@ -617,6 +617,8 @@ const html = String.raw`<!doctype html>
           <label class="switch"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
           <label class="switch"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
           <label class="switch"><input id="newRoomMessageSearchEnabled" type="checkbox" checked>会話検索応答</label>
+          <label class="switch"><input id="newRoomMessageSearchLibraryEnabled" type="checkbox" checked>資料検索(2段階目)</label>
+          <label class="switch"><input id="newRoomMediaFileAccessEnabled" type="checkbox" checked>メディアアクセス</label>
           <label class="switch"><input id="newRoomBotReplyEnabled" type="checkbox" checked>自動応答</label>
           <label class="switch"><input id="newRoomCalendarAutoCreate" type="checkbox" checked>自動登録</label>
           <label class="switch"><input id="newRoomGmailAlertEnabled" type="checkbox">Gmail予約通知</label>
@@ -644,6 +646,8 @@ const html = String.raw`<!doctype html>
                 <th>ルーム要約配信</th>
                 <th>明日予定配信</th>
                 <th>会話検索応答</th>
+                <th>資料検索(2段階目)</th>
+                <th>メディアアクセス</th>
                 <th>自動応答</th>
                 <th>自動登録</th>
                 <th>Gmail予約通知</th>
@@ -677,6 +681,8 @@ const html = String.raw`<!doctype html>
     const TOKEN_KEY = 'line_summary_admin_token';
     const NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY = 'line_summary_new_room_default_tomorrow_reminder';
     const NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY = 'line_summary_new_room_default_message_search';
+    const NEW_ROOM_DEFAULT_MESSAGE_SEARCH_LIBRARY_KEY = 'line_summary_new_room_default_message_search_library';
+    const NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY = 'line_summary_new_room_default_media_file_access';
     const NEW_ROOM_DEFAULT_BOT_REPLY_KEY = 'line_summary_new_room_default_bot_reply';
     const NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY = 'line_summary_new_room_default_calendar_auto_create';
     const NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY = 'line_summary_new_room_default_gmail_alert';
@@ -716,6 +722,8 @@ const html = String.raw`<!doctype html>
       newRoomSendSummary: document.getElementById('newRoomSendSummary'),
       newRoomTomorrowReminder: document.getElementById('newRoomTomorrowReminder'),
       newRoomMessageSearchEnabled: document.getElementById('newRoomMessageSearchEnabled'),
+      newRoomMessageSearchLibraryEnabled: document.getElementById('newRoomMessageSearchLibraryEnabled'),
+      newRoomMediaFileAccessEnabled: document.getElementById('newRoomMediaFileAccessEnabled'),
       newRoomBotReplyEnabled: document.getElementById('newRoomBotReplyEnabled'),
       newRoomCalendarAutoCreate: document.getElementById('newRoomCalendarAutoCreate'),
       newRoomGmailAlertEnabled: document.getElementById('newRoomGmailAlertEnabled'),
@@ -765,6 +773,8 @@ const html = String.raw`<!doctype html>
     function applyNewRoomDefaultCheckboxes() {
       dom.newRoomTomorrowReminder.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY, false);
       dom.newRoomMessageSearchEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, true);
+      dom.newRoomMessageSearchLibraryEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_LIBRARY_KEY, true);
+      dom.newRoomMediaFileAccessEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY, true);
       dom.newRoomBotReplyEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, true);
       dom.newRoomCalendarAutoCreate.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY, true);
       dom.newRoomGmailAlertEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, false);
@@ -905,6 +915,8 @@ const html = String.raw`<!doctype html>
         || target.classList.contains('room-send-summary')
         || target.classList.contains('room-tomorrow-reminder')
         || target.classList.contains('room-message-search-enabled')
+        || target.classList.contains('room-message-search-library-enabled')
+        || target.classList.contains('room-media-file-access-enabled')
         || target.classList.contains('room-bot-reply-enabled')
         || target.classList.contains('room-calendar-auto-create')
         || target.classList.contains('room-gmail-alert-enabled');
@@ -1067,7 +1079,7 @@ const html = String.raw`<!doctype html>
       dom.roomTableBody.innerHTML = '';
       const rooms = Array.isArray(roomOverview) ? roomOverview : [];
       if (rooms.length === 0) {
-        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="15">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
+        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="17">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
         return;
       }
 
@@ -1102,6 +1114,8 @@ const html = String.raw`<!doctype html>
           '<td><input class="room-send-summary room-check" type="checkbox" aria-label="ルーム要約配信" ' + ((setting && setting.send_room_summary === true) ? 'checked' : '') + '></td>' +
           '<td><input class="room-tomorrow-reminder room-check" type="checkbox" aria-label="明日予定配信" ' + ((setting && setting.calendar_tomorrow_reminder_enabled === true) ? 'checked' : '') + '></td>' +
           '<td><input class="room-message-search-enabled room-check" type="checkbox" aria-label="会話検索応答" ' + (((setting && setting.message_search_enabled) !== false) ? 'checked' : '') + '></td>' +
+          '<td><input class="room-message-search-library-enabled room-check" type="checkbox" aria-label="資料検索(2段階目)" ' + (((setting && setting.message_search_library_enabled) !== false) ? 'checked' : '') + '></td>' +
+          '<td><input class="room-media-file-access-enabled room-check" type="checkbox" aria-label="メディアアクセス" ' + (((setting && setting.media_file_access_enabled) !== false) ? 'checked' : '') + '></td>' +
           '<td><input class="room-bot-reply-enabled room-check" type="checkbox" aria-label="自動応答" ' + (((setting && setting.bot_reply_enabled) !== false) ? 'checked' : '') + '></td>' +
           '<td><input class="room-calendar-auto-create room-check" type="checkbox" aria-label="自動登録" ' + (((setting && setting.calendar_ai_auto_create_enabled) !== false) ? 'checked' : '') + '></td>' +
           '<td><input class="room-gmail-alert-enabled room-check" type="checkbox" aria-label="Gmail予約通知" ' + ((setting && setting.gmail_reservation_alert_enabled === true) ? 'checked' : '') + '></td>' +
@@ -1275,6 +1289,8 @@ const html = String.raw`<!doctype html>
       const sendSummaryInput = tr.querySelector('.room-send-summary');
       const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
       const messageSearchEnabledInput = tr.querySelector('.room-message-search-enabled');
+      const messageSearchLibraryEnabledInput = tr.querySelector('.room-message-search-library-enabled');
+      const mediaFileAccessEnabledInput = tr.querySelector('.room-media-file-access-enabled');
       const botReplyEnabledInput = tr.querySelector('.room-bot-reply-enabled');
       const calendarAutoCreateInput = tr.querySelector('.room-calendar-auto-create');
       const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
@@ -1295,6 +1311,8 @@ const html = String.raw`<!doctype html>
         send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
         calendar_tomorrow_reminder_enabled: !!(tomorrowReminderInput && tomorrowReminderInput.checked),
         message_search_enabled: !!(messageSearchEnabledInput && messageSearchEnabledInput.checked),
+        message_search_library_enabled: !!(messageSearchLibraryEnabledInput && messageSearchLibraryEnabledInput.checked),
+        media_file_access_enabled: !!(mediaFileAccessEnabledInput && mediaFileAccessEnabledInput.checked),
         bot_reply_enabled: !!(botReplyEnabledInput && botReplyEnabledInput.checked),
         calendar_ai_auto_create_enabled: !!(calendarAutoCreateInput && calendarAutoCreateInput.checked),
         gmail_reservation_alert_enabled: !!(gmailAlertEnabledInput && gmailAlertEnabledInput.checked),
@@ -1363,6 +1381,8 @@ const html = String.raw`<!doctype html>
         send_room_summary: !!dom.newRoomSendSummary.checked,
         calendar_tomorrow_reminder_enabled: !!dom.newRoomTomorrowReminder.checked,
         message_search_enabled: !!dom.newRoomMessageSearchEnabled.checked,
+        message_search_library_enabled: !!dom.newRoomMessageSearchLibraryEnabled.checked,
+        media_file_access_enabled: !!dom.newRoomMediaFileAccessEnabled.checked,
         bot_reply_enabled: !!dom.newRoomBotReplyEnabled.checked,
         calendar_ai_auto_create_enabled: !!dom.newRoomCalendarAutoCreate.checked,
         gmail_reservation_alert_enabled: !!dom.newRoomGmailAlertEnabled.checked,
@@ -1651,6 +1671,8 @@ const html = String.raw`<!doctype html>
       dom.newRoomSendSummary,
       dom.newRoomTomorrowReminder,
       dom.newRoomMessageSearchEnabled,
+      dom.newRoomMessageSearchLibraryEnabled,
+      dom.newRoomMediaFileAccessEnabled,
       dom.newRoomBotReplyEnabled,
       dom.newRoomCalendarAutoCreate,
       dom.newRoomGmailAlertEnabled,
@@ -1667,6 +1689,12 @@ const html = String.raw`<!doctype html>
     });
     dom.newRoomMessageSearchEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, !!dom.newRoomMessageSearchEnabled.checked);
+    });
+    dom.newRoomMessageSearchLibraryEnabled.addEventListener('change', function() {
+      saveBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_LIBRARY_KEY, !!dom.newRoomMessageSearchLibraryEnabled.checked);
+    });
+    dom.newRoomMediaFileAccessEnabled.addEventListener('change', function() {
+      saveBooleanSetting(NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY, !!dom.newRoomMediaFileAccessEnabled.checked);
     });
     dom.newRoomBotReplyEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, !!dom.newRoomBotReplyEnabled.checked);

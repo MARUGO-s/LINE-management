@@ -300,6 +300,8 @@ Deno.serve(async (req) => {
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
           calendar_ai_auto_create_enabled: payload.calendar_ai_auto_create_enabled,
           message_search_enabled: payload.message_search_enabled,
+          message_search_library_enabled: payload.message_search_library_enabled,
+          media_file_access_enabled: payload.media_file_access_enabled,
           gmail_reservation_alert_enabled: payload.gmail_reservation_alert_enabled,
           room_sort_order: payload.room_sort_order,
           delivery_hours: payload.delivery_hours,
@@ -307,7 +309,7 @@ Deno.serve(async (req) => {
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -528,7 +530,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -2301,6 +2303,8 @@ function buildRoomSettingsPayload(body: unknown): {
   calendar_tomorrow_reminder_enabled: boolean
   calendar_ai_auto_create_enabled: boolean
   message_search_enabled: boolean
+  message_search_library_enabled: boolean
+  media_file_access_enabled: boolean
   gmail_reservation_alert_enabled: boolean
   room_sort_order: number | null
   delivery_hours: number[] | null
@@ -2350,6 +2354,18 @@ function buildRoomSettingsPayload(body: unknown): {
   }
   const messageSearchEnabled = messageSearchEnabledRaw !== false
 
+  const messageSearchLibraryEnabledRaw = body.message_search_library_enabled
+  if (messageSearchLibraryEnabledRaw != null && typeof messageSearchLibraryEnabledRaw !== "boolean") {
+    throw { status: 400, message: "message_search_library_enabled must be boolean when provided." } satisfies AppError
+  }
+  const messageSearchLibraryEnabled = messageSearchLibraryEnabledRaw !== false
+
+  const mediaFileAccessEnabledRaw = body.media_file_access_enabled
+  if (mediaFileAccessEnabledRaw != null && typeof mediaFileAccessEnabledRaw !== "boolean") {
+    throw { status: 400, message: "media_file_access_enabled must be boolean when provided." } satisfies AppError
+  }
+  const mediaFileAccessEnabled = mediaFileAccessEnabledRaw !== false
+
   const gmailReservationAlertEnabledRaw = body.gmail_reservation_alert_enabled
   if (gmailReservationAlertEnabledRaw != null && typeof gmailReservationAlertEnabledRaw !== "boolean") {
     throw { status: 400, message: "gmail_reservation_alert_enabled must be boolean when provided." } satisfies AppError
@@ -2389,6 +2405,8 @@ function buildRoomSettingsPayload(body: unknown): {
     calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,
     calendar_ai_auto_create_enabled: roomAiAutoCreateEnabled,
     message_search_enabled: messageSearchEnabled,
+    message_search_library_enabled: messageSearchLibraryEnabled,
+    media_file_access_enabled: mediaFileAccessEnabled,
     gmail_reservation_alert_enabled: gmailReservationAlertEnabled,
     room_sort_order: roomSortOrder,
     delivery_hours: deliveryHours,

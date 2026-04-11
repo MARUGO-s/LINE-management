@@ -202,6 +202,8 @@ type RoomReplyPolicy = {
   isEnabled: boolean
   botReplyEnabled: boolean
   messageSearchEnabled: boolean
+  messageSearchLibraryEnabled: boolean
+  mediaFileAccessEnabled: boolean
   calendarAiAutoCreateEnabled: boolean
 }
 
@@ -367,7 +369,6 @@ Deno.serve(async (req) => {
 
       // Determine room/group ID or user ID as fallback
       const source = event.source || {}
-      const shouldPersistMessage = shouldPersistLineMessage(source)
       const roomId = String(source.groupId || source.roomId || source.userId || 'unknown')
       const userId = source.userId ? String(source.userId) : null
       const replyToken = String(event.replyToken ?? '')
@@ -377,13 +378,16 @@ Deno.serve(async (req) => {
         roomNameSyncDone.add(roomId)
         await syncRoomDisplayNameIfMissing(supabase, lineAccessToken, source, roomId)
       }
+      let roomReplyPolicy = await loadRoomReplyPolicy(
+        supabase,
+        roomId,
+        roomReplyPolicyCache,
+      )
+      const shouldPersistMessage = shouldPersistLineMessage(source, event.message)
+      const storableMediaType = normalizeStorableLineMediaType(event.message?.type)
+      const shouldStoreMediaFile = !!storableMediaType && roomReplyPolicy.mediaFileAccessEnabled
 
       if (event.message?.type === 'text') {
-        const roomReplyPolicy = await loadRoomReplyPolicy(
-          supabase,
-          roomId,
-          roomReplyPolicyCache,
-        )
         const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
         const text = String(event.message.text ?? '').trim()
         const quotedMessageId = extractQuotedLineMessageId(event.message)
@@ -496,7 +500,7 @@ Deno.serve(async (req) => {
             }
           }
 
-          if (roomReplyPolicy.messageSearchEnabled) {
+          if (roomReplyPolicy.messageSearchEnabled && roomReplyPolicy.messageSearchLibraryEnabled) {
             const librarySearchReply = await tryHandlePendingLibrarySearchConfirmation(
               text,
               supabase,
@@ -616,6 +620,7 @@ Deno.serve(async (req) => {
               supabase,
               roomId,
               userId,
+              roomReplyPolicy.messageSearchLibraryEnabled,
               messageRetentionDays,
               groqApiKey,
             )
@@ -818,7 +823,7 @@ Deno.serve(async (req) => {
       }
 
       // Parse content based on message type
-      const content = toStoredMessageContent(event.message)
+      const content = toStoredMessageContent(event.message, shouldStoreMediaFile)
       if (shouldPersistMessage) {
         // Save message to target database
         const { data: savedMessage, error } = await supabase
@@ -837,7 +842,7 @@ Deno.serve(async (req) => {
         } else {
           console.log(`Saved message from ${roomId}: ${content.substring(0, 30)}...`)
           const savedMessageId = String(savedMessage?.id ?? '').trim()
-          if (savedMessageId) {
+          if (savedMessageId && shouldStoreMediaFile) {
             await trySaveLineMediaContent(
               supabase,
               lineAccessToken,
@@ -878,12 +883,12 @@ Deno.serve(async (req) => {
   }
 })
 
-function toStoredMessageContent(message: any): string {
+function toStoredMessageContent(message: any, includeMediaTag = true): string {
   if (!message || typeof message !== 'object') {
     return '【不明なメッセージが送信されました】'
   }
 
-  const mediaTag = buildLineMediaTag(message?.id)
+  const mediaTag = includeMediaTag ? buildLineMediaTag(message?.id) : ''
 
   if (message.type === 'text') {
     return String(message.text ?? '')
@@ -1327,6 +1332,8 @@ async function syncRoomDisplayNameIfMissing(
       is_enabled: false,
       bot_reply_enabled: false,
       message_search_enabled: false,
+      message_search_library_enabled: false,
+      media_file_access_enabled: false,
       calendar_ai_auto_create_enabled: false,
       send_room_summary: false,
       updated_at: updatedAt,
@@ -1403,10 +1410,22 @@ function normalizeDisplayName(value: unknown): string | null {
   return normalized || null
 }
 
-function shouldPersistLineMessage(source: any): boolean {
+function shouldPersistLineMessage(source: any, message: any): boolean {
   const sourceType = String(source?.type ?? '').trim().toLowerCase()
+  const senderUserId = String(source?.userId ?? '').trim()
+  const botUserId = String(Deno.env.get('LINE_BOT_USER_ID') ?? '').trim()
   // 1:1 chat (source.type=user) is excluded from history storage.
-  return sourceType !== 'user'
+  if (sourceType === 'user') return false
+  // Messages without sender user id are treated as non-user-origin and are not persisted.
+  if (!senderUserId) return false
+  // Optional hard guard: when bot user id is configured, never persist bot-origin messages.
+  if (botUserId && senderUserId === botUserId) return false
+
+  if (message?.type === 'text') {
+    const text = String(message?.text ?? '').trim()
+    if (isLikelyBotConversationText(text)) return false
+  }
+  return true
 }
 
 async function loadMessageRetentionDays(
@@ -1448,6 +1467,8 @@ async function loadRoomReplyPolicy(
     isEnabled: false,
     botReplyEnabled: false,
     messageSearchEnabled: false,
+    messageSearchLibraryEnabled: false,
+    mediaFileAccessEnabled: false,
     calendarAiAutoCreateEnabled: false,
   } satisfies RoomReplyPolicy
   const normalizedRoomId = String(roomId ?? '').trim()
@@ -1461,7 +1482,7 @@ async function loadRoomReplyPolicy(
   try {
     const { data, error } = await supabase
       .from('room_summary_settings')
-      .select('room_name, is_enabled, bot_reply_enabled, message_search_enabled, calendar_ai_auto_create_enabled')
+      .select('room_name, is_enabled, bot_reply_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, calendar_ai_auto_create_enabled')
       .eq('room_id', normalizedRoomId)
       .maybeSingle()
 
@@ -1479,11 +1500,15 @@ async function loadRoomReplyPolicy(
     const isEnabled = data?.is_enabled !== false
     const botReplyEnabled = data?.bot_reply_enabled !== false
     const messageSearchEnabled = data?.message_search_enabled !== false
+    const messageSearchLibraryEnabled = data?.message_search_library_enabled !== false
+    const mediaFileAccessEnabled = data?.media_file_access_enabled !== false
     const calendarAiAutoCreateEnabled = data?.calendar_ai_auto_create_enabled !== false
     const requiresRegistration =
       data?.is_enabled === false &&
       data?.bot_reply_enabled === false &&
       data?.message_search_enabled === false &&
+      data?.message_search_library_enabled === false &&
+      data?.media_file_access_enabled === false &&
       data?.calendar_ai_auto_create_enabled === false
     const policy: RoomReplyPolicy = {
       roomName: normalizeDisplayName(data?.room_name ?? null),
@@ -1491,6 +1516,8 @@ async function loadRoomReplyPolicy(
       isEnabled,
       botReplyEnabled,
       messageSearchEnabled,
+      messageSearchLibraryEnabled,
+      mediaFileAccessEnabled,
       calendarAiAutoCreateEnabled,
     }
     cache.set(normalizedRoomId, policy)
@@ -1626,10 +1653,11 @@ function extractMessageSearchKeyword(rawText: string): string {
     .replace(/(1095日|730日|365日|180日|120日|60日|3年|2年|1年|三年|二年|一年|半年|12ヶ月|12か月|十二ヶ月|6ヶ月|6か月|六ヶ月|4ヶ月|4か月|四ヶ月|2ヶ月|2か月|二ヶ月|全期間|無制限)/g, ' ')
     .replace(/(過去|最近|直近|以内|分|間)/g, ' ')
     .replace(/(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|全ルーム|他ルーム|他のルーム|別ルーム|別のルーム)/g, ' ')
-    .replace(/(検索|探し|探して|探す|要約|まとめ|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい|記述|言及)/g, ' ')
+    .replace(/(検索|探し|探して|探す|要約|まとめ|まとめて|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい|記述|言及)/g, ' ')
     .replace(/(ありますか|あるか|あります|ある|でしたか|ですか|ますか|でしょうか|だったっけ|だっけ|っけ|かな|です|ます)/g, ' ')
-    .replace(/(を|は|が|に|で|の|から|だけ|について|して|ください|下さい|お願いします|お願い|とか|って|こと|もの|やつ)/g, ' ')
-    .replace(/[?？!！。．、,]/g, ' ')
+    // NOTE: Longer particles first to avoid partial matches (e.g. "について" -> "に" + "ついて").
+    .replace(/(について|に関して|に対して|してください|して下さい|お願いします|お願い|下さい|ください|だけ|から|とか|って|こと|もの|やつ|して|を|は|が|に|で|の)/g, ' ')
+    .replace(/[?？!！。．、,「」『』（）()\[\]【】]/g, ' ')
   return normalizeKeywordForFilter(stripped)
 }
 
@@ -1883,6 +1911,7 @@ async function buildMessageSearchReply(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
   userId: string | null,
+  librarySearchEnabled: boolean,
   configuredRetentionDays: MessageRetentionDays,
   groqApiKey: string,
 ): Promise<string[]> {
@@ -1942,12 +1971,20 @@ async function buildMessageSearchReply(
 
   const hitsRaw = rows.filter((row) => {
     if (!messageMatchesKeyword(row.content, command.keyword)) return false
-    if (isLikelyBotDirectedSearchPrompt(row.content)) return false
+    if (isLikelyBotConversationText(row.content)) return false
     return true
   })
 
   if (hitsRaw.length === 0) {
     const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+    if (!librarySearchEnabled) {
+      const lines: string[] = [`「${command.keyword}」に一致する会話はありません（${periodText}）`]
+      if (adjustedByRetention) {
+        lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
+      }
+      lines.push('※このルームでは資料ライブラリ検索（2段階目）が無効です。')
+      return [lines.join('\n')]
+    }
     const pendingSaved = await savePendingLibrarySearchConfirmation(
       supabase,
       roomId,
@@ -2062,7 +2099,7 @@ function formatDocumentSearchPreview(
   const fileName = normalizeInlineText(row.original_file_name) || '（ファイル名不明）'
   const mimeType = normalizeInlineText(row.mime_type) || '-'
   const snippet = buildDocumentSearchSnippet(row.extracted_text, keyword)
-  const wrappedSnippet = wrapTextForLineDisplay(snippet, 24)
+  const snippetLines = splitMessagePreviewIntoParagraphLines(snippet, 24)
   const lines = [`${index}件目`]
   if (includeRoomLabel) {
     const roomLabel = normalizeInlineText(String(row.room_label ?? '')) || '（ルーム不明）'
@@ -2072,7 +2109,7 @@ function formatDocumentSearchPreview(
   lines.push(`  ファイル: ${fileName}`)
   lines.push(`  種別: ${mimeType}`)
   lines.push('  抜粋:')
-  for (const line of wrappedSnippet) {
+  for (const line of snippetLines) {
     lines.push(`    ${line}`)
   }
   return lines
@@ -2168,17 +2205,36 @@ async function buildLineTaggedDocumentLibrarySearchReply(
 }
 
 function buildDocumentSearchSnippet(text: string, keyword: string): string {
-  const normalized = normalizeInlineText(String(text ?? '')).replace(/\s+/g, ' ').trim()
+  const normalized = normalizeMessagePreviewText(String(text ?? '')).replace(/\s+/g, ' ').trim()
   if (!normalized) return '（本文抽出なし。ファイル名のみ一致）'
-  const lower = normalized.toLowerCase()
-  const key = normalizeInlineText(keyword).toLowerCase()
-  if (!key) {
+
+  const key = normalizeMessagePreviewText(keyword).toLowerCase()
+  const keywordTokens = key
+    .split(/[\s、，。]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0)
+
+  if (!key || keywordTokens.length === 0) {
     return normalized.length > 180 ? `${normalized.slice(0, 180)}...` : normalized
   }
+
+  const sentenceCandidates = splitMessagePreviewIntoParagraphLines(normalized, 24)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  for (const sentence of sentenceCandidates) {
+    const sentenceLower = sentence.toLowerCase()
+    const matched = keywordTokens.some((token) => sentenceLower.includes(token))
+    if (!matched) continue
+    return sentence.length > 180 ? `${sentence.slice(0, 180)}...` : sentence
+  }
+
+  const lower = normalized.toLowerCase()
   const idx = lower.indexOf(key)
   if (idx < 0) {
     return normalized.length > 180 ? `${normalized.slice(0, 180)}...` : normalized
   }
+
   const start = Math.max(0, idx - 70)
   const end = Math.min(normalized.length, idx + key.length + 70)
   const prefix = start > 0 ? '...' : ''
@@ -2258,6 +2314,7 @@ function formatSearchDateTime(iso: string): string {
   if (Number.isNaN(date.getTime())) return '(時刻不明)'
   return new Intl.DateTimeFormat('ja-JP', {
     timeZone: 'Asia/Tokyo',
+    year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -2348,6 +2405,19 @@ function isLikelyBotDirectedSearchPrompt(text: string): boolean {
   if (looksLikeMessageSearchQuestion(normalized) && /(教えて|知りたい|参照|検索|見せて|表示|出して)/.test(compact)) {
     return true
   }
+  return false
+}
+
+function isLikelyBotConversationText(text: string): boolean {
+  const normalized = normalizeForRuleParsing(String(text ?? '')).trim()
+  if (!normalized) return false
+  const compact = normalized.replace(/\s+/g, '')
+  if (isExplicitBotCommandText(normalized)) return true
+  if (parseCalendarCommand(normalized).matched) return true
+  if (looksLikeCalendarListQuestion(normalized)) return true
+  if (looksLikeMessageSearchQuestion(normalized)) return true
+  if (isLikelyBotDirectedSearchPrompt(normalized)) return true
+  if (/^(予定確認|予定一覧|予定報告|会話検索|履歴検索|トーク検索|チャット検索)/.test(compact)) return true
   return false
 }
 
