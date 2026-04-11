@@ -468,6 +468,20 @@ const html = String.raw`<!doctype html>
       width: fit-content;
     }
 
+    .new-room-config-summary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(149, 219, 255, 0.24);
+      background: rgba(7, 20, 34, 0.55);
+      color: #bde6ff;
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+
     .rooms-table .room-id-tools {
       display: inline-flex;
       align-items: center;
@@ -878,23 +892,8 @@ const html = String.raw`<!doctype html>
           <input id="newRoomId" class="input" type="text" placeholder="新規 room_id">
           <input id="newRoomName" class="input" type="text" placeholder="表示名（任意）">
           <input id="newRoomHours" class="input narrow" type="text" placeholder="時刻: 12,17">
-          <label class="switch"><input id="newRoomEnabled" type="checkbox" checked>有効</label>
-          <label class="switch"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
-          <label class="switch"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
-          <label class="switch"><input id="newRoomMediaFileAccessEnabled" type="checkbox" checked>メディアアクセス</label>
-          <label class="switch"><input id="newRoomCalendarAutoCreate" type="checkbox" checked>自動登録</label>
-          <label class="switch"><input id="newRoomSilentAutoRegister" type="checkbox">無返信即時登録（低確度は仮）</label>
-          <label class="switch"><input id="newRoomGmailAlertEnabled" type="checkbox">Gmail予約通知</label>
-          <select id="newRoomCleanupTiming" class="select" aria-label="ルーム処理タイミング">
-            <option value="">処理: 全体設定を継承</option>
-            <option value="after_each_delivery">処理: 配信成功ごと</option>
-            <option value="end_of_day">処理: 1日の最終配信後</option>
-          </select>
-          <select id="newRoomSummaryMode" class="select" aria-label="ルーム最終配信の集計方式">
-            <option value="">最終回: 全体設定を継承</option>
-            <option value="independent">最終回: 各回独立</option>
-            <option value="daily_rollup">最終回: 1日まとめ</option>
-          </select>
+          <button id="openNewRoomConfigBtn" class="button" type="button">追加時の設定</button>
+          <span id="newRoomConfigSummary" class="new-room-config-summary">-</span>
           <button id="addRoomBtn" class="button primary">ルーム設定を追加</button>
         </div>
         <div class="table-wrap" style="margin-top:12px;">
@@ -992,6 +991,38 @@ const html = String.raw`<!doctype html>
     </div>
   </div>
 
+  <div id="newRoomConfigModal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="newRoomConfigModalTitle">
+      <h3 id="newRoomConfigModalTitle" class="modal-title">新規ルーム追加時の設定</h3>
+      <div class="modal-meta">ここで選んだ値が次の追加に使われます。</div>
+      <div class="room-scope-modal-list" style="margin-top:12px;">
+        <label class="room-scope-option"><input id="newRoomEnabled" type="checkbox">有効</label>
+        <label class="room-scope-option"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
+        <label class="room-scope-option"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
+        <label class="room-scope-option"><input id="newRoomMediaFileAccessEnabled" type="checkbox">メディアアクセス</label>
+        <label class="room-scope-option"><input id="newRoomCalendarAutoCreate" type="checkbox">自動登録</label>
+        <label class="room-scope-option"><input id="newRoomSilentAutoRegister" type="checkbox">無返信即時登録（低確度は仮）</label>
+        <label class="room-scope-option"><input id="newRoomGmailAlertEnabled" type="checkbox">Gmail予約通知</label>
+      </div>
+      <div class="controls" style="margin-top:10px;">
+        <select id="newRoomCleanupTiming" class="select" aria-label="ルーム処理タイミング">
+          <option value="">処理: 全体設定を継承</option>
+          <option value="after_each_delivery">処理: 配信成功ごと</option>
+          <option value="end_of_day">処理: 1日の最終配信後</option>
+        </select>
+        <select id="newRoomSummaryMode" class="select" aria-label="ルーム最終配信の集計方式">
+          <option value="">最終回: 全体設定を継承</option>
+          <option value="independent">最終回: 各回独立</option>
+          <option value="daily_rollup">最終回: 1日まとめ</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button id="cancelNewRoomConfigBtn" class="button">閉じる</button>
+        <button id="saveNewRoomConfigBtn" class="button primary">適用</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const API_BASE = '/functions/v1/admin-api';
     const TOKEN_KEY = 'line_summary_admin_token';
@@ -1049,6 +1080,11 @@ const html = String.raw`<!doctype html>
       newRoomGmailAlertEnabled: document.getElementById('newRoomGmailAlertEnabled'),
       newRoomCleanupTiming: document.getElementById('newRoomCleanupTiming'),
       newRoomSummaryMode: document.getElementById('newRoomSummaryMode'),
+      openNewRoomConfigBtn: document.getElementById('openNewRoomConfigBtn'),
+      newRoomConfigSummary: document.getElementById('newRoomConfigSummary'),
+      newRoomConfigModal: document.getElementById('newRoomConfigModal'),
+      cancelNewRoomConfigBtn: document.getElementById('cancelNewRoomConfigBtn'),
+      saveNewRoomConfigBtn: document.getElementById('saveNewRoomConfigBtn'),
       addRoomBtn: document.getElementById('addRoomBtn'),
       roomIdModal: document.getElementById('roomIdModal'),
       roomIdModalName: document.getElementById('roomIdModalName'),
@@ -1118,6 +1154,44 @@ const html = String.raw`<!doctype html>
       dom.newRoomCalendarAutoCreate.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY, true);
       dom.newRoomSilentAutoRegister.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_SILENT_AUTO_REGISTER_KEY, false);
       dom.newRoomGmailAlertEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, false);
+      refreshNewRoomConfigSummary();
+    }
+
+    function buildNewRoomConfigSummary() {
+      const enabledCount =
+        (dom.newRoomEnabled.checked ? 1 : 0) +
+        (dom.newRoomSendSummary.checked ? 1 : 0) +
+        (dom.newRoomTomorrowReminder.checked ? 1 : 0) +
+        (dom.newRoomMediaFileAccessEnabled.checked ? 1 : 0) +
+        (dom.newRoomCalendarAutoCreate.checked ? 1 : 0) +
+        (dom.newRoomSilentAutoRegister.checked ? 1 : 0) +
+        (dom.newRoomGmailAlertEnabled.checked ? 1 : 0);
+      const cleanup = dom.newRoomCleanupTiming.value === 'end_of_day'
+        ? '最終配信後'
+        : dom.newRoomCleanupTiming.value === 'after_each_delivery'
+        ? '配信ごと'
+        : '継承';
+      const summary = dom.newRoomSummaryMode.value === 'daily_rollup'
+        ? '1日まとめ'
+        : dom.newRoomSummaryMode.value === 'independent'
+        ? '各回独立'
+        : '継承';
+      return enabledCount + '/7 有効 ・ 処理:' + cleanup + ' ・ 最終回:' + summary;
+    }
+
+    function refreshNewRoomConfigSummary() {
+      if (!dom.newRoomConfigSummary) return;
+      dom.newRoomConfigSummary.textContent = buildNewRoomConfigSummary();
+    }
+
+    function openNewRoomConfigModal() {
+      dom.newRoomConfigModal.classList.add('open');
+      dom.newRoomConfigModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeNewRoomConfigModal() {
+      dom.newRoomConfigModal.classList.remove('open');
+      dom.newRoomConfigModal.setAttribute('aria-hidden', 'true');
     }
 
     function syncAuthState() {
@@ -2090,6 +2164,7 @@ const html = String.raw`<!doctype html>
       applyNewRoomDefaultCheckboxes();
       dom.newRoomCleanupTiming.value = '';
       dom.newRoomSummaryMode.value = '';
+      refreshNewRoomConfigSummary();
       await safeLoadState();
     }
 
@@ -2454,9 +2529,36 @@ const html = String.raw`<!doctype html>
     dom.newRoomGmailAlertEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, !!dom.newRoomGmailAlertEnabled.checked);
     });
+    [
+      dom.newRoomEnabled,
+      dom.newRoomSendSummary,
+      dom.newRoomTomorrowReminder,
+      dom.newRoomMediaFileAccessEnabled,
+      dom.newRoomCalendarAutoCreate,
+      dom.newRoomSilentAutoRegister,
+      dom.newRoomGmailAlertEnabled,
+      dom.newRoomCleanupTiming,
+      dom.newRoomSummaryMode,
+    ].forEach(function(el) {
+      if (!el) return;
+      el.addEventListener('change', refreshNewRoomConfigSummary);
+    });
 
     dom.closeRoomIdBtn.addEventListener('click', function() {
       closeRoomIdModal();
+    });
+
+    dom.openNewRoomConfigBtn.addEventListener('click', function() {
+      openNewRoomConfigModal();
+    });
+
+    dom.cancelNewRoomConfigBtn.addEventListener('click', function() {
+      closeNewRoomConfigModal();
+    });
+
+    dom.saveNewRoomConfigBtn.addEventListener('click', function() {
+      refreshNewRoomConfigSummary();
+      closeNewRoomConfigModal();
     });
 
     dom.cancelRoomConfigBtn.addEventListener('click', function() {
@@ -2493,6 +2595,12 @@ const html = String.raw`<!doctype html>
       }
     });
 
+    dom.newRoomConfigModal.addEventListener('click', function(event) {
+      if (event.target === dom.newRoomConfigModal) {
+        closeNewRoomConfigModal();
+      }
+    });
+
     dom.roomConfigModal.addEventListener('click', function(event) {
       if (event.target === dom.roomConfigModal) {
         closeRoomConfigModal();
@@ -2521,6 +2629,9 @@ const html = String.raw`<!doctype html>
     document.addEventListener('keydown', function(event) {
       if (event.key === 'Escape' && dom.roomIdModal.classList.contains('open')) {
         closeRoomIdModal();
+      }
+      if (event.key === 'Escape' && dom.newRoomConfigModal.classList.contains('open')) {
+        closeNewRoomConfigModal();
       }
       if (event.key === 'Escape' && dom.roomConfigModal.classList.contains('open')) {
         closeRoomConfigModal();
