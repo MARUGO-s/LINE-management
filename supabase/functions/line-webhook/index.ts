@@ -215,6 +215,7 @@ type LineUserPermissionPolicy = {
   canCalendarCreate: boolean
   canCalendarUpdate: boolean
   canMediaAccess: boolean
+  excludedMessageSearchRoomIds: string[]
 }
 
 type CalendarSourceMeta = {
@@ -438,7 +439,13 @@ Deno.serve(async (req) => {
         }
         const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
         const userIsActive = lineUserPermission.isActive
-        const canMessageSearch = userIsActive && roomReplyPolicy.messageSearchEnabled && lineUserPermission.canMessageSearch
+        const isCurrentRoomExcludedForMessageSearch = isRoomExcludedForMessageSearch(
+          lineUserPermission.excludedMessageSearchRoomIds,
+          roomId,
+        )
+        const canMessageSearch = userIsActive &&
+          roomReplyPolicy.messageSearchEnabled &&
+          lineUserPermission.canMessageSearch
         const canLibrarySearch = userIsActive && roomReplyPolicy.messageSearchLibraryEnabled && lineUserPermission.canLibrarySearch
         const canCalendarCreate = userIsActive && roomReplyPolicy.calendarAiAutoCreateEnabled && lineUserPermission.canCalendarCreate
         const canCalendarUpdate = userIsActive && lineUserPermission.canCalendarUpdate
@@ -692,7 +699,10 @@ Deno.serve(async (req) => {
               continue
             }
 
-            if (!canMessageSearch) {
+            const currentRoomExcludedForCurrentScope = !!messageSearchCommand &&
+              messageSearchCommand.scope !== 'all_rooms' &&
+              isCurrentRoomExcludedForMessageSearch
+            if (!canMessageSearch || currentRoomExcludedForCurrentScope) {
               if (!lineAccessToken) {
                 console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search permission status.')
                 continue
@@ -701,7 +711,9 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for message search permission status.')
                 continue
               }
-              const permissionReply = messageSearchCommand && canLibrarySearch
+              const permissionReply = currentRoomExcludedForCurrentScope
+                ? 'このルームはこのユーザーの会話検索対象外に設定されています。管理画面で対象ルームを変更してください。'
+                : messageSearchCommand && canLibrarySearch
                 ? await buildLibrarySearchPromptWhenMessageSearchDisabled(
                   supabase,
                   roomId,
@@ -725,6 +737,7 @@ Deno.serve(async (req) => {
               userId,
               canLibrarySearch,
               messageRetentionDays,
+              lineUserPermission.excludedMessageSearchRoomIds,
               groqApiKey,
             )
 
@@ -1882,6 +1895,7 @@ async function loadLineUserPermissionPolicy(
     canCalendarCreate: true,
     canCalendarUpdate: true,
     canMediaAccess: true,
+    excludedMessageSearchRoomIds: [],
   }
   const normalizedUserId = String(lineUserId ?? '').trim()
   if (!normalizedUserId) return fallback
@@ -1890,7 +1904,7 @@ async function loadLineUserPermissionPolicy(
   try {
     const { data, error } = await supabase
       .from('line_user_permissions')
-      .select('is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access')
+      .select('is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids')
       .eq('line_user_id', normalizedUserId)
       .maybeSingle()
     if (error || !data) {
@@ -1904,6 +1918,7 @@ async function loadLineUserPermissionPolicy(
       canCalendarCreate: data?.can_calendar_create !== false,
       canCalendarUpdate: data?.can_calendar_update !== false,
       canMediaAccess: data?.can_media_access !== false,
+      excludedMessageSearchRoomIds: normalizeExcludedMessageSearchRoomIds(data?.excluded_message_search_room_ids),
     }
     cache.set(normalizedUserId, policy)
     return policy
@@ -1923,6 +1938,17 @@ function isRoomBotReplyEnabled(policy: RoomReplyPolicy): boolean {
 
 function shouldSendRoomReply(policy: RoomReplyPolicy): boolean {
   return policy.isEnabled && policy.botReplyEnabled && !policy.calendarSilentAutoRegisterEnabled
+}
+
+function normalizeExcludedMessageSearchRoomIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return Array.from(new Set(value.map((v) => String(v ?? '').trim()).filter((v) => v.length > 0)))
+}
+
+function isRoomExcludedForMessageSearch(excludedRoomIds: string[], roomId: string): boolean {
+  const normalizedRoomId = String(roomId ?? '').trim()
+  if (!normalizedRoomId) return false
+  return excludedRoomIds.includes(normalizedRoomId)
 }
 
 function looksLikeBotInteractionRequest(text: string): boolean {
@@ -2299,6 +2325,7 @@ async function buildMessageSearchReply(
   userId: string | null,
   librarySearchEnabled: boolean,
   configuredRetentionDays: MessageRetentionDays,
+  excludedRoomIds: string[],
   groqApiKey: string,
 ): Promise<string[]> {
   if (parseError) return [parseError]
@@ -2343,7 +2370,8 @@ async function buildMessageSearchReply(
     return [`会話検索に失敗しました。${error.message}`]
   }
 
-  const rows: SearchMessageRow[] = Array.isArray(data)
+  const excludedSet = new Set((excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0))
+  const rowsRaw: SearchMessageRow[] = Array.isArray(data)
     ? data.map((row: any) => ({
         room_id: String(row?.room_id ?? ''),
         content: String(row?.content ?? ''),
@@ -2351,6 +2379,10 @@ async function buildMessageSearchReply(
         user_id: row?.user_id == null ? null : String(row.user_id),
       }))
     : []
+  const rows = rowsRaw.filter((row) => {
+    if (command.scope !== 'all_rooms') return true
+    return !excludedSet.has(String(row.room_id ?? '').trim())
+  })
 
   const hitsRaw = rows.filter((row) => {
     if (!messageMatchesKeyword(row.content, command.keyword)) return false

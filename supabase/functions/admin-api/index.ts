@@ -78,6 +78,7 @@ type LineUserPermissionRow = {
   can_calendar_create: boolean
   can_calendar_update: boolean
   can_media_access: boolean
+  excluded_message_search_room_ids: string[]
   note: string | null
   updated_at: string
 }
@@ -352,10 +353,11 @@ Deno.serve(async (req) => {
           can_calendar_create: payload.can_calendar_create,
           can_calendar_update: payload.can_calendar_update,
           can_media_access: payload.can_media_access,
+          excluded_message_search_room_ids: payload.excluded_message_search_room_ids,
           note: payload.note,
           updated_at: new Date().toISOString(),
         }, { onConflict: "line_user_id" })
-        .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, note, updated_at")
+        .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, note, updated_at")
         .single()
       if (error) {
         throw { status: 500, message: `Failed to upsert line user permission: ${error.message}` } satisfies AppError
@@ -606,7 +608,7 @@ async function fetchState(
     fetchStorageUsageState(supabase),
     supabase
       .from("line_user_permissions")
-      .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, note, updated_at")
+      .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, note, updated_at")
       .order("updated_at", { ascending: false })
       .limit(USER_PERMISSION_LIST_MAX_LIMIT),
   ])
@@ -650,7 +652,7 @@ async function fetchLineUserPermissions(
 
   let query = supabase
     .from("line_user_permissions")
-    .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, note, updated_at", { count: "exact" })
+    .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, note, updated_at", { count: "exact" })
     .order("updated_at", { ascending: false })
     .range(offset, offset + limit - 1)
 
@@ -2766,6 +2768,16 @@ function buildLineUserPermissionPayload(body: unknown): LineUserPermissionRow {
   }
   const displayNameRaw = typeof body.display_name === "string" ? body.display_name.trim() : ""
   const noteRaw = typeof body.note === "string" ? body.note.trim() : ""
+  const excludedRoomIdsRaw = body.excluded_message_search_room_ids
+  let excludedRoomIds: string[] = []
+  if (excludedRoomIdsRaw != null) {
+    if (!Array.isArray(excludedRoomIdsRaw)) {
+      throw { status: 400, message: "excluded_message_search_room_ids must be string[] when provided." } satisfies AppError
+    }
+    excludedRoomIds = Array.from(new Set(excludedRoomIdsRaw
+      .map((v) => String(v ?? "").trim())
+      .filter((v) => v.length > 0)))
+  }
   return {
     line_user_id: lineUserId,
     display_name: displayNameRaw || null,
@@ -2775,6 +2787,7 @@ function buildLineUserPermissionPayload(body: unknown): LineUserPermissionRow {
     can_calendar_create: ensureBoolean(body.can_calendar_create, "can_calendar_create", true),
     can_calendar_update: ensureBoolean(body.can_calendar_update, "can_calendar_update", true),
     can_media_access: ensureBoolean(body.can_media_access, "can_media_access", true),
+    excluded_message_search_room_ids: excludedRoomIds,
     note: noteRaw || null,
     updated_at: new Date().toISOString(),
   }

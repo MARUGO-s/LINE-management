@@ -574,8 +574,8 @@ const html = String.raw`<!doctype html>
     }
 
     .user-permissions-table {
-      width: max(100%, 1480px);
-      min-width: 1480px;
+      width: max(100%, 1660px);
+      min-width: 1660px;
       table-layout: fixed;
     }
 
@@ -592,8 +592,9 @@ const html = String.raw`<!doctype html>
     .user-permissions-table th:nth-child(6), .user-permissions-table td:nth-child(6) { width: 90px; text-align: center; }
     .user-permissions-table th:nth-child(7), .user-permissions-table td:nth-child(7) { width: 90px; text-align: center; }
     .user-permissions-table th:nth-child(8), .user-permissions-table td:nth-child(8) { width: 90px; text-align: center; }
-    .user-permissions-table th:nth-child(9), .user-permissions-table td:nth-child(9) { width: 310px; }
-    .user-permissions-table th:nth-child(10), .user-permissions-table td:nth-child(10) { width: 140px; text-align: center; }
+    .user-permissions-table th:nth-child(9), .user-permissions-table td:nth-child(9) { width: 190px; text-align: center; }
+    .user-permissions-table th:nth-child(10), .user-permissions-table td:nth-child(10) { width: 300px; }
+    .user-permissions-table th:nth-child(11), .user-permissions-table td:nth-child(11) { width: 140px; text-align: center; }
 
     .user-permission-check {
       width: 18px;
@@ -604,6 +605,57 @@ const html = String.raw`<!doctype html>
     .user-note-input {
       width: 100%;
       min-width: 0;
+    }
+
+    .room-scope-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 120px;
+      min-height: 30px;
+      padding: 0 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(149, 219, 255, 0.24);
+      background: rgba(7, 20, 34, 0.55);
+      color: #bde6ff;
+      font-size: 0.76rem;
+    }
+
+    .room-scope-badge.warn {
+      color: #ffd27d;
+      border-color: rgba(255, 210, 125, 0.36);
+    }
+
+    .room-scope-modal-list {
+      margin-top: 10px;
+      max-height: min(56vh, 420px);
+      overflow: auto;
+      border: 1px solid rgba(155, 220, 255, 0.22);
+      border-radius: 10px;
+      background: rgba(8, 21, 35, 0.58);
+      padding: 8px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .room-scope-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.84rem;
+      color: #d7edff;
+      padding: 4px 6px;
+      border-radius: 8px;
+    }
+
+    .room-scope-option:hover {
+      background: rgba(87, 216, 255, 0.08);
+    }
+
+    .room-scope-option input {
+      width: 16px;
+      height: 16px;
+      accent-color: #28c2ff;
     }
 
     .modal-backdrop {
@@ -883,6 +935,7 @@ const html = String.raw`<!doctype html>
                 <th>予定作成</th>
                 <th>予定更新</th>
                 <th>メディア</th>
+                <th>検索対象ルーム</th>
                 <th>メモ</th>
                 <th>状態</th>
               </tr>
@@ -906,6 +959,18 @@ const html = String.raw`<!doctype html>
       <div class="modal-actions">
         <button id="copyRoomIdBtn" class="button">コピー</button>
         <button id="closeRoomIdBtn" class="button primary">閉じる</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="userRoomScopeModal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="userRoomScopeModalTitle">
+      <h3 id="userRoomScopeModalTitle" class="modal-title">会話検索の対象外ルーム選択</h3>
+      <div id="userRoomScopeModalMeta" class="modal-meta">対象ユーザー: -</div>
+      <div id="userRoomScopeModalList" class="room-scope-modal-list"></div>
+      <div class="modal-actions">
+        <button id="cancelUserRoomScopeBtn" class="button">キャンセル</button>
+        <button id="saveUserRoomScopeBtn" class="button primary">保存</button>
       </div>
     </div>
   </div>
@@ -973,6 +1038,11 @@ const html = String.raw`<!doctype html>
       roomIdModalValue: document.getElementById('roomIdModalValue'),
       copyRoomIdBtn: document.getElementById('copyRoomIdBtn'),
       closeRoomIdBtn: document.getElementById('closeRoomIdBtn'),
+      userRoomScopeModal: document.getElementById('userRoomScopeModal'),
+      userRoomScopeModalMeta: document.getElementById('userRoomScopeModalMeta'),
+      userRoomScopeModalList: document.getElementById('userRoomScopeModalList'),
+      cancelUserRoomScopeBtn: document.getElementById('cancelUserRoomScopeBtn'),
+      saveUserRoomScopeBtn: document.getElementById('saveUserRoomScopeBtn'),
     };
     const AUTO_REFRESH_MS_VISIBLE = 5000;
     const AUTO_REFRESH_MS_HIDDEN = 15000;
@@ -982,6 +1052,7 @@ const html = String.raw`<!doctype html>
     let isGlobalDirty = false;
     let isRoomDirty = false;
     let isUserPermissionDirty = false;
+    let activeUserRoomScopeRow = null;
     const roomAutoSaveInFlight = new Set();
 
     function token() {
@@ -1377,7 +1448,7 @@ const html = String.raw`<!doctype html>
       const rows = Array.isArray(items) ? items : [];
       dom.userPermissionTableBody.innerHTML = '';
       if (rows.length === 0) {
-        dom.userPermissionTableBody.innerHTML = '<tr><td class="empty" colspan="10">友だち追加済みユーザーはまだありません。</td></tr>';
+        dom.userPermissionTableBody.innerHTML = '<tr><td class="empty" colspan="11">友だち追加済みユーザーはまだありません。</td></tr>';
         isUserPermissionDirty = false;
         return;
       }
@@ -1385,6 +1456,14 @@ const html = String.raw`<!doctype html>
         const tr = document.createElement('tr');
         tr.dataset.lineUserId = String(row.line_user_id || '').trim();
         tr.dataset.displayName = String(row.display_name || '').trim();
+        const excludedRoomIds = Array.isArray(row.excluded_message_search_room_ids)
+          ? row.excluded_message_search_room_ids.map(function(v) { return String(v || '').trim(); }).filter(function(v) { return !!v; })
+          : [];
+        tr.dataset.excludedMessageSearchRoomIds = JSON.stringify(excludedRoomIds);
+        const scopeBadgeClass = excludedRoomIds.length > 0 ? 'room-scope-badge warn' : 'room-scope-badge';
+        const scopeBadgeText = excludedRoomIds.length > 0
+          ? ('除外 ' + excludedRoomIds.length + '件')
+          : '全ルーム対象';
         tr.innerHTML =
           '<td><button class="button user-show-id" type="button">ID表示</button></td>' +
           '<td>' + escapeHtml(row.display_name || '-') + '</td>' +
@@ -1394,6 +1473,7 @@ const html = String.raw`<!doctype html>
           '<td><input class="user-permission-check user-can-calendar-create" type="checkbox" ' + (row.can_calendar_create !== false ? 'checked' : '') + '></td>' +
           '<td><input class="user-permission-check user-can-calendar-update" type="checkbox" ' + (row.can_calendar_update !== false ? 'checked' : '') + '></td>' +
           '<td><input class="user-permission-check user-can-media-access" type="checkbox" ' + (row.can_media_access !== false ? 'checked' : '') + '></td>' +
+          '<td><button class="button user-room-scope" type="button">ルーム選択</button><div class="' + scopeBadgeClass + '" style="margin-top:6px;">' + escapeHtml(scopeBadgeText) + '</div></td>' +
           '<td><input class="input user-note-input" type="text" value="' + escapeHtml(row.note || '') + '" placeholder="メモ"></td>' +
           '<td><span class="tag ok">自動保存</span></td>';
         dom.userPermissionTableBody.appendChild(tr);
@@ -1410,6 +1490,71 @@ const html = String.raw`<!doctype html>
       dom.roomIdModalValue.textContent = lineUserId;
       dom.roomIdModal.classList.add('open');
       dom.roomIdModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function getRoomOptionsForUserScope() {
+      const rooms = currentState && Array.isArray(currentState.room_overview) ? currentState.room_overview : [];
+      return rooms.map(function(room) {
+        const roomId = String(room && room.room_id ? room.room_id : '').trim();
+        const roomName = String(room && room.room_name ? room.room_name : '').trim();
+        return {
+          room_id: roomId,
+          room_label: roomName || roomId || '(未設定)',
+        };
+      }).filter(function(room) { return !!room.room_id; });
+    }
+
+    function openUserRoomScopeModal(tr) {
+      activeUserRoomScopeRow = tr;
+      const lineUserId = String(tr.dataset.lineUserId || '').trim();
+      const displayName = String(tr.dataset.displayName || '').trim() || '(未設定)';
+      dom.userRoomScopeModalMeta.textContent = '対象ユーザー: ' + displayName + ' (' + lineUserId + ')';
+
+      let excludedRoomIds = [];
+      try {
+        const parsed = JSON.parse(String(tr.dataset.excludedMessageSearchRoomIds || '[]'));
+        excludedRoomIds = Array.isArray(parsed)
+          ? parsed.map(function(v) { return String(v || '').trim(); }).filter(function(v) { return !!v; })
+          : [];
+      } catch (_) {
+        excludedRoomIds = [];
+      }
+      const excludedSet = new Set(excludedRoomIds);
+      const options = getRoomOptionsForUserScope();
+      if (!options.length) {
+        dom.userRoomScopeModalList.innerHTML = '<div class="empty">ルームがまだありません。</div>';
+      } else {
+        dom.userRoomScopeModalList.innerHTML = options.map(function(room) {
+          const checked = excludedSet.has(room.room_id) ? 'checked' : '';
+          return (
+            '<label class="room-scope-option">' +
+            '<input class="room-scope-check" type="checkbox" data-room-id="' + escapeHtml(room.room_id) + '" ' + checked + '>' +
+            '<span>' + escapeHtml(room.room_label) + '</span>' +
+            '</label>'
+          );
+        }).join('');
+      }
+      dom.userRoomScopeModal.classList.add('open');
+      dom.userRoomScopeModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeUserRoomScopeModal() {
+      activeUserRoomScopeRow = null;
+      dom.userRoomScopeModal.classList.remove('open');
+      dom.userRoomScopeModal.setAttribute('aria-hidden', 'true');
+    }
+
+    async function saveUserRoomScopeSelection() {
+      if (!activeUserRoomScopeRow) return;
+      const checks = Array.from(dom.userRoomScopeModalList.querySelectorAll('.room-scope-check'));
+      const excludedRoomIds = checks
+        .filter(function(el) { return el instanceof HTMLInputElement && el.checked; })
+        .map(function(el) { return String(el.getAttribute('data-room-id') || '').trim(); })
+        .filter(function(v) { return !!v; });
+      activeUserRoomScopeRow.dataset.excludedMessageSearchRoomIds = JSON.stringify(excludedRoomIds);
+      await saveSingleUserPermissionRow(activeUserRoomScopeRow);
+      alert('検索対象ルームを保存しました。');
+      closeUserRoomScopeModal();
     }
 
     function renderRooms(roomOverview, roomSettings) {
@@ -1578,6 +1723,15 @@ const html = String.raw`<!doctype html>
     function buildUserPermissionPayloadFromRow(tr) {
       const lineUserId = String(tr.dataset.lineUserId || '').trim();
       const displayNameRaw = String(tr.dataset.displayName || '').trim();
+      let excludedMessageSearchRoomIds = [];
+      try {
+        const parsed = JSON.parse(String(tr.dataset.excludedMessageSearchRoomIds || '[]'));
+        excludedMessageSearchRoomIds = Array.isArray(parsed)
+          ? parsed.map(function(v) { return String(v || '').trim(); }).filter(function(v) { return !!v; })
+          : [];
+      } catch (_) {
+        excludedMessageSearchRoomIds = [];
+      }
       const noteInput = tr.querySelector('.user-note-input');
       const isActiveInput = tr.querySelector('.user-is-active');
       const canMessageSearchInput = tr.querySelector('.user-can-message-search');
@@ -1595,6 +1749,7 @@ const html = String.raw`<!doctype html>
         can_calendar_create: !!(canCalendarCreateInput && canCalendarCreateInput.checked),
         can_calendar_update: !!(canCalendarUpdateInput && canCalendarUpdateInput.checked),
         can_media_access: !!(canMediaAccessInput && canMediaAccessInput.checked),
+        excluded_message_search_room_ids: excludedMessageSearchRoomIds,
         note: noteInput ? String(noteInput.value || '').trim() || null : null,
       };
     }
@@ -1962,6 +2117,10 @@ const html = String.raw`<!doctype html>
         openLineUserIdModal(tr);
         return;
       }
+      if (target.classList.contains('user-room-scope')) {
+        openUserRoomScopeModal(tr);
+        return;
+      }
     });
 
     dom.userPermissionTableBody.addEventListener('input', function(event) {
@@ -2189,6 +2348,18 @@ const html = String.raw`<!doctype html>
       closeRoomIdModal();
     });
 
+    dom.cancelUserRoomScopeBtn.addEventListener('click', function() {
+      closeUserRoomScopeModal();
+    });
+
+    dom.saveUserRoomScopeBtn.addEventListener('click', async function() {
+      try {
+        await saveUserRoomScopeSelection();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
     dom.copyRoomIdBtn.addEventListener('click', async function() {
       await copyRoomIdToClipboard();
     });
@@ -2196,6 +2367,12 @@ const html = String.raw`<!doctype html>
     dom.roomIdModal.addEventListener('click', function(event) {
       if (event.target === dom.roomIdModal) {
         closeRoomIdModal();
+      }
+    });
+
+    dom.userRoomScopeModal.addEventListener('click', function(event) {
+      if (event.target === dom.userRoomScopeModal) {
+        closeUserRoomScopeModal();
       }
     });
 
@@ -2215,6 +2392,9 @@ const html = String.raw`<!doctype html>
     document.addEventListener('keydown', function(event) {
       if (event.key === 'Escape' && dom.roomIdModal.classList.contains('open')) {
         closeRoomIdModal();
+      }
+      if (event.key === 'Escape' && dom.userRoomScopeModal.classList.contains('open')) {
+        closeUserRoomScopeModal();
       }
     });
 
