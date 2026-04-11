@@ -543,8 +543,8 @@
     .user-permissions-table th:nth-child(6), .user-permissions-table td:nth-child(6) { width: 90px; text-align: center; }
     .user-permissions-table th:nth-child(7), .user-permissions-table td:nth-child(7) { width: 90px; text-align: center; }
     .user-permissions-table th:nth-child(8), .user-permissions-table td:nth-child(8) { width: 90px; text-align: center; }
-    .user-permissions-table th:nth-child(9), .user-permissions-table td:nth-child(9) { width: 190px; text-align: center; }
-    .user-permissions-table th:nth-child(10), .user-permissions-table td:nth-child(10) { width: 300px; }
+    .user-permissions-table th:nth-child(9), .user-permissions-table td:nth-child(9) { width: 220px; text-align: center; }
+    .user-permissions-table th:nth-child(10), .user-permissions-table td:nth-child(10) { width: 270px; }
     .user-permissions-table th:nth-child(11), .user-permissions-table td:nth-child(11) { width: 140px; text-align: center; }
 
     .user-permission-check {
@@ -556,20 +556,35 @@
     .user-note-input {
       width: 100%;
       min-width: 0;
+      max-width: 100%;
+    }
+
+    .user-room-scope-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+    }
+
+    .user-room-scope-cell .button {
+      min-height: 32px;
+      padding: 0 12px;
     }
 
     .room-scope-badge {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 120px;
+      min-width: 98px;
       min-height: 30px;
-      padding: 0 10px;
+      padding: 0 8px;
       border-radius: 999px;
       border: 1px solid rgba(155, 220, 255, 0.24);
       background: rgba(8, 21, 35, 0.55);
       color: #bde6ff;
-      font-size: 0.76rem;
+      font-size: 0.75rem;
+      max-width: 100%;
     }
 
     .room-scope-badge.warn {
@@ -1521,7 +1536,7 @@
           '<td><input class="user-permission-check user-can-calendar-create" type="checkbox" ' + (row.can_calendar_create !== false ? 'checked' : '') + '></td>' +
           '<td><input class="user-permission-check user-can-calendar-update" type="checkbox" ' + (row.can_calendar_update !== false ? 'checked' : '') + '></td>' +
           '<td><input class="user-permission-check user-can-media-access" type="checkbox" ' + (row.can_media_access !== false ? 'checked' : '') + '></td>' +
-          '<td><button class="button user-room-scope" type="button">ルーム選択</button><div class="' + scopeBadgeClass + '" style="margin-top:6px;">' + escapeHtml(scopeBadgeText) + '</div></td>' +
+          '<td><div class="user-room-scope-cell"><button class="button user-room-scope" type="button">ルーム選択</button><div class="' + scopeBadgeClass + '">' + escapeHtml(scopeBadgeText) + '</div></div></td>' +
           '<td><input class="input user-note-input" type="text" value="' + escapeHtml(row.note || '') + '" placeholder="メモ"></td>' +
           '<td><span class="tag ok">自動保存</span></td>';
         dom.userPermissionTableBody.appendChild(tr);
