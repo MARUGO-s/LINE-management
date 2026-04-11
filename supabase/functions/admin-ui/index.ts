@@ -864,6 +864,43 @@ const html = String.raw`<!doctype html>
       .storage-legend {
         width: 100%;
       }
+      .rooms-table {
+        width: max(100%, 1180px);
+        min-width: 1180px;
+      }
+      .rooms-table th,
+      .rooms-table td {
+        padding-top: 6px;
+        padding-bottom: 6px;
+      }
+      .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 220px; }
+      .rooms-table th:nth-child(3), .rooms-table td:nth-child(3) { width: 84px; }
+      .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 160px; }
+      .rooms-table th:nth-child(5), .rooms-table td:nth-child(5) { width: 150px; }
+      .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 160px; }
+      .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 220px; }
+      .rooms-table th:nth-child(2),
+      .rooms-table td:nth-child(2) {
+        position: static;
+        left: auto;
+        box-shadow: none;
+      }
+      .rooms-table .room-name-stack {
+        gap: 3px;
+      }
+      .rooms-table .room-last-post {
+        font-size: 0.7rem;
+      }
+      .rooms-table .room-show-id {
+        min-height: 28px;
+        padding: 0 8px;
+        font-size: 0.72rem;
+      }
+      .row-actions .button {
+        min-height: 28px;
+        padding: 0 7px;
+        font-size: 0.73rem;
+      }
     }
   </style>
 </head>
