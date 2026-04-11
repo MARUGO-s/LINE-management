@@ -151,6 +151,10 @@ const html = String.raw`<!doctype html>
       grid-column: span 12;
     }
 
+    .card.permissions {
+      grid-column: span 12;
+    }
+
     .controls {
       display: flex;
       flex-wrap: wrap;
@@ -660,7 +664,7 @@ const html = String.raw`<!doctype html>
         </div>
       </section>
 
-      <section class="card">
+      <section class="card permissions">
         <h2>ユーザー権限（LINE user 単位）</h2>
         <p class="muted" style="margin:0 0 8px 0;"><code>/permissions/users</code> の一覧を JSON で編集します。未登録ユーザーは既定で許可扱いです。</p>
         <textarea id="userPermissionsJson" class="input" style="min-height:220px;font-family:ui-monospace, SFMono-Regular, Menlo, monospace;" spellcheck="false"></textarea>
