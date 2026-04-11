@@ -181,6 +181,13 @@
       color: #ffdba0;
     }
 
+    .button.media-highlight {
+      border-color: rgba(133, 255, 192, 0.68);
+      background: linear-gradient(180deg, rgba(73, 224, 146, 0.34), rgba(24, 135, 85, 0.34));
+      color: #dbffe8;
+      box-shadow: 0 0 0 1px rgba(133, 255, 192, 0.18) inset;
+    }
+
     .switch {
       display: inline-flex;
       align-items: center;
@@ -403,6 +410,24 @@
       font-size: 0.76rem;
       margin: 6px auto 0;
       width: fit-content;
+    }
+
+    .room-config-badge.low {
+      color: #ffcf85;
+      border-color: rgba(255, 207, 133, 0.38);
+      background: rgba(77, 48, 19, 0.48);
+    }
+
+    .room-config-badge.mid {
+      color: #d7f5ff;
+      border-color: rgba(133, 216, 255, 0.34);
+      background: rgba(9, 48, 74, 0.48);
+    }
+
+    .room-config-badge.high {
+      color: #ccffe5;
+      border-color: rgba(133, 255, 192, 0.42);
+      background: rgba(17, 66, 45, 0.48);
     }
 
     .new-room-config-summary {
@@ -770,7 +795,7 @@
             <div class="controls" style="margin-top:8px;">
               <button id="reloadBtn" class="button">再読み込み</button>
               <button id="runNowBtn" class="button">今すぐ要約実行</button>
-              <a href="./media.html" class="button" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
+              <a href="./media.html" class="button media-highlight" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
             </div>
           </div>
           <div class="setting-block">
@@ -1684,11 +1709,13 @@
       tr.dataset.roomGmailAlertEnabled = String(!!config.gmail_reservation_alert_enabled);
       const badge = tr.querySelector('.room-config-badge');
       if (badge) {
+        const tone = roomConfigToneClass(getRoomConfigEnabledCount(config));
+        badge.className = 'room-config-badge ' + tone;
         badge.textContent = buildRoomConfigSummary(config);
       }
     }
 
-    function buildRoomConfigSummary(config) {
+    function getRoomConfigEnabledCount(config) {
       let enabledCount = 0;
       if (config.is_enabled) enabledCount += 1;
       if (config.send_room_summary) enabledCount += 1;
@@ -1697,6 +1724,17 @@
       if (config.calendar_ai_auto_create_enabled) enabledCount += 1;
       if (config.calendar_silent_auto_register_enabled) enabledCount += 1;
       if (config.gmail_reservation_alert_enabled) enabledCount += 1;
+      return enabledCount;
+    }
+
+    function roomConfigToneClass(enabledCount) {
+      if (enabledCount >= 6) return 'high';
+      if (enabledCount >= 3) return 'mid';
+      return 'low';
+    }
+
+    function buildRoomConfigSummary(config) {
+      const enabledCount = getRoomConfigEnabledCount(config);
       return enabledCount + '/7 有効';
     }
 
@@ -1750,13 +1788,22 @@
           calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, false),
           gmail_reservation_alert_enabled: parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
         });
+        const configToneClass = roomConfigToneClass(getRoomConfigEnabledCount({
+          is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
+          send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
+          calendar_tomorrow_reminder_enabled: parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
+          media_file_access_enabled: parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
+          calendar_ai_auto_create_enabled: parseDatasetBoolean(tr.dataset.roomCalendarAutoCreate, true),
+          calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, false),
+          gmail_reservation_alert_enabled: parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
+        }));
         tr.draggable = false;
         tr.innerHTML =
           '<td><span class="room-id-tools"><span class="room-drag-handle" draggable="true" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
           '<td><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"></td>' +
           '<td>' + Number(room.pending_messages || 0) + '件</td>' +
           '<td>' + formatDate(room.last_message_at) + '</td>' +
-          '<td><button class="button room-config-open" type="button">設定</button><div class="room-config-badge">' + escapeHtml(configSummary) + '</div></td>' +
+          '<td><button class="button room-config-open" type="button">設定</button><div class="room-config-badge ' + configToneClass + '">' + escapeHtml(configSummary) + '</div></td>' +
           '<td><input class="input room-hours short" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : '') + '"></td>' +
           '<td><select class="select room-cleanup-timing">' +
           '<option value="" ' + (((setting && setting.message_cleanup_timing) ? '' : 'selected')) + '>継承</option>' +
