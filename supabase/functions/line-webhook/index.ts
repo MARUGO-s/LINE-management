@@ -367,6 +367,7 @@ Deno.serve(async (req) => {
 
       // Determine room/group ID or user ID as fallback
       const source = event.source || {}
+      const shouldPersistMessage = shouldPersistLineMessage(source)
       const roomId = String(source.groupId || source.roomId || source.userId || 'unknown')
       const userId = source.userId ? String(source.userId) : null
       const replyToken = String(event.replyToken ?? '')
@@ -818,33 +819,35 @@ Deno.serve(async (req) => {
 
       // Parse content based on message type
       const content = toStoredMessageContent(event.message)
-      // Save message to target database
-      const { data: savedMessage, error } = await supabase
-        .from('line_messages')
-        .insert({
-          room_id: roomId,
-          user_id: userId,
-          content,
-          processed: false,
-        })
-        .select('id')
-        .single()
+      if (shouldPersistMessage) {
+        // Save message to target database
+        const { data: savedMessage, error } = await supabase
+          .from('line_messages')
+          .insert({
+            room_id: roomId,
+            user_id: userId,
+            content,
+            processed: false,
+          })
+          .select('id')
+          .single()
 
-      if (error) {
-        console.error('Failed to insert message:', error)
-      } else {
-        console.log(`Saved message from ${roomId}: ${content.substring(0, 30)}...`)
-        const savedMessageId = String(savedMessage?.id ?? '').trim()
-        if (savedMessageId) {
-          await trySaveLineMediaContent(
-            supabase,
-            lineAccessToken,
-            event.message,
-            savedMessageId,
-            roomId,
-            userId,
-            mediaUploadMaxBytes,
-          )
+        if (error) {
+          console.error('Failed to insert message:', error)
+        } else {
+          console.log(`Saved message from ${roomId}: ${content.substring(0, 30)}...`)
+          const savedMessageId = String(savedMessage?.id ?? '').trim()
+          if (savedMessageId) {
+            await trySaveLineMediaContent(
+              supabase,
+              lineAccessToken,
+              event.message,
+              savedMessageId,
+              roomId,
+              userId,
+              mediaUploadMaxBytes,
+            )
+          }
         }
       }
 
@@ -1398,6 +1401,12 @@ async function fetchLineJson(url: string, lineAccessToken: string): Promise<any 
 function normalizeDisplayName(value: unknown): string | null {
   const normalized = String(value ?? '').replace(/\u3000/g, ' ').replace(/\s+/g, ' ').trim()
   return normalized || null
+}
+
+function shouldPersistLineMessage(source: any): boolean {
+  const sourceType = String(source?.type ?? '').trim().toLowerCase()
+  // 1:1 chat (source.type=user) is excluded from history storage.
+  return sourceType !== 'user'
 }
 
 async function loadMessageRetentionDays(
