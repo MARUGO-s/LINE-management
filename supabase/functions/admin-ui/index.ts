@@ -236,6 +236,66 @@ const html = String.raw`<!doctype html>
       line-height: 1.45;
     }
 
+    .storage-chart {
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid rgba(149, 219, 255, 0.18);
+      border-radius: 12px;
+      background: rgba(7, 20, 34, 0.4);
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 150px minmax(0, 1fr);
+      align-items: center;
+    }
+
+    .storage-pie {
+      width: 132px;
+      height: 132px;
+      border-radius: 50%;
+      border: 1px solid rgba(149, 219, 255, 0.22);
+      margin: 0 auto;
+      background: conic-gradient(#2e4f66 0deg 360deg);
+      position: relative;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+    }
+
+    .storage-pie::after {
+      content: "";
+      position: absolute;
+      inset: 24px;
+      border-radius: 50%;
+      background: rgba(7, 20, 34, 0.95);
+      border: 1px solid rgba(149, 219, 255, 0.18);
+    }
+
+    .storage-legend {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .storage-legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.82rem;
+      color: #d6ecfa;
+      min-width: 0;
+    }
+
+    .storage-legend-color {
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+      flex: 0 0 auto;
+    }
+
+    .storage-legend-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     .table-wrap {
       overflow: auto;
       -webkit-overflow-scrolling: touch;
@@ -551,6 +611,16 @@ const html = String.raw`<!doctype html>
       .card.global, .card.logs { grid-column: span 12; }
       .hero { padding: 16px 16px 18px; }
     }
+
+    @media (max-width: 760px) {
+      .storage-chart {
+        grid-template-columns: 1fr;
+        justify-items: center;
+      }
+      .storage-legend {
+        width: 100%;
+      }
+    }
   </style>
 </head>
 <body>
@@ -625,6 +695,10 @@ const html = String.raw`<!doctype html>
         <div id="globalMeta" class="meta"></div>
         <div id="storageUsageSummary" class="meta usage-summary"></div>
         <div id="storageUsageDetails" class="meta usage-details"></div>
+        <div class="storage-chart">
+          <div id="storageUsagePie" class="storage-pie" aria-label="テーブル容量内訳円グラフ"></div>
+          <div id="storageUsageLegend" class="storage-legend"></div>
+        </div>
       </section>
 
       <section class="card logs">
@@ -776,6 +850,8 @@ const html = String.raw`<!doctype html>
       globalMeta: document.getElementById('globalMeta'),
       storageUsageSummary: document.getElementById('storageUsageSummary'),
       storageUsageDetails: document.getElementById('storageUsageDetails'),
+      storageUsagePie: document.getElementById('storageUsagePie'),
+      storageUsageLegend: document.getElementById('storageUsageLegend'),
       roomTableBody: document.getElementById('roomTableBody'),
       logTableBody: document.getElementById('logTableBody'),
       userPermissionTableBody: document.getElementById('userPermissionTableBody'),
@@ -890,6 +966,64 @@ const html = String.raw`<!doctype html>
       if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
       if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB';
       return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    }
+
+    function renderStorageUsageChart(tableRows) {
+      const rows = Array.isArray(tableRows) ? tableRows : [];
+      if (!rows.length) {
+        dom.storageUsagePie.style.background = 'conic-gradient(#2e4f66 0deg 360deg)';
+        dom.storageUsageLegend.innerHTML = '<div class="storage-legend-item"><span class="storage-legend-label">内訳データなし</span></div>';
+        return;
+      }
+      const colors = ['#45c2ff', '#66e0a8', '#ffd27d', '#bba4ff', '#ff9fb1', '#7de2e2', '#9bc6ff', '#d4f08a'];
+      const sorted = rows
+        .map(function(row) {
+          return {
+            table_name: String(row && row.table_name ? row.table_name : '-'),
+            size_bytes: Number(row && row.size_bytes ? row.size_bytes : 0),
+            size_pretty: String(row && row.size_pretty ? row.size_pretty : formatBytes(row && row.size_bytes ? row.size_bytes : 0)),
+          };
+        })
+        .filter(function(row) { return Number.isFinite(row.size_bytes) && row.size_bytes > 0; })
+        .sort(function(a, b) { return b.size_bytes - a.size_bytes; });
+      if (!sorted.length) {
+        dom.storageUsagePie.style.background = 'conic-gradient(#2e4f66 0deg 360deg)';
+        dom.storageUsageLegend.innerHTML = '<div class="storage-legend-item"><span class="storage-legend-label">内訳データなし</span></div>';
+        return;
+      }
+      const maxSlices = 7;
+      const topRows = sorted.slice(0, maxSlices);
+      const others = sorted.slice(maxSlices);
+      const otherBytes = others.reduce(function(sum, row) { return sum + row.size_bytes; }, 0);
+      if (otherBytes > 0) {
+        topRows.push({
+          table_name: 'others',
+          size_bytes: otherBytes,
+          size_pretty: formatBytes(otherBytes),
+        });
+      }
+      const total = topRows.reduce(function(sum, row) { return sum + row.size_bytes; }, 0);
+      let current = 0;
+      const segments = [];
+      const legends = [];
+      for (let i = 0; i < topRows.length; i += 1) {
+        const row = topRows[i];
+        const ratio = total > 0 ? row.size_bytes / total : 0;
+        const end = current + ratio * 360;
+        const color = colors[i % colors.length];
+        segments.push(color + ' ' + current.toFixed(2) + 'deg ' + end.toFixed(2) + 'deg');
+        const label = row.table_name === 'others' ? 'その他' : row.table_name;
+        const percentage = (ratio * 100).toFixed(1);
+        legends.push(
+          '<div class="storage-legend-item">' +
+          '<span class="storage-legend-color" style="background:' + color + ';"></span>' +
+          '<span class="storage-legend-label">' + escapeHtml(label + ' (' + percentage + '% / ' + row.size_pretty + ')') + '</span>' +
+          '</div>'
+        );
+        current = end;
+      }
+      dom.storageUsagePie.style.background = 'conic-gradient(' + segments.join(', ') + ')';
+      dom.storageUsageLegend.innerHTML = legends.join('');
     }
 
     function statusTag(status) {
@@ -1114,12 +1248,14 @@ const html = String.raw`<!doctype html>
       if (storageUsageError) {
         dom.storageUsageSummary.textContent = 'DB使用容量: 取得失敗';
         dom.storageUsageDetails.textContent = storageUsageError;
+        renderStorageUsageChart([]);
         return;
       }
 
       if (!storageUsage || typeof storageUsage !== 'object') {
         dom.storageUsageSummary.textContent = 'DB使用容量: 取得待ち';
         dom.storageUsageDetails.textContent = '';
+        renderStorageUsageChart([]);
         return;
       }
 
@@ -1129,6 +1265,7 @@ const html = String.raw`<!doctype html>
         'DB使用容量（対象テーブル合計）: ' + managedPretty + ' / DB全体: ' + dbPretty;
 
       const tableRows = Array.isArray(storageUsage.managed_tables) ? storageUsage.managed_tables : [];
+      renderStorageUsageChart(tableRows);
       if (tableRows.length === 0) {
         dom.storageUsageDetails.textContent = 'テーブル内訳: なし | 更新: ' + formatDate(generatedAt);
         return;
