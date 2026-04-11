@@ -1641,13 +1641,14 @@ async function ensureLineUserPermissionSeed(
     .insert({
       line_user_id: normalizedUserId,
       display_name: displayName,
-      is_active: true,
-      can_message_search: true,
-      can_library_search: true,
-      can_calendar_create: true,
-      can_calendar_update: true,
-      can_media_access: true,
-      note: null,
+      // New users start in pending approval state.
+      is_active: false,
+      can_message_search: false,
+      can_library_search: false,
+      can_calendar_create: false,
+      can_calendar_update: false,
+      can_media_access: false,
+      note: '承認待ち',
       updated_at: new Date().toISOString(),
     })
   if (insertError) {
