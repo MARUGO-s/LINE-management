@@ -409,6 +409,8 @@ const html = String.raw`<!doctype html>
     .rooms-table th,
     .rooms-table td {
       white-space: nowrap;
+      padding-top: 7px;
+      padding-bottom: 7px;
     }
 
     .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 120px; text-align: center; }
@@ -454,13 +456,18 @@ const html = String.raw`<!doctype html>
     .rooms-table .room-name-stack {
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 4px;
     }
 
     .rooms-table .room-last-post {
-      font-size: 0.75rem;
+      font-size: 0.72rem;
       color: var(--muted);
       line-height: 1.3;
+    }
+
+    .rooms-table .room-hours,
+    .rooms-table .room-summary-mode {
+      min-height: 32px;
     }
 
     .rooms-table .room-show-id {
@@ -620,14 +627,14 @@ const html = String.raw`<!doctype html>
     .row-actions {
       display: inline-flex;
       flex-wrap: nowrap;
-      gap: 6px;
+      gap: 4px;
       align-items: center;
     }
 
     .row-actions .button {
-      min-height: 32px;
+      min-height: 30px;
       font-size: 0.76rem;
-      padding: 0 9px;
+      padding: 0 8px;
       white-space: nowrap;
     }
 
