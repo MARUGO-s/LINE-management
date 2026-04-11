@@ -394,8 +394,8 @@ const html = String.raw`<!doctype html>
     }
 
     .rooms-table {
-      width: max(100%, 2240px);
-      min-width: 2240px;
+      width: max(100%, 1520px);
+      min-width: 1520px;
       table-layout: fixed;
     }
 
@@ -404,22 +404,15 @@ const html = String.raw`<!doctype html>
       white-space: nowrap;
     }
 
-    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 128px; text-align: center; }
-    .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 300px; }
-    .rooms-table th:nth-child(3), .rooms-table td:nth-child(3) { width: 90px; text-align: center; }
+    .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 120px; text-align: center; }
+    .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 220px; }
+    .rooms-table th:nth-child(3), .rooms-table td:nth-child(3) { width: 92px; text-align: center; }
     .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 150px; }
-    .rooms-table th:nth-child(5), .rooms-table td:nth-child(5) { width: 70px; text-align: center; }
-    .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 110px; text-align: center; }
-    .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 110px; text-align: center; }
-    .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 90px; text-align: center; }
-    .rooms-table th:nth-child(9), .rooms-table td:nth-child(9) { width: 90px; text-align: center; }
-    .rooms-table th:nth-child(10), .rooms-table td:nth-child(10) { width: 160px; text-align: center; }
-    .rooms-table th:nth-child(11), .rooms-table td:nth-child(11) { width: 90px; text-align: center; }
-    .rooms-table th:nth-child(12), .rooms-table td:nth-child(12) { width: 110px; text-align: center; }
-    .rooms-table th:nth-child(13), .rooms-table td:nth-child(13) { width: 160px; }
-    .rooms-table th:nth-child(14), .rooms-table td:nth-child(14) { width: 170px; }
-    .rooms-table th:nth-child(15), .rooms-table td:nth-child(15) { width: 150px; }
-    .rooms-table th:nth-child(16), .rooms-table td:nth-child(16) { width: 220px; }
+    .rooms-table th:nth-child(5), .rooms-table td:nth-child(5) { width: 190px; text-align: center; }
+    .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 170px; }
+    .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 170px; }
+    .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 170px; }
+    .rooms-table th:nth-child(9), .rooms-table td:nth-child(9) { width: 238px; }
 
     /* Keep ID / Display Name fixed while horizontally scrolling */
     .rooms-table td:nth-child(1),
@@ -443,7 +436,7 @@ const html = String.raw`<!doctype html>
 
     .rooms-table th:nth-child(2),
     .rooms-table td:nth-child(2) {
-      left: 128px;
+      left: 120px;
       box-shadow: 1px 0 0 rgba(149, 219, 255, 0.2) inset;
     }
 
@@ -460,7 +453,7 @@ const html = String.raw`<!doctype html>
     }
 
     .room-config-badge {
-      display: inline-flex;
+      display: flex;
       align-items: center;
       justify-content: center;
       min-width: 120px;
@@ -471,7 +464,8 @@ const html = String.raw`<!doctype html>
       background: rgba(7, 20, 34, 0.55);
       color: #bde6ff;
       font-size: 0.76rem;
-      margin-top: 6px;
+      margin: 6px auto 0;
+      width: fit-content;
     }
 
     .rooms-table .room-id-tools {
