@@ -460,6 +460,69 @@ https://<project-ref>.supabase.co/functions/v1/line-webhook
 
 6. **静的 HTML** をホスティングし、必要なら **プロジェクト URL を HTML 内で一致**させる（[§4](#4-静的-ui-の公開方法)）。
 
+### 15.1 本番向け一括デプロイ例
+
+```bash
+# 1) DBマイグレーション同期
+supabase db push
+
+# 2) Edge Functions デプロイ
+PROJECT_REF=<project-ref>
+for fn in line-webhook summary-cron gmail-alert-cron admin-api admin-ui check-cron; do
+  supabase functions deploy "$fn" --project-ref "$PROJECT_REF"
+done
+```
+
+### 15.2 本番疎通テスト（デプロイ直後）
+
+#### A. 無認証到達チェック（公開到達の確認）
+
+```bash
+BASE="https://<project-ref>.supabase.co/functions/v1"
+curl -i "$BASE/admin-ui"          # 200 を期待
+curl -i "$BASE/admin-api/state"   # 401 を期待（x-admin-token 未指定）
+curl -i "$BASE/line-webhook"      # 405 を期待（GET なので Method not allowed）
+curl -i "$BASE/summary-cron"      # 401 を期待（Authorization 未指定）
+curl -i "$BASE/gmail-alert-cron"  # 401 を期待（Authorization 未指定）
+curl -i "$BASE/check-cron"        # 401 を期待（Authorization 未指定）
+```
+
+#### B. 認証付き動作チェック（cron系）
+
+```bash
+PROJECT_REF=<project-ref>
+ANON_KEY=$(supabase projects api-keys --project-ref "$PROJECT_REF" --output json \
+  | jq -r '.[] | select(.name=="anon" or .name=="publishable") | .api_key' | head -n1)
+
+BASE="https://${PROJECT_REF}.supabase.co/functions/v1"
+curl -sS -H "Authorization: Bearer ${ANON_KEY}" "$BASE/summary-cron" | jq
+curl -sS -H "Authorization: Bearer ${ANON_KEY}" "$BASE/gmail-alert-cron" | jq
+curl -sS -H "Authorization: Bearer ${ANON_KEY}" "$BASE/check-cron" | jq
+```
+
+期待値（最低ライン）:
+
+- `summary-cron`: HTTP 200（配信対象が無い時間帯でも `message` を返して正常終了）
+- `gmail-alert-cron`: HTTP 200（`ok: true`）
+- `check-cron`: HTTP 200（`success: true`、`cronJobs` が取得できる）
+
+#### C. 管理 API（admin-api）の実動確認
+
+`admin-api` は `x-admin-token` 必須のため、別途管理トークンを使って以下を確認します。
+
+```bash
+ADMIN_TOKEN=<admin-dashboard-token>
+BASE="https://<project-ref>.supabase.co/functions/v1"
+curl -sS -H "x-admin-token: ${ADMIN_TOKEN}" "$BASE/admin-api/state" | jq
+curl -sS -H "x-admin-token: ${ADMIN_TOKEN}" "$BASE/admin-api/documents?limit=1" | jq
+```
+
+確認ポイント:
+
+- 401 にならない（認証OK）
+- `room_settings` や `summary_settings` が取得できる
+- `documents` の一覧取得が成功する
+
 ---
 
 ## 16. スケジュール（pg_cron）と DB カスタム設定
@@ -573,6 +636,7 @@ https://<project-ref>.supabase.co/functions/v1/line-webhook
 - **カレンダー**: `予定確認` 後の会話文（例: `2件目の時間を19:00に変更`）で、表示済み予定を会話方式で更新できるように拡張。
 - **資料**: `admin-api` で PDF / DOCX / XLSX のサーバ側本文抽出、`line_search_documents.extracted_text` へ保存。
 - **CI**: マイグレーション内 anon JWT に対する Gitleaks インライン allow（本番は DB 設定推奨）。
+- **運用**: 本番デプロイ一括手順と、無認証/認証付きの本番疎通テスト手順を README に明文化。
 
 ---
 
