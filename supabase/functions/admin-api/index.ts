@@ -712,6 +712,26 @@ async function backfillLineUserPermissionsFromMessages(
     offset += pageSize
   }
 
+  // Include users that already exist in permission table (for display-name recovery).
+  offset = 0
+  while (true) {
+    const { data, error } = await supabase
+      .from("line_user_permissions")
+      .select("line_user_id")
+      .range(offset, offset + pageSize - 1)
+    if (error) {
+      throw { status: 500, message: `Failed to scan line_user_permissions users: ${error.message}` } satisfies AppError
+    }
+    const rows = Array.isArray(data) ? data : []
+    if (rows.length === 0) break
+    for (const row of rows) {
+      const lineUserId = String((row as { line_user_id?: unknown })?.line_user_id ?? "").trim()
+      if (lineUserId) userIds.add(lineUserId)
+    }
+    if (rows.length < pageSize) break
+    offset += pageSize
+  }
+
   const allUserIds = Array.from(userIds)
   if (allUserIds.length === 0) {
     return {
