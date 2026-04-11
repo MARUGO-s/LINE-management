@@ -881,10 +881,8 @@ const html = String.raw`<!doctype html>
       .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 128px; }
       .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 170px; }
       .rooms-table th:nth-child(1),
-      .rooms-table td:nth-child(1) {
-        left: 0;
-      }
       .rooms-table th:nth-child(2),
+      .rooms-table td:nth-child(1),
       .rooms-table td:nth-child(2) {
         position: static;
         left: auto;
