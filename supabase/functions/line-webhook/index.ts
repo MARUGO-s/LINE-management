@@ -573,7 +573,7 @@ Deno.serve(async (req) => {
             }
           }
 
-          if (canMessageSearch && canLibrarySearch) {
+          if (canLibrarySearch) {
             const librarySearchReply = await tryHandlePendingLibrarySearchConfirmation(
               text,
               supabase,
@@ -688,10 +688,32 @@ Deno.serve(async (req) => {
           }
 
           if (messageSearchCommand || messageSearchError) {
-            if (!canMessageSearch) {
+            if (!roomCanReply) {
               continue
             }
-            if (!roomCanReply) {
+
+            if (!canMessageSearch) {
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search permission status.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for message search permission status.')
+                continue
+              }
+              const permissionReply = messageSearchCommand && canLibrarySearch
+                ? await buildLibrarySearchPromptWhenMessageSearchDisabled(
+                  supabase,
+                  roomId,
+                  userId,
+                  messageSearchCommand,
+                  messageRetentionDays,
+                )
+                : (messageSearchError || 'この質問は、現在このルームで権限が付与されていないため実行できません。')
+              const permissionReplyResult = await replyLineMessage(replyToken, permissionReply, lineAccessToken)
+              if (!permissionReplyResult.ok) {
+                console.error('Failed to reply message search permission status:', permissionReplyResult.error)
+              }
               continue
             }
 
@@ -724,9 +746,30 @@ Deno.serve(async (req) => {
           const commandParse = parseCalendarCommand(text)
           if (commandParse.matched) {
             const command = commandParse.command
-            if (command?.kind === 'create' && !canCalendarCreate) continue
-            if (command?.kind === 'update' && !canCalendarUpdate) continue
-            if (command?.kind === 'list' && !canCalendarUpdate) continue
+            const calendarPermissionDenied =
+              (command?.kind === 'create' && !canCalendarCreate) ||
+              (command?.kind === 'update' && !canCalendarUpdate) ||
+              (command?.kind === 'list' && !canCalendarUpdate)
+            if (calendarPermissionDenied) {
+              if (!roomCanReply) continue
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply calendar permission status.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for calendar permission status.')
+                continue
+              }
+              const deniedReplyResult = await replyLineMessage(
+                replyToken,
+                'この質問は、現在このルームで権限が付与されていないため実行できません。',
+                lineAccessToken,
+              )
+              if (!deniedReplyResult.ok) {
+                console.error('Failed to reply calendar permission status:', deniedReplyResult.error)
+              }
+              continue
+            }
             const replyMessage = await buildCalendarReplyMessage(
               commandParse,
               calendarEnvState,
@@ -2273,12 +2316,9 @@ async function buildMessageSearchReply(
     console.error('Failed to supersede stale library search pending:', supersedeStaleLibraryPendingError)
   }
 
-  const requestedDays = command.days
-  const effectiveDays = (configuredRetentionDays === 0
-    ? requestedDays
-    : (requestedDays === 0 ? configuredRetentionDays : Math.min(requestedDays, configuredRetentionDays))) as MessageRetentionDays
-  const adjustedByRetention = configuredRetentionDays > 0 && (
-    requestedDays === 0 || requestedDays > configuredRetentionDays
+  const { effectiveDays, adjustedByRetention } = resolveEffectiveMessageSearchDays(
+    command.days,
+    configuredRetentionDays,
   )
   const sinceIso = effectiveDays > 0
     ? new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
@@ -2403,6 +2443,58 @@ async function buildMessageSearchReply(
     }
   }
   return splitTextForLineReply(lines.join('\n'))
+}
+
+function resolveEffectiveMessageSearchDays(
+  requestedDays: MessageRetentionDays,
+  configuredRetentionDays: MessageRetentionDays,
+): { effectiveDays: MessageRetentionDays; adjustedByRetention: boolean } {
+  const effectiveDays = (configuredRetentionDays === 0
+    ? requestedDays
+    : (requestedDays === 0 ? configuredRetentionDays : Math.min(requestedDays, configuredRetentionDays))) as MessageRetentionDays
+  const adjustedByRetention = configuredRetentionDays > 0 && (
+    requestedDays === 0 || requestedDays > configuredRetentionDays
+  )
+  return { effectiveDays, adjustedByRetention }
+}
+
+async function buildLibrarySearchPromptWhenMessageSearchDisabled(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  command: MessageSearchCommand,
+  configuredRetentionDays: MessageRetentionDays,
+): Promise<string> {
+  const { effectiveDays, adjustedByRetention } = resolveEffectiveMessageSearchDays(
+    command.days,
+    configuredRetentionDays,
+  )
+  const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+  const pendingSaved = await savePendingLibrarySearchConfirmation(
+    supabase,
+    roomId,
+    userId,
+    command,
+    effectiveDays,
+    adjustedByRetention,
+  )
+  const lines: string[] = [
+    'このユーザーは会話検索の権限がないため、会話履歴は検索できません。',
+    `キーワード: ${command.keyword}`,
+    `対象期間: ${periodText}`,
+  ]
+  if (adjustedByRetention) {
+    lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
+  }
+  lines.push('')
+  if (pendingSaved) {
+    lines.push('資料ライブラリ（ファイル名に[LINE]を含む資料のみ）を検索しますか？')
+    lines.push('「はい」で検索 / 「いいえ」でキャンセル')
+    lines.push(`※${PENDING_CONFIRMATION_TTL_MIN}分以内にご返信ください`)
+  } else {
+    lines.push('資料ライブラリ検索の確認保存に失敗しました。しばらくしてからもう一度お試しください。')
+  }
+  return lines.join('\n')
 }
 
 async function loadRoomLabelsForHits(
