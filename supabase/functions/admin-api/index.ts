@@ -946,13 +946,6 @@ async function refreshRoomNamesFromLine(
       throw { status: 500, message: `Failed to refresh room name in settings (${id}): ${settingsError.message}` } satisfies AppError
     }
 
-    const { error: messagesError } = await supabase
-      .from("line_messages")
-      .update({ room_name: name })
-      .eq("room_id", id)
-    if (messagesError) {
-      throw { status: 500, message: `Failed to refresh room name in messages (${id}): ${messagesError.message}` } satisfies AppError
-    }
     refreshed += 1
   }
 
