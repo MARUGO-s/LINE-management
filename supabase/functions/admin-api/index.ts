@@ -299,6 +299,7 @@ Deno.serve(async (req) => {
           send_room_summary: payload.send_room_summary,
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
           calendar_ai_auto_create_enabled: payload.calendar_ai_auto_create_enabled,
+          calendar_silent_auto_register_enabled: payload.calendar_silent_auto_register_enabled,
           message_search_enabled: payload.message_search_enabled,
           message_search_library_enabled: payload.message_search_library_enabled,
           media_file_access_enabled: payload.media_file_access_enabled,
@@ -309,7 +310,7 @@ Deno.serve(async (req) => {
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, calendar_silent_auto_register_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
         .single()
 
       if (error) {
@@ -530,7 +531,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, calendar_silent_auto_register_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -2302,6 +2303,7 @@ function buildRoomSettingsPayload(body: unknown): {
   send_room_summary: boolean
   calendar_tomorrow_reminder_enabled: boolean
   calendar_ai_auto_create_enabled: boolean
+  calendar_silent_auto_register_enabled: boolean
   message_search_enabled: boolean
   message_search_library_enabled: boolean
   media_file_access_enabled: boolean
@@ -2347,6 +2349,12 @@ function buildRoomSettingsPayload(body: unknown): {
     throw { status: 400, message: "calendar_ai_auto_create_enabled must be boolean when provided." } satisfies AppError
   }
   const roomAiAutoCreateEnabled = roomAiAutoCreateEnabledRaw !== false
+
+  const roomSilentAutoRegisterEnabledRaw = body.calendar_silent_auto_register_enabled
+  if (roomSilentAutoRegisterEnabledRaw != null && typeof roomSilentAutoRegisterEnabledRaw !== "boolean") {
+    throw { status: 400, message: "calendar_silent_auto_register_enabled must be boolean when provided." } satisfies AppError
+  }
+  const roomSilentAutoRegisterEnabled = roomSilentAutoRegisterEnabledRaw === true
 
   const messageSearchEnabledRaw = body.message_search_enabled
   if (messageSearchEnabledRaw != null && typeof messageSearchEnabledRaw !== "boolean") {
@@ -2404,6 +2412,7 @@ function buildRoomSettingsPayload(body: unknown): {
     send_room_summary: sendRoomSummary,
     calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,
     calendar_ai_auto_create_enabled: roomAiAutoCreateEnabled,
+    calendar_silent_auto_register_enabled: roomSilentAutoRegisterEnabled,
     message_search_enabled: messageSearchEnabled,
     message_search_library_enabled: messageSearchLibraryEnabled,
     media_file_access_enabled: mediaFileAccessEnabled,

@@ -415,6 +415,12 @@ verify_jwt = true
 import_map = "./functions/gmail-alert-cron/deno.json"
 entrypoint = "./functions/gmail-alert-cron/index.ts"
 
+[functions.calendar-pending-cron]
+enabled = true
+verify_jwt = true
+import_map = "./functions/calendar-pending-cron/deno.json"
+entrypoint = "./functions/calendar-pending-cron/index.ts"
+
 [functions.admin-api]
 enabled = true
 verify_jwt = false

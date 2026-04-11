@@ -205,6 +205,7 @@ type RoomReplyPolicy = {
   messageSearchLibraryEnabled: boolean
   mediaFileAccessEnabled: boolean
   calendarAiAutoCreateEnabled: boolean
+  calendarSilentAutoRegisterEnabled: boolean
 }
 
 type CalendarSourceMeta = {
@@ -241,9 +242,14 @@ const AI_MESSAGE_SEARCH_MIN_CONFIDENCE = 0.72
 const AI_PRIMARY_INTENT_MIN_CONFIDENCE = 0.72
 const AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE = 0.60
 const AI_UPDATE_MIN_CONFIDENCE = 0.62
+const AI_PRIMARY_INTENT_MIN_CONFIDENCE_STRONG_CREATE = 0.68
+const AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE_STRONG_CREATE = 0.56
+const AI_CREATE_MIN_CONFIDENCE_STRONG_CREATE = 0.76
+const AI_CREATE_CONFIRM_MIN_CONFIDENCE_STRONG_CREATE = 0.62
 const AI_AUTO_CREATE_MAX_EVENTS = 5
 const PAST_EVENT_GRACE_MS = 5 * 60 * 1000
 const PENDING_CONFIRMATION_TTL_MIN = 30
+const CALENDAR_PENDING_CONFIRMATION_TTL_MIN = 5
 const CALENDAR_PENDING_TABLE = 'calendar_pending_confirmations'
 const CALENDAR_UPDATE_PENDING_TABLE = 'calendar_update_pending_targets'
 const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmations'
@@ -409,7 +415,7 @@ Deno.serve(async (req) => {
         const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
         const text = String(event.message.text ?? '').trim()
         const quotedMessageId = extractQuotedLineMessageId(event.message)
-        if (!isDirectUserChat && roomReplyPolicy.requiresRegistration) {
+        if (!isDirectUserChat && roomReplyPolicy.requiresRegistration && roomCanReply) {
           if (!lineAccessToken) {
             console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room registration guidance.')
             continue
@@ -430,7 +436,7 @@ Deno.serve(async (req) => {
         }
         const capabilityStatusReply = isDirectUserChat
           ? null
-          : buildRoomCapabilityStatusReply(roomReplyPolicy, text)
+          : (roomCanReply ? buildRoomCapabilityStatusReply(roomReplyPolicy, text) : null)
         if (capabilityStatusReply) {
           if (!lineAccessToken) {
             console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room capability status.')
@@ -534,7 +540,6 @@ Deno.serve(async (req) => {
               supabase,
               roomId,
               userId,
-              messageRetentionDays,
             )
             if (librarySearchReply) {
               if (!roomCanReply) {
@@ -564,11 +569,19 @@ Deno.serve(async (req) => {
               groqApiKey,
             )
             if (primaryIntent && primaryIntent.intent !== 'none') {
-              if (primaryIntent.confidence >= AI_PRIMARY_INTENT_MIN_CONFIDENCE) {
+              const isOperationalCoordination = looksLikeOperationalCoordinationText(text)
+              const strongCreateCue = looksLikeStrongCalendarCreateIntent(text)
+              const primaryMinConfidence = strongCreateCue
+                ? AI_PRIMARY_INTENT_MIN_CONFIDENCE_STRONG_CREATE
+                : AI_PRIMARY_INTENT_MIN_CONFIDENCE
+              const primaryConfirmMinConfidence = strongCreateCue
+                ? AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE_STRONG_CREATE
+                : AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE
+              if (primaryIntent.confidence >= primaryMinConfidence) {
                 forceAiMessageSearch = primaryIntent.intent === 'search_messages'
                 forceAiCalendarList = primaryIntent.intent === 'list_calendar'
-                forceAiCalendarCreate = primaryIntent.intent === 'create_calendar'
-              } else if (primaryIntent.confidence >= AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE) {
+                forceAiCalendarCreate = primaryIntent.intent === 'create_calendar' && !isOperationalCoordination
+              } else if (primaryIntent.confidence >= primaryConfirmMinConfidence) {
                 if (isRoomInteractiveReplyEnabled(roomReplyPolicy)) {
                   const confirmPrompt = buildPrimaryIntentConfirmationPrompt(primaryIntent)
                   if (confirmPrompt) {
@@ -610,7 +623,8 @@ Deno.serve(async (req) => {
             !forceAiMessageSearch &&
             calendarEnvState.ok &&
             !!groqApiKey &&
-            looksLikeSingleEventAnnouncement(text)
+            looksLikeSingleEventAnnouncement(text) &&
+            !looksLikeOperationalCoordinationText(text)
           ) {
             forceAiCalendarCreate = true
           }
@@ -772,17 +786,36 @@ Deno.serve(async (req) => {
                   }
                 : null
 
+              const strongCreateCue = looksLikeStrongCalendarCreateIntent(text)
+              const createMinConfidence = strongCreateCue
+                ? AI_CREATE_MIN_CONFIDENCE_STRONG_CREATE
+                : AI_MIN_CONFIDENCE
+              const createConfirmMinConfidence = strongCreateCue
+                ? AI_CREATE_CONFIRM_MIN_CONFIDENCE_STRONG_CREATE
+                : AI_CONFIRMATION_MIN_CONFIDENCE
               const canAutoCreate =
                 aiAutoCreateEnabled &&
                 roomReplyPolicy.calendarAiAutoCreateEnabled &&
                 normalizedAiIntent &&
-                isHighConfidenceAiCalendarIntent(normalizedAiIntent) &&
+                isHighConfidenceAiCalendarIntent(normalizedAiIntent, createMinConfidence) &&
                 resolvedDetails?.titleSource !== 'default' &&
                 !isLikelyMultiEvent
+              const shouldSilentAutoCreateHighConfidence =
+                roomReplyPolicy.calendarSilentAutoRegisterEnabled &&
+                normalizedAiIntent &&
+                isHighConfidenceAiCalendarIntent(normalizedAiIntent, createMinConfidence) &&
+                resolvedDetails?.titleSource !== 'default' &&
+                !isLikelyMultiEvent
+              const shouldSilentAutoCreateProvisional =
+                roomReplyPolicy.calendarSilentAutoRegisterEnabled &&
+                normalizedAiIntent &&
+                !shouldSilentAutoCreateHighConfidence &&
+                isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)
               const shouldAutoCreateWithoutReply =
+                !roomReplyPolicy.calendarSilentAutoRegisterEnabled &&
                 !roomCanReply &&
                 normalizedAiIntent &&
-                isConfirmableAiCalendarIntent(normalizedAiIntent)
+                isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)
 
               if (canAutoCreate && normalizedAiIntent) {
                 const reply = await createCalendarEventReply(
@@ -801,6 +834,46 @@ Deno.serve(async (req) => {
                 )
                 if (roomCanReply) {
                   aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${reply}`
+                }
+              } else if (shouldSilentAutoCreateHighConfidence && normalizedAiIntent) {
+                const silentCommand: CalendarCreateCommand = {
+                  kind: 'create',
+                  date: normalizedAiIntent.date,
+                  time: normalizedAiIntent.time,
+                  durationMin: normalizedAiIntent.durationMin,
+                  title: normalizedAiIntent.title,
+                  ...(normalizedAiIntent.location ? { location: normalizedAiIntent.location } : {}),
+                }
+                const silentResult = await createCalendarEvent(
+                  silentCommand,
+                  calendarEnvState.env,
+                  roomId,
+                  userId,
+                  undefined,
+                  calendarSourceMeta,
+                )
+                if (!silentResult.ok) {
+                  console.error('Silent high-confidence auto-create failed:', silentResult.error)
+                }
+              } else if (shouldSilentAutoCreateProvisional && normalizedAiIntent) {
+                const silentCommand: CalendarCreateCommand = {
+                  kind: 'create',
+                  date: normalizedAiIntent.date,
+                  time: normalizedAiIntent.time,
+                  durationMin: normalizedAiIntent.durationMin,
+                  title: appendProvisionalSuffixToTitle(normalizedAiIntent.title),
+                  ...(normalizedAiIntent.location ? { location: normalizedAiIntent.location } : {}),
+                }
+                const silentResult = await createCalendarEvent(
+                  silentCommand,
+                  calendarEnvState.env,
+                  roomId,
+                  userId,
+                  undefined,
+                  calendarSourceMeta,
+                )
+                if (!silentResult.ok) {
+                  console.error('Silent provisional auto-create failed:', silentResult.error)
                 }
               } else if (shouldAutoCreateWithoutReply && normalizedAiIntent) {
                 const silentCommand: CalendarCreateCommand = {
@@ -822,7 +895,7 @@ Deno.serve(async (req) => {
                 if (!silentResult.ok) {
                   console.error('Silent auto-create failed:', silentResult.error)
                 }
-              } else if (normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent)) {
+              } else if (normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)) {
                 const pendingSaved = await savePendingCalendarConfirmation(
                   supabase,
                   roomId,
@@ -1513,6 +1586,7 @@ function buildDirectUserRoomPolicy(base: RoomReplyPolicy): RoomReplyPolicy {
     messageSearchLibraryEnabled: true,
     mediaFileAccessEnabled: false,
     calendarAiAutoCreateEnabled: true,
+    calendarSilentAutoRegisterEnabled: false,
   }
 }
 
@@ -1569,6 +1643,7 @@ async function loadRoomReplyPolicy(
     messageSearchLibraryEnabled: false,
     mediaFileAccessEnabled: false,
     calendarAiAutoCreateEnabled: false,
+    calendarSilentAutoRegisterEnabled: false,
   } satisfies RoomReplyPolicy
   const normalizedRoomId = String(roomId ?? '').trim()
   if (!normalizedRoomId || normalizedRoomId === 'unknown') {
@@ -1581,7 +1656,7 @@ async function loadRoomReplyPolicy(
   try {
     const { data, error } = await supabase
       .from('room_summary_settings')
-      .select('room_name, is_enabled, bot_reply_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, calendar_ai_auto_create_enabled')
+      .select('room_name, is_enabled, bot_reply_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, calendar_ai_auto_create_enabled, calendar_silent_auto_register_enabled')
       .eq('room_id', normalizedRoomId)
       .maybeSingle()
 
@@ -1602,13 +1677,15 @@ async function loadRoomReplyPolicy(
     const messageSearchLibraryEnabled = data?.message_search_library_enabled !== false
     const mediaFileAccessEnabled = data?.media_file_access_enabled !== false
     const calendarAiAutoCreateEnabled = data?.calendar_ai_auto_create_enabled !== false
+    const calendarSilentAutoRegisterEnabled = data?.calendar_silent_auto_register_enabled === true
     const requiresRegistration =
       data?.is_enabled === false &&
       data?.bot_reply_enabled === false &&
       data?.message_search_enabled === false &&
       data?.message_search_library_enabled === false &&
       data?.media_file_access_enabled === false &&
-      data?.calendar_ai_auto_create_enabled === false
+      data?.calendar_ai_auto_create_enabled === false &&
+      data?.calendar_silent_auto_register_enabled !== true
     const policy: RoomReplyPolicy = {
       roomName: normalizeDisplayName(data?.room_name ?? null),
       requiresRegistration,
@@ -1618,6 +1695,7 @@ async function loadRoomReplyPolicy(
       messageSearchLibraryEnabled,
       mediaFileAccessEnabled,
       calendarAiAutoCreateEnabled,
+      calendarSilentAutoRegisterEnabled,
     }
     cache.set(normalizedRoomId, policy)
     return policy
@@ -1637,7 +1715,7 @@ function isRoomBotReplyEnabled(policy: RoomReplyPolicy): boolean {
 }
 
 function shouldSendRoomReply(policy: RoomReplyPolicy): boolean {
-  return policy.isEnabled && policy.botReplyEnabled
+  return policy.isEnabled && policy.botReplyEnabled && !policy.calendarSilentAutoRegisterEnabled
 }
 
 function looksLikeBotInteractionRequest(text: string): boolean {
@@ -1791,12 +1869,14 @@ async function extractPrimaryIntentWithGroq(
               '1) 「質問」ではない業務連絡・周知・案内・提出依頼・在庫/発注/納品/欠品連絡は基本 none。',
               '2) @All を含む全体周知、長文の通達、資料共有（画像/PDF/動画/ファイル）は基本 none。',
               '3) create_calendar は、本文の主目的が「1件の予定告知/設定」である時だけ。会議資料の文脈や提出期限連絡は none。',
+              '3-1) 「参加希望は連絡ください」「ヘルプ募集」「使用店舗ありますか」「在庫共有」「締切案内」など募集・調整の業務連絡は none。',
               '4) list_calendar は、予定を尋ねる明確な質問語（いつ/ある/ありますか/教えて/確認）を伴う時のみ。',
               '5) search_messages は、会話・履歴・過去発言の検索意図が明確な時のみ。',
               '6) 少しでも迷う場合は none を選び、confidence を低めにする（0.55以下）。',
               '想定される会話パターン（運用実態ベース）:',
               'A) 在庫・発注・納品・欠品・案内・周知・提出依頼・資料共有・シフト調整依頼: none',
               'B) 「明日の会議参加可否連絡お願いします」「会議資料共有」「提出期限は◯日です」: none',
+              'B-1) 「参加希望者はご連絡ください」「ヘルプ行く時に持って行きます」「使用店舗あれば連絡」: none',
               'C) 「5/10 14:00 試飲会を入れて」「来週火曜17時から打ち合わせ」: create_calendar',
               'D) 「5月の会議はいつ？」「4/20に会議ある？」: list_calendar',
               'E) 「人参の値段の記述ある？」「過去の発注の話を検索して」: search_messages',
@@ -2195,6 +2275,7 @@ function formatDocumentSearchPreview(
   includeRoomLabel = false,
 ): string[] {
   const date = formatSearchDateTime(row.created_at)
+  const talkDateTime = extractTalkDateTimeFromDocument(row.extracted_text, keyword)
   const fileName = normalizeInlineText(row.original_file_name) || '（ファイル名不明）'
   const mimeType = normalizeInlineText(row.mime_type) || '-'
   const snippet = buildDocumentSearchSnippet(row.extracted_text, keyword)
@@ -2204,7 +2285,10 @@ function formatDocumentSearchPreview(
     const roomLabel = normalizeInlineText(String(row.room_label ?? '')) || '（ルーム不明）'
     lines.push(`  ルーム: ${roomLabel}`)
   }
-  lines.push(`  日時: ${date}`)
+  lines.push(`  資料登録日時: ${date}`)
+  if (talkDateTime) {
+    lines.push(`  トーク日時: ${talkDateTime}`)
+  }
   lines.push(`  ファイル: ${fileName}`)
   lines.push(`  種別: ${mimeType}`)
   lines.push('  抜粋:')
@@ -2218,22 +2302,12 @@ async function buildLineTaggedDocumentLibrarySearchReply(
   command: MessageSearchCommand,
   supabase: ReturnType<typeof createClient>,
   roomId: string,
-  effectiveDays: MessageRetentionDays,
-  retentionAdjusted: boolean,
-  configuredRetentionDays: MessageRetentionDays,
 ): Promise<string[]> {
-  const sinceIso = effectiveDays > 0
-    ? new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
-    : null
-
   let docQuery = supabase
     .from('line_search_documents')
     .select('room_id, original_file_name, mime_type, extracted_text, created_at')
     .order('created_at', { ascending: false })
     .limit(SEARCH_MAX_DOCUMENT_ROWS)
-  if (sinceIso) {
-    docQuery = docQuery.gte('created_at', sinceIso)
-  }
   if (command.scope !== 'all_rooms') {
     docQuery = docQuery.eq('room_id', roomId)
   }
@@ -2259,14 +2333,9 @@ async function buildLineTaggedDocumentLibrarySearchReply(
     return messageMatchesKeyword(searchable, command.keyword)
   })
 
-  const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+  const periodText = '登録済み[LINE]資料全体'
   if (docHitsRaw.length === 0) {
-    const lines = [
-      `「${command.keyword}」に一致する[LINE]資料はありません（${periodText}）`,
-    ]
-    if (retentionAdjusted) {
-      lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
-    }
+    const lines = [`「${command.keyword}」に一致する[LINE]資料はありません（${periodText}）`]
     return splitTextForLineReply(lines.join('\n'))
   }
 
@@ -2287,10 +2356,8 @@ async function buildLineTaggedDocumentLibrarySearchReply(
     `期間: ${periodText}`,
     `キーワード: ${command.keyword}`,
     `資料一致: ${docHits.length}件`,
+    '※日時は会話発生時刻ではなく、資料の登録日時です。',
   ]
-  if (retentionAdjusted) {
-    lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
-  }
   if (docRows.length >= SEARCH_MAX_DOCUMENT_ROWS) {
     lines.push(`※資料件数が多いため、新しい順で先頭${SEARCH_MAX_DOCUMENT_ROWS}件を対象にしています（その中から[LINE]付きのみを表示）。`)
   }
@@ -2339,6 +2406,111 @@ function buildDocumentSearchSnippet(text: string, keyword: string): string {
   const prefix = start > 0 ? '...' : ''
   const suffix = end < normalized.length ? '...' : ''
   return `${prefix}${normalized.slice(start, end)}${suffix}`
+}
+
+function extractTalkDateTimeFromDocument(text: string, keyword: string): string | null {
+  const source = String(text ?? '')
+  if (!source.trim()) return null
+
+  const keywordTokens = normalizeKeywordForSearch(keyword)
+    .split(/[\s、，。]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0)
+  if (keywordTokens.length === 0) return null
+
+  const lines = source.split(/\r?\n/)
+  let currentDate: { year: number, month: number, day: number } | null = null
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = normalizeForRuleParsing(lines[i]).trim()
+    if (!line) continue
+
+    const dateOnLine = extractDatePartsFromText(line)
+    if (dateOnLine) {
+      currentDate = dateOnLine
+    }
+
+    const normalizedLine = normalizeKeywordForSearch(line)
+    const hasKeyword = keywordTokens.some((token) => normalizedLine.includes(token))
+    if (!hasKeyword) continue
+
+    const lineTime = extractTimePartsFromText(line)
+    if (dateOnLine && lineTime) {
+      return formatTalkDateTime(dateOnLine, lineTime)
+    }
+    if (currentDate && lineTime) {
+      return formatTalkDateTime(currentDate, lineTime)
+    }
+
+    if (currentDate) {
+      const nearbyTime = findNearbyTimeParts(lines, i, 3)
+      if (nearbyTime) {
+        return formatTalkDateTime(currentDate, nearbyTime)
+      }
+    }
+  }
+
+  return null
+}
+
+function extractDatePartsFromText(text: string): { year: number, month: number, day: number } | null {
+  const m = normalizeForRuleParsing(text).match(/(\d{4})[\/.\-年](\d{1,2})[\/.\-月](\d{1,2})日?/)
+  if (!m || !m[1] || !m[2] || !m[3]) return null
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  const iso = toIsoDateStringSafe(year, month, day)
+  if (!iso) return null
+  return { year, month, day }
+}
+
+function extractTimePartsFromText(text: string): { hour: number, minute: number } | null {
+  const normalized = normalizeForRuleParsing(text)
+  const colon = normalized.match(/(\d{1,2}):(\d{2})/)
+  if (colon && colon[1] && colon[2]) {
+    const hour = Number(colon[1])
+    const minute = Number(colon[2])
+    if (Number.isInteger(hour) && Number.isInteger(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      return { hour, minute }
+    }
+  }
+  const japanese = normalized.match(/(\d{1,2})時(?:\s*(\d{1,2})分?)?/)
+  if (!japanese || !japanese[1]) return null
+  const hour = Number(japanese[1])
+  const minute = japanese[2] ? Number(japanese[2]) : 0
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null
+  return { hour, minute }
+}
+
+function findNearbyTimeParts(lines: string[], index: number, distance: number): { hour: number, minute: number } | null {
+  for (let offset = 0; offset <= distance; offset += 1) {
+    const prevIndex = index - offset
+    if (prevIndex >= 0) {
+      const prev = normalizeForRuleParsing(lines[prevIndex]).trim()
+      const prevTime = extractTimePartsFromText(prev)
+      if (prevTime) return prevTime
+    }
+    const nextIndex = index + offset
+    if (offset > 0 && nextIndex < lines.length) {
+      const next = normalizeForRuleParsing(lines[nextIndex]).trim()
+      const nextTime = extractTimePartsFromText(next)
+      if (nextTime) return nextTime
+    }
+  }
+  return null
+}
+
+function formatTalkDateTime(
+  date: { year: number, month: number, day: number },
+  time: { hour: number, minute: number },
+): string {
+  const yyyy = String(date.year).padStart(4, '0')
+  const mm = String(date.month).padStart(2, '0')
+  const dd = String(date.day).padStart(2, '0')
+  const hh = String(time.hour).padStart(2, '0')
+  const mi = String(time.minute).padStart(2, '0')
+  return `${yyyy}/${mm}/${dd} ${hh}:${mi}`
 }
 
 function formatMessageSearchPreview(
@@ -2570,6 +2742,38 @@ function looksLikeCalendarCandidate(text: string): boolean {
   return (hasDateHint && hasTimeHint) || (hasIntentWord && (hasDateHint || hasTimeHint))
 }
 
+function looksLikeOperationalCoordinationText(text: string): boolean {
+  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
+  if (!compact) return false
+
+  const hasCoordinationCue =
+    /(ヘルプ|参加者|参加希望|募集|使用店舗|希望店舗|使っていただける店舗|ご連絡|連絡お願いします|ご検討|共有|周知|案内|締切|締め切り|提出期限|回収|ピックアップ|納品|発注|在庫|欠品|配達|取りに来)/.test(compact)
+  if (!hasCoordinationCue) return false
+
+  const hasExplicitCalendarCreateIntent =
+    /(予定登録|予定追加|予定作成|カレンダー登録|登録して|登録お願いします|入れて|追加して)/.test(compact)
+  if (hasExplicitCalendarCreateIntent) return false
+
+  return true
+}
+
+function looksLikeStrongCalendarCreateIntent(text: string): boolean {
+  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
+  if (!compact) return false
+  if (looksLikeOperationalCoordinationText(compact)) return false
+
+  const hasExplicitCreatePhrase =
+    /(予定登録|予定追加|予定作成|カレンダー登録|カレンダー追加|予定を入れて|予定入れて|登録して|登録お願いします|追加して|追加お願いします|入れてください)/.test(compact)
+  if (hasExplicitCreatePhrase) return true
+
+  const hasDateHint = /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}|\d{1,2}月\d{1,2}日|今日|明日|明後日|来週|今週)/.test(compact)
+  const hasTimeHint = /(\d{1,2}:\d{2}|\d{1,2}時(?:\d{1,2}分)?)/.test(compact)
+  const hasEventWord = /(予定|会議|打ち合わせ|打合せ|ミーティング|mtg|meeting|講習会|セミナー|試飲会|イベント)/i.test(compact)
+  const hasRequestTone = /(お願いします|お願い|してください|したい|します|でお願いします|です)/.test(compact)
+
+  return hasDateHint && hasTimeHint && hasEventWord && hasRequestTone
+}
+
 function looksLikeSingleEventAnnouncement(text: string): boolean {
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   if (!compact) return false
@@ -2783,6 +2987,7 @@ async function extractCalendarIntentWithGroq(
               'ラベル付きでも同様に分離してください（例: 「【日時】6/19 15時〜17時 / 【場所】マルゴ四谷 / 従業員向け試飲会」→ title=試飲会, location=マルゴ四谷）。',
               '「次回会議は6月12日、14:30～15:30にオンライン会議」のような文は title=会議, location=オンライン にしてください。',
               '提出期限など別目的の日付が混在していても、予定本体（会議/試飲会など）の日時を優先して抽出してください。',
+              'ただし、次のような「募集・調整・共有」文脈は should_create=false にしてください: 「参加希望者はご連絡ください」「ヘルプ募集」「使用店舗ありますか」「在庫共有」「締切案内」。',
               '「〜のご案内」「よろしくお願いします」「皆様ぜひ〜」等の周知文は title に含めないでください。',
               `現在時刻は ${nowText} (${timezone})。相対表現（今日/明日/来週）を絶対日付に変換してください。`,
               '「18日の18時」のように月が未指定で日付だけある場合は、現在月（現在年）として解釈してください。',
@@ -3193,12 +3398,12 @@ function isValidAiCalendarIntent(intent: AiCalendarIntent): boolean {
   return true
 }
 
-function isHighConfidenceAiCalendarIntent(intent: AiCalendarIntent): boolean {
-  return isValidAiCalendarIntent(intent) && intent.confidence >= AI_MIN_CONFIDENCE
+function isHighConfidenceAiCalendarIntent(intent: AiCalendarIntent, minConfidence = AI_MIN_CONFIDENCE): boolean {
+  return isValidAiCalendarIntent(intent) && intent.confidence >= minConfidence
 }
 
-function isConfirmableAiCalendarIntent(intent: AiCalendarIntent): boolean {
-  return isValidAiCalendarIntent(intent) && intent.confidence >= AI_CONFIRMATION_MIN_CONFIDENCE
+function isConfirmableAiCalendarIntent(intent: AiCalendarIntent, minConfidence = AI_CONFIRMATION_MIN_CONFIDENCE): boolean {
+  return isValidAiCalendarIntent(intent) && intent.confidence >= minConfidence
 }
 
 function buildConversationKey(roomId: string, userId: string | null): string {
@@ -3758,7 +3963,7 @@ async function savePendingCalendarConfirmation(
 ): Promise<boolean> {
   const conversationKey = buildConversationKey(roomId, userId)
   const nowIso = new Date().toISOString()
-  const expiresAt = new Date(Date.now() + PENDING_CONFIRMATION_TTL_MIN * 60 * 1000).toISOString()
+  const expiresAt = new Date(Date.now() + CALENDAR_PENDING_CONFIRMATION_TTL_MIN * 60 * 1000).toISOString()
 
   const { error: supersedeError } = await supabase
     .from(CALENDAR_PENDING_TABLE)
@@ -3840,7 +4045,42 @@ function buildPendingCalendarConfirmationPrompt(
   lines.push('')
   lines.push('修正する場合は「場所をmarugoに変更」「時間を19:00に変更」のように送ってください。')
   lines.push('「はい」で登録 / 「いいえ」でキャンセル')
+  lines.push(`※返信がない場合は、${CALENDAR_PENDING_CONFIRMATION_TTL_MIN}分後に件名末尾へ「（仮）」を付けて自動登録します。`)
   return lines.join('\n')
+}
+
+function appendProvisionalSuffixToTitle(title: string): string {
+  const cleaned = cleanCalendarTitle(title)
+  if (/[（(]仮[）)]$/.test(cleaned)) return cleaned
+  return cleanCalendarTitle(`${cleaned}（仮）`)
+}
+
+function buildCalendarCreateCommandFromPending(
+  pending: PendingCalendarConfirmation,
+  useProvisionalTitle = false,
+): CalendarCreateCommand {
+  const explicitPendingTitle = normalizeEventTitleCandidate(pending.title) || cleanCalendarTitle(pending.title)
+  const explicitPendingLocation = cleanCalendarLocation(pending.location ?? '') ?? null
+  const resolvedPendingDetails = resolveAiCalendarDetails(
+    pending.source_text ?? '',
+    explicitPendingTitle,
+    explicitPendingLocation ?? undefined,
+  )
+  const resolvedPendingTitle = explicitPendingTitle || (resolvedPendingDetails.titleSource === 'default'
+    ? cleanCalendarTitle(pending.title)
+    : resolvedPendingDetails.title)
+  const resolvedPendingLocation = explicitPendingLocation ?? resolvedPendingDetails.location ?? null
+  const finalTitle = useProvisionalTitle
+    ? appendProvisionalSuffixToTitle(resolvedPendingTitle)
+    : resolvedPendingTitle
+  return {
+    kind: 'create',
+    date: pending.date,
+    time: pending.time,
+    durationMin: pending.duration_min,
+    title: finalTitle,
+    ...(resolvedPendingLocation ? { location: resolvedPendingLocation } : {}),
+  }
 }
 
 function buildPendingCalendarIntent(pending: PendingCalendarConfirmation): AiCalendarIntent {
@@ -4219,8 +4459,41 @@ async function tryHandlePendingCalendarConfirmation(
 
   const expireAtMs = new Date(pending.expires_at).getTime()
   if (!Number.isFinite(expireAtMs) || Date.now() >= expireAtMs) {
-    await resolvePendingCalendarConfirmation(supabase, pending, 'expired')
-    return '確認待ちの予定が期限切れです。予定文をもう一度送ってください。'
+    const provisionalCommand = buildCalendarCreateCommandFromPending(pending, true)
+    const provisionalResult = await createCalendarEvent(provisionalCommand, env, roomId, userId, undefined, sourceMeta)
+    if (!provisionalResult.ok) {
+      return `確認期限を過ぎたため「（仮）」で自動登録を試みましたが失敗しました。${provisionalResult.error}`
+    }
+    if (provisionalResult.eventId) {
+      const pendingEvent: GoogleCalendarEvent = {
+        id: provisionalResult.eventId,
+        summary: provisionalResult.summary,
+        ...(provisionalCommand.location ? { location: provisionalCommand.location } : {}),
+        ...(provisionalResult.savedStartRaw ? { start: { dateTime: provisionalResult.savedStartRaw, timeZone: provisionalResult.savedStartTimeZone ?? env.timezone } } : {}),
+        ...(provisionalResult.savedEndRaw ? { end: { dateTime: provisionalResult.savedEndRaw, timeZone: provisionalResult.savedEndTimeZone ?? env.timezone } } : {}),
+      }
+      await savePendingCalendarUpdateContext(
+        supabase,
+        roomId,
+        userId,
+        [pendingEvent],
+        env.timezone,
+      )
+    }
+    await resolvePendingCalendarConfirmation(supabase, pending, 'confirmed')
+    const provisionalDate = formatDateOnlyForLine(provisionalResult.startDate, env.timezone)
+    const provisionalTime = `${formatTimeOnlyForLine(provisionalResult.startDate, env.timezone)}-${formatTimeOnlyForLine(provisionalResult.endDate, env.timezone)}`
+    const lines = [
+      `確認返信が${CALENDAR_PENDING_CONFIRMATION_TTL_MIN}分以内になかったため、「（仮）」で予定登録しました。`,
+      ...buildCalendarDetailTemplateLines({
+        title: provisionalResult.summary,
+        date: provisionalDate,
+        time: provisionalTime,
+        location: provisionalCommand.location ?? null,
+        content: null,
+      }),
+    ]
+    return lines.join('\n')
   }
 
   const decision = normalizeConfirmationDecision(text)
@@ -4249,25 +4522,7 @@ async function tryHandlePendingCalendarConfirmation(
     return lines.join('\n')
   }
 
-  const explicitPendingTitle = normalizeEventTitleCandidate(pending.title) || cleanCalendarTitle(pending.title)
-  const explicitPendingLocation = cleanCalendarLocation(pending.location ?? '') ?? null
-  const resolvedPendingDetails = resolveAiCalendarDetails(
-    pending.source_text ?? '',
-    explicitPendingTitle,
-    explicitPendingLocation ?? undefined,
-  )
-  const resolvedPendingTitle = explicitPendingTitle || (resolvedPendingDetails.titleSource === 'default'
-    ? cleanCalendarTitle(pending.title)
-    : resolvedPendingDetails.title)
-  const resolvedPendingLocation = explicitPendingLocation ?? resolvedPendingDetails.location ?? null
-  const command: CalendarCreateCommand = {
-    kind: 'create',
-    date: pending.date,
-    time: pending.time,
-    durationMin: pending.duration_min,
-    title: resolvedPendingTitle,
-    ...(resolvedPendingLocation ? { location: resolvedPendingLocation } : {}),
-  }
+  const command = buildCalendarCreateCommandFromPending(pending, false)
   const result = await createCalendarEvent(command, env, roomId, userId, undefined, sourceMeta)
   if (!result.ok) {
     return `予定登録に失敗しました。${result.error}\n再試行する場合は「はい」、中止する場合は「いいえ」を送ってください。`
@@ -4643,7 +4898,6 @@ async function tryHandlePendingLibrarySearchConfirmation(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
   userId: string | null,
-  configuredRetentionDays: MessageRetentionDays,
 ): Promise<string[] | null> {
   const pending = await fetchPendingLibrarySearchConfirmation(supabase, roomId, userId)
   if (!pending) return null
@@ -4673,9 +4927,6 @@ async function tryHandlePendingLibrarySearchConfirmation(
     command,
     supabase,
     roomId,
-    pending.search_days,
-    pending.retention_adjusted,
-    configuredRetentionDays,
   )
   await resolvePendingLibrarySearchConfirmation(supabase, pending, 'confirmed')
   return reply
