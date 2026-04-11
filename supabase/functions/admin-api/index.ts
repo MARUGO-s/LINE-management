@@ -946,6 +946,17 @@ async function refreshRoomNamesFromLine(
       throw { status: 500, message: `Failed to refresh room name in settings (${id}): ${settingsError.message}` } satisfies AppError
     }
 
+    const { error: cacheError } = await supabase
+      .from("line_room_names")
+      .upsert({
+        room_id: id,
+        room_name: name,
+        updated_at: now,
+      }, { onConflict: "room_id" })
+    if (cacheError) {
+      throw { status: 500, message: `Failed to refresh room name in cache (${id}): ${cacheError.message}` } satisfies AppError
+    }
+
     refreshed += 1
   }
 
