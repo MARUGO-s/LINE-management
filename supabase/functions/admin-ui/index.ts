@@ -256,7 +256,19 @@ const html = String.raw`<!doctype html>
       margin: 0 auto;
       background: conic-gradient(#2e4f66 0deg 360deg);
       position: relative;
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+      box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+        0 0 24px rgba(74, 196, 255, 0.28);
+      overflow: hidden;
+    }
+
+    .storage-pie::before {
+      content: "";
+      position: absolute;
+      inset: -10%;
+      background: radial-gradient(circle at 30% 25%, rgba(255, 255, 255, 0.22), transparent 45%);
+      mix-blend-mode: screen;
+      pointer-events: none;
     }
 
     .storage-pie::after {
@@ -266,6 +278,34 @@ const html = String.raw`<!doctype html>
       border-radius: 50%;
       background: rgba(7, 20, 34, 0.95);
       border: 1px solid rgba(149, 219, 255, 0.18);
+      z-index: 1;
+    }
+
+    .storage-pie-center {
+      position: absolute;
+      inset: 30px;
+      border-radius: 50%;
+      z-index: 2;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      gap: 2px;
+      pointer-events: none;
+    }
+
+    .storage-pie-center-label {
+      font-size: 0.64rem;
+      color: #93bfd8;
+      letter-spacing: 0.04em;
+    }
+
+    .storage-pie-center-value {
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: #d7f0ff;
+      line-height: 1.2;
     }
 
     .storage-legend {
@@ -696,7 +736,12 @@ const html = String.raw`<!doctype html>
         <div id="storageUsageSummary" class="meta usage-summary"></div>
         <div id="storageUsageDetails" class="meta usage-details"></div>
         <div class="storage-chart">
-          <div id="storageUsagePie" class="storage-pie" aria-label="テーブル容量内訳円グラフ"></div>
+          <div id="storageUsagePie" class="storage-pie" aria-label="テーブル容量内訳円グラフ">
+            <div id="storageUsagePieCenter" class="storage-pie-center">
+              <div class="storage-pie-center-label">対象容量</div>
+              <div id="storageUsagePieCenterValue" class="storage-pie-center-value">-</div>
+            </div>
+          </div>
           <div id="storageUsageLegend" class="storage-legend"></div>
         </div>
       </section>
@@ -851,6 +896,7 @@ const html = String.raw`<!doctype html>
       storageUsageSummary: document.getElementById('storageUsageSummary'),
       storageUsageDetails: document.getElementById('storageUsageDetails'),
       storageUsagePie: document.getElementById('storageUsagePie'),
+      storageUsagePieCenterValue: document.getElementById('storageUsagePieCenterValue'),
       storageUsageLegend: document.getElementById('storageUsageLegend'),
       roomTableBody: document.getElementById('roomTableBody'),
       logTableBody: document.getElementById('logTableBody'),
@@ -968,8 +1014,9 @@ const html = String.raw`<!doctype html>
       return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
     }
 
-    function renderStorageUsageChart(tableRows) {
+    function renderStorageUsageChart(tableRows, centerValueText) {
       const rows = Array.isArray(tableRows) ? tableRows : [];
+      dom.storageUsagePieCenterValue.textContent = centerValueText || '-';
       if (!rows.length) {
         dom.storageUsagePie.style.background = 'conic-gradient(#2e4f66 0deg 360deg)';
         dom.storageUsageLegend.innerHTML = '<div class="storage-legend-item"><span class="storage-legend-label">内訳データなし</span></div>';
@@ -1248,14 +1295,14 @@ const html = String.raw`<!doctype html>
       if (storageUsageError) {
         dom.storageUsageSummary.textContent = 'DB使用容量: 取得失敗';
         dom.storageUsageDetails.textContent = storageUsageError;
-        renderStorageUsageChart([]);
+        renderStorageUsageChart([], '-');
         return;
       }
 
       if (!storageUsage || typeof storageUsage !== 'object') {
         dom.storageUsageSummary.textContent = 'DB使用容量: 取得待ち';
         dom.storageUsageDetails.textContent = '';
-        renderStorageUsageChart([]);
+        renderStorageUsageChart([], '-');
         return;
       }
 
@@ -1265,21 +1312,13 @@ const html = String.raw`<!doctype html>
         'DB使用容量（対象テーブル合計）: ' + managedPretty + ' / DB全体: ' + dbPretty;
 
       const tableRows = Array.isArray(storageUsage.managed_tables) ? storageUsage.managed_tables : [];
-      renderStorageUsageChart(tableRows);
+      renderStorageUsageChart(tableRows, managedPretty);
       if (tableRows.length === 0) {
-        dom.storageUsageDetails.textContent = 'テーブル内訳: なし | 更新: ' + formatDate(generatedAt);
+        dom.storageUsageDetails.textContent = '';
         return;
       }
 
-      const detailText = tableRows
-        .slice(0, 8)
-        .map(function(row) {
-          const name = row && row.table_name ? String(row.table_name) : '-';
-          const size = row && row.size_pretty ? String(row.size_pretty) : formatBytes(row ? row.size_bytes : 0);
-          return name + ': ' + size;
-        })
-        .join(' | ');
-      dom.storageUsageDetails.textContent = 'テーブル内訳: ' + detailText + ' | 更新: ' + formatDate(generatedAt);
+      dom.storageUsageDetails.textContent = '';
     }
 
     function renderUserPermissions(items) {
