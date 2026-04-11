@@ -111,8 +111,7 @@ Deno.serve(async () => {
         .eq("id", row.id)
         .eq("status", "superseded")
       if (resolveError) {
-        errors.push(`id=${row.id}: failed to resolve confirmed: ${resolveError.message}`)
-        continue
+        throw new Error(`failed to resolve confirmed: ${resolveError.message}`)
       }
       registered += 1
     } catch (err) {

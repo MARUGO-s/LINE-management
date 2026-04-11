@@ -274,7 +274,7 @@ Deno.serve(async (req) => {
           calendar_tomorrow_reminder_hours: payload.calendar_tomorrow_reminder_hours,
           calendar_tomorrow_reminder_only_if_events: payload.calendar_tomorrow_reminder_only_if_events,
           calendar_tomorrow_reminder_max_items: payload.calendar_tomorrow_reminder_max_items,
-          media_upload_max_mb: payload.media_upload_max_mb,
+          ...(payload.media_upload_max_mb != null ? { media_upload_max_mb: payload.media_upload_max_mb } : {}),
           updated_at: new Date().toISOString(),
         }, { onConflict: "id" })
         .select("id, delivery_hours, is_enabled, message_cleanup_timing, last_delivery_summary_mode, message_retention_days, calendar_tomorrow_reminder_enabled, calendar_tomorrow_reminder_hours, calendar_tomorrow_reminder_only_if_events, calendar_tomorrow_reminder_max_items, media_upload_max_mb, updated_at")
@@ -2234,7 +2234,7 @@ function buildGlobalSettingsPayload(body: unknown): {
   calendar_tomorrow_reminder_hours: number[]
   calendar_tomorrow_reminder_only_if_events: boolean
   calendar_tomorrow_reminder_max_items: number
-  media_upload_max_mb: number
+  media_upload_max_mb: number | null
 } {
   if (!isRecord(body)) {
     throw { status: 400, message: "Invalid JSON body." } satisfies AppError
@@ -2259,7 +2259,9 @@ function buildGlobalSettingsPayload(body: unknown): {
     } satisfies AppError
   }
   const messageRetentionDays = normalizeMessageRetentionDays(body.message_retention_days)
-  const mediaUploadMaxMb = normalizeMediaUploadMaxMb(body.media_upload_max_mb)
+  const mediaUploadMaxMb = body.media_upload_max_mb == null || body.media_upload_max_mb === ""
+    ? null
+    : normalizeMediaUploadMaxMb(body.media_upload_max_mb)
 
   const reminderEnabled = body.calendar_tomorrow_reminder_enabled
   if (typeof reminderEnabled !== "boolean") {

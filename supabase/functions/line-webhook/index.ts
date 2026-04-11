@@ -4457,50 +4457,20 @@ async function tryHandlePendingCalendarConfirmation(
   const pending = await fetchPendingCalendarConfirmation(supabase, roomId, userId)
   if (!pending) return null
 
-  const expireAtMs = new Date(pending.expires_at).getTime()
-  if (!Number.isFinite(expireAtMs) || Date.now() >= expireAtMs) {
-    const provisionalCommand = buildCalendarCreateCommandFromPending(pending, true)
-    const provisionalResult = await createCalendarEvent(provisionalCommand, env, roomId, userId, undefined, sourceMeta)
-    if (!provisionalResult.ok) {
-      return `確認期限を過ぎたため「（仮）」で自動登録を試みましたが失敗しました。${provisionalResult.error}`
-    }
-    if (provisionalResult.eventId) {
-      const pendingEvent: GoogleCalendarEvent = {
-        id: provisionalResult.eventId,
-        summary: provisionalResult.summary,
-        ...(provisionalCommand.location ? { location: provisionalCommand.location } : {}),
-        ...(provisionalResult.savedStartRaw ? { start: { dateTime: provisionalResult.savedStartRaw, timeZone: provisionalResult.savedStartTimeZone ?? env.timezone } } : {}),
-        ...(provisionalResult.savedEndRaw ? { end: { dateTime: provisionalResult.savedEndRaw, timeZone: provisionalResult.savedEndTimeZone ?? env.timezone } } : {}),
-      }
-      await savePendingCalendarUpdateContext(
-        supabase,
-        roomId,
-        userId,
-        [pendingEvent],
-        env.timezone,
-      )
-    }
-    await resolvePendingCalendarConfirmation(supabase, pending, 'confirmed')
-    const provisionalDate = formatDateOnlyForLine(provisionalResult.startDate, env.timezone)
-    const provisionalTime = `${formatTimeOnlyForLine(provisionalResult.startDate, env.timezone)}-${formatTimeOnlyForLine(provisionalResult.endDate, env.timezone)}`
-    const lines = [
-      `確認返信が${CALENDAR_PENDING_CONFIRMATION_TTL_MIN}分以内になかったため、「（仮）」で予定登録しました。`,
-      ...buildCalendarDetailTemplateLines({
-        title: provisionalResult.summary,
-        date: provisionalDate,
-        time: provisionalTime,
-        location: provisionalCommand.location ?? null,
-        content: null,
-      }),
-    ]
-    return lines.join('\n')
-  }
-
   const decision = normalizeConfirmationDecision(text)
+  const expireAtMs = new Date(pending.expires_at).getTime()
+  const isExpired = !Number.isFinite(expireAtMs) || Date.now() >= expireAtMs
 
   if (decision === 'no') {
     await resolvePendingCalendarConfirmation(supabase, pending, 'cancelled')
     return '予定登録をキャンセルしました。'
+  }
+
+  if (isExpired && decision !== 'yes') {
+    return [
+      `確認期限（${CALENDAR_PENDING_CONFIRMATION_TTL_MIN}分）を過ぎています。`,
+      '自動登録はバックグラウンド処理で順次実行されます。反映まで少しお待ちください。',
+    ].join('\n')
   }
 
   if (decision !== 'yes') {

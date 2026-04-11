@@ -1050,6 +1050,9 @@
         const tr = document.createElement('tr');
         tr.dataset.roomId = room.room_id;
         tr.dataset.roomSortOrder = String(parseRoomSortOrder(setting && setting.room_sort_order) ?? visualIndex);
+        tr.dataset.botReplyEnabled = String((setting && setting.bot_reply_enabled) !== false);
+        tr.dataset.messageSearchEnabled = String((setting && setting.message_search_enabled) !== false);
+        tr.dataset.messageSearchLibraryEnabled = String((setting && setting.message_search_library_enabled) !== false);
         tr.draggable = false;
         tr.innerHTML =
           '<td><span class="room-id-tools"><span class="room-drag-handle" draggable="true" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
@@ -1176,6 +1179,14 @@
       return num;
     }
 
+    function parseDatasetBoolean(value, fallback) {
+      if (value == null || value === '') return fallback;
+      const normalized = String(value).trim().toLowerCase();
+      if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') return true;
+      if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') return false;
+      return fallback;
+    }
+
     function buildRoomSettingsPayloadFromRow(tr, roomSortOrder) {
       const roomId = tr.dataset.roomId || '';
       const nameInput = tr.querySelector('.room-name');
@@ -1195,6 +1206,9 @@
 
       const normalizedOrder = parseRoomSortOrder(roomSortOrder);
       tr.dataset.roomSortOrder = String(normalizedOrder ?? 0);
+      const botReplyEnabled = parseDatasetBoolean(tr.dataset.botReplyEnabled, true);
+      const messageSearchEnabled = parseDatasetBoolean(tr.dataset.messageSearchEnabled, false);
+      const messageSearchLibraryEnabled = parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, false);
 
       return {
         room_id: roomId,
@@ -1202,10 +1216,10 @@
         is_enabled: !!(enabledInput && enabledInput.checked),
         send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
         calendar_tomorrow_reminder_enabled: !!(tomorrowReminderInput && tomorrowReminderInput.checked),
-        message_search_enabled: false,
-        message_search_library_enabled: false,
+        message_search_enabled: messageSearchEnabled,
+        message_search_library_enabled: messageSearchLibraryEnabled,
         media_file_access_enabled: !!(mediaFileAccessEnabledInput && mediaFileAccessEnabledInput.checked),
-        bot_reply_enabled: true,
+        bot_reply_enabled: botReplyEnabled,
         calendar_ai_auto_create_enabled: !!(calendarAutoCreateInput && calendarAutoCreateInput.checked),
         calendar_silent_auto_register_enabled: !!(silentAutoRegisterInput && silentAutoRegisterInput.checked),
         gmail_reservation_alert_enabled: !!(gmailAlertEnabledInput && gmailAlertEnabledInput.checked),
