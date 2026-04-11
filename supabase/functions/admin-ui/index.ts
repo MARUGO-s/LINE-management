@@ -453,16 +453,25 @@ const html = String.raw`<!doctype html>
       min-width: 0;
     }
 
-    .rooms-table .room-check {
-      width: 18px;
-      height: 18px;
-      accent-color: var(--accent-strong);
-    }
-
     .rooms-table .room-show-id {
       min-height: 30px;
       padding: 0 10px;
       font-size: 0.74rem;
+    }
+
+    .room-config-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 120px;
+      min-height: 30px;
+      padding: 0 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(149, 219, 255, 0.24);
+      background: rgba(7, 20, 34, 0.55);
+      color: #bde6ff;
+      font-size: 0.76rem;
+      margin-top: 6px;
     }
 
     .rooms-table .room-id-tools {
@@ -902,13 +911,7 @@ const html = String.raw`<!doctype html>
                 <th>表示名</th>
                 <th>未処理件数</th>
                 <th>最終投稿</th>
-                <th>有効</th>
-                <th>ルーム要約配信</th>
-                <th>明日予定配信</th>
-                <th>メディアアクセス</th>
-                <th>自動登録</th>
-                <th>無返信即時登録</th>
-                <th>Gmail予約通知</th>
+                <th>設定</th>
                 <th>配信時刻</th>
                 <th>処理タイミング</th>
                 <th>最終回集計</th>
@@ -971,6 +974,26 @@ const html = String.raw`<!doctype html>
       <div class="modal-actions">
         <button id="cancelUserRoomScopeBtn" class="button">キャンセル</button>
         <button id="saveUserRoomScopeBtn" class="button primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="roomConfigModal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="roomConfigModalTitle">
+      <h3 id="roomConfigModalTitle" class="modal-title">ルーム設定</h3>
+      <div id="roomConfigModalMeta" class="modal-meta">対象ルーム: -</div>
+      <div class="room-scope-modal-list" style="margin-top:12px;">
+        <label class="room-scope-option"><input id="roomConfigEnabled" type="checkbox">有効</label>
+        <label class="room-scope-option"><input id="roomConfigSendSummary" type="checkbox">ルーム要約配信</label>
+        <label class="room-scope-option"><input id="roomConfigTomorrowReminder" type="checkbox">明日予定配信</label>
+        <label class="room-scope-option"><input id="roomConfigMediaAccess" type="checkbox">メディアアクセス</label>
+        <label class="room-scope-option"><input id="roomConfigAutoCreate" type="checkbox">自動登録</label>
+        <label class="room-scope-option"><input id="roomConfigSilentAutoRegister" type="checkbox">無返信即時登録（低確度は仮）</label>
+        <label class="room-scope-option"><input id="roomConfigGmailAlert" type="checkbox">Gmail予約通知</label>
+      </div>
+      <div class="modal-actions">
+        <button id="cancelRoomConfigBtn" class="button">キャンセル</button>
+        <button id="saveRoomConfigBtn" class="button primary">保存</button>
       </div>
     </div>
   </div>
@@ -1043,6 +1066,17 @@ const html = String.raw`<!doctype html>
       userRoomScopeModalList: document.getElementById('userRoomScopeModalList'),
       cancelUserRoomScopeBtn: document.getElementById('cancelUserRoomScopeBtn'),
       saveUserRoomScopeBtn: document.getElementById('saveUserRoomScopeBtn'),
+      roomConfigModal: document.getElementById('roomConfigModal'),
+      roomConfigModalMeta: document.getElementById('roomConfigModalMeta'),
+      roomConfigEnabled: document.getElementById('roomConfigEnabled'),
+      roomConfigSendSummary: document.getElementById('roomConfigSendSummary'),
+      roomConfigTomorrowReminder: document.getElementById('roomConfigTomorrowReminder'),
+      roomConfigMediaAccess: document.getElementById('roomConfigMediaAccess'),
+      roomConfigAutoCreate: document.getElementById('roomConfigAutoCreate'),
+      roomConfigSilentAutoRegister: document.getElementById('roomConfigSilentAutoRegister'),
+      roomConfigGmailAlert: document.getElementById('roomConfigGmailAlert'),
+      cancelRoomConfigBtn: document.getElementById('cancelRoomConfigBtn'),
+      saveRoomConfigBtn: document.getElementById('saveRoomConfigBtn'),
     };
     const AUTO_REFRESH_MS_VISIBLE = 5000;
     const AUTO_REFRESH_MS_HIDDEN = 15000;
@@ -1053,6 +1087,7 @@ const html = String.raw`<!doctype html>
     let isRoomDirty = false;
     let isUserPermissionDirty = false;
     let activeUserRoomScopeRow = null;
+    let activeRoomConfigRow = null;
     const roomAutoSaveInFlight = new Set();
 
     function token() {
@@ -1557,6 +1592,51 @@ const html = String.raw`<!doctype html>
       closeUserRoomScopeModal();
     }
 
+    function getRoomConfigStateFromRow(tr) {
+      const enabledInput = tr.querySelector('.room-enabled');
+      const sendSummaryInput = tr.querySelector('.room-send-summary');
+      const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
+      const mediaFileAccessEnabledInput = tr.querySelector('.room-media-file-access-enabled');
+      const calendarAutoCreateInput = tr.querySelector('.room-calendar-auto-create');
+      const silentAutoRegisterInput = tr.querySelector('.room-silent-auto-register');
+      const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
+      return {
+        is_enabled: enabledInput ? !!enabledInput.checked : parseDatasetBoolean(tr.dataset.roomEnabled, true),
+        send_room_summary: sendSummaryInput ? !!sendSummaryInput.checked : parseDatasetBoolean(tr.dataset.roomSendSummary, false),
+        calendar_tomorrow_reminder_enabled: tomorrowReminderInput ? !!tomorrowReminderInput.checked : parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
+        media_file_access_enabled: mediaFileAccessEnabledInput ? !!mediaFileAccessEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
+        calendar_ai_auto_create_enabled: calendarAutoCreateInput ? !!calendarAutoCreateInput.checked : parseDatasetBoolean(tr.dataset.roomCalendarAutoCreate, true),
+        calendar_silent_auto_register_enabled: silentAutoRegisterInput ? !!silentAutoRegisterInput.checked : parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, false),
+        gmail_reservation_alert_enabled: gmailAlertEnabledInput ? !!gmailAlertEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
+      };
+    }
+
+    function applyRoomConfigStateToRow(tr, config) {
+      tr.dataset.roomEnabled = String(!!config.is_enabled);
+      tr.dataset.roomSendSummary = String(!!config.send_room_summary);
+      tr.dataset.roomTomorrowReminder = String(!!config.calendar_tomorrow_reminder_enabled);
+      tr.dataset.roomMediaAccess = String(!!config.media_file_access_enabled);
+      tr.dataset.roomCalendarAutoCreate = String(!!config.calendar_ai_auto_create_enabled);
+      tr.dataset.roomSilentAutoRegister = String(!!config.calendar_silent_auto_register_enabled);
+      tr.dataset.roomGmailAlertEnabled = String(!!config.gmail_reservation_alert_enabled);
+      const badge = tr.querySelector('.room-config-badge');
+      if (badge) {
+        badge.textContent = buildRoomConfigSummary(config);
+      }
+    }
+
+    function buildRoomConfigSummary(config) {
+      let enabledCount = 0;
+      if (config.is_enabled) enabledCount += 1;
+      if (config.send_room_summary) enabledCount += 1;
+      if (config.calendar_tomorrow_reminder_enabled) enabledCount += 1;
+      if (config.media_file_access_enabled) enabledCount += 1;
+      if (config.calendar_ai_auto_create_enabled) enabledCount += 1;
+      if (config.calendar_silent_auto_register_enabled) enabledCount += 1;
+      if (config.gmail_reservation_alert_enabled) enabledCount += 1;
+      return enabledCount + '/7 有効';
+    }
+
     function renderRooms(roomOverview, roomSettings) {
       const settingsMap = new Map();
       if (Array.isArray(roomSettings)) {
@@ -1566,7 +1646,7 @@ const html = String.raw`<!doctype html>
       dom.roomTableBody.innerHTML = '';
       const rooms = Array.isArray(roomOverview) ? roomOverview : [];
       if (rooms.length === 0) {
-        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="15">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
+        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="9">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
         return;
       }
 
@@ -1594,19 +1674,29 @@ const html = String.raw`<!doctype html>
         tr.dataset.botReplyEnabled = String((setting?.bot_reply_enabled) !== false);
         tr.dataset.messageSearchEnabled = String((setting?.message_search_enabled) !== false);
         tr.dataset.messageSearchLibraryEnabled = String((setting?.message_search_library_enabled) !== false);
+        tr.dataset.roomEnabled = String(((setting ? setting.is_enabled : room.settings_enabled) !== false));
+        tr.dataset.roomSendSummary = String((setting && setting.send_room_summary === true));
+        tr.dataset.roomTomorrowReminder = String((setting && setting.calendar_tomorrow_reminder_enabled === true));
+        tr.dataset.roomMediaAccess = String(((setting && setting.media_file_access_enabled) !== false));
+        tr.dataset.roomCalendarAutoCreate = String(((setting && setting.calendar_ai_auto_create_enabled) !== false));
+        tr.dataset.roomSilentAutoRegister = String((setting && setting.calendar_silent_auto_register_enabled === true));
+        tr.dataset.roomGmailAlertEnabled = String((setting && setting.gmail_reservation_alert_enabled === true));
+        const configSummary = buildRoomConfigSummary({
+          is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
+          send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
+          calendar_tomorrow_reminder_enabled: parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
+          media_file_access_enabled: parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
+          calendar_ai_auto_create_enabled: parseDatasetBoolean(tr.dataset.roomCalendarAutoCreate, true),
+          calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, false),
+          gmail_reservation_alert_enabled: parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
+        });
         tr.draggable = false;
         tr.innerHTML =
           '<td><span class="room-id-tools"><span class="room-drag-handle" draggable="true" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
           '<td><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"></td>' +
           '<td>' + Number(room.pending_messages || 0) + '件</td>' +
           '<td>' + formatDate(room.last_message_at) + '</td>' +
-          '<td><input class="room-enabled room-check" type="checkbox" aria-label="有効" ' + (((setting ? setting.is_enabled : room.settings_enabled) !== false) ? 'checked' : '') + '></td>' +
-          '<td><input class="room-send-summary room-check" type="checkbox" aria-label="ルーム要約配信" ' + ((setting && setting.send_room_summary === true) ? 'checked' : '') + '></td>' +
-          '<td><input class="room-tomorrow-reminder room-check" type="checkbox" aria-label="明日予定配信" ' + ((setting && setting.calendar_tomorrow_reminder_enabled === true) ? 'checked' : '') + '></td>' +
-          '<td><input class="room-media-file-access-enabled room-check" type="checkbox" aria-label="メディアアクセス" ' + (((setting && setting.media_file_access_enabled) !== false) ? 'checked' : '') + '></td>' +
-          '<td><input class="room-calendar-auto-create room-check" type="checkbox" aria-label="自動登録" ' + (((setting && setting.calendar_ai_auto_create_enabled) !== false) ? 'checked' : '') + '></td>' +
-          '<td><input class="room-silent-auto-register room-check" type="checkbox" aria-label="無返信即時登録（低確度は仮）" ' + ((setting && setting.calendar_silent_auto_register_enabled === true) ? 'checked' : '') + '></td>' +
-          '<td><input class="room-gmail-alert-enabled room-check" type="checkbox" aria-label="Gmail予約通知" ' + ((setting && setting.gmail_reservation_alert_enabled === true) ? 'checked' : '') + '></td>' +
+          '<td><button class="button room-config-open" type="button">設定</button><div class="room-config-badge">' + escapeHtml(configSummary) + '</div></td>' +
           '<td><input class="input room-hours" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : ROOM_DEFAULT_HOURS) + '"></td>' +
           '<td><select class="select room-cleanup-timing">' +
           '<option value="" ' + (((setting && setting.message_cleanup_timing) ? '' : 'selected')) + '>継承</option>' +
@@ -1625,6 +1715,47 @@ const html = String.raw`<!doctype html>
           '</span></td>';
         dom.roomTableBody.appendChild(tr);
       });
+    }
+
+    function openRoomConfigModal(tr) {
+      activeRoomConfigRow = tr;
+      const roomId = String(tr.dataset.roomId || '').trim();
+      const nameInput = tr.querySelector('.room-name');
+      const roomName = nameInput ? String(nameInput.value || '').trim() : '';
+      dom.roomConfigModalMeta.textContent = '対象ルーム: ' + (roomName || roomId || '(未設定)');
+      const config = getRoomConfigStateFromRow(tr);
+      dom.roomConfigEnabled.checked = !!config.is_enabled;
+      dom.roomConfigSendSummary.checked = !!config.send_room_summary;
+      dom.roomConfigTomorrowReminder.checked = !!config.calendar_tomorrow_reminder_enabled;
+      dom.roomConfigMediaAccess.checked = !!config.media_file_access_enabled;
+      dom.roomConfigAutoCreate.checked = !!config.calendar_ai_auto_create_enabled;
+      dom.roomConfigSilentAutoRegister.checked = !!config.calendar_silent_auto_register_enabled;
+      dom.roomConfigGmailAlert.checked = !!config.gmail_reservation_alert_enabled;
+      dom.roomConfigModal.classList.add('open');
+      dom.roomConfigModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeRoomConfigModal() {
+      activeRoomConfigRow = null;
+      dom.roomConfigModal.classList.remove('open');
+      dom.roomConfigModal.setAttribute('aria-hidden', 'true');
+    }
+
+    async function saveRoomConfigModal() {
+      if (!activeRoomConfigRow) return;
+      const nextConfig = {
+        is_enabled: !!dom.roomConfigEnabled.checked,
+        send_room_summary: !!dom.roomConfigSendSummary.checked,
+        calendar_tomorrow_reminder_enabled: !!dom.roomConfigTomorrowReminder.checked,
+        media_file_access_enabled: !!dom.roomConfigMediaAccess.checked,
+        calendar_ai_auto_create_enabled: !!dom.roomConfigAutoCreate.checked,
+        calendar_silent_auto_register_enabled: !!dom.roomConfigSilentAutoRegister.checked,
+        gmail_reservation_alert_enabled: !!dom.roomConfigGmailAlert.checked,
+      };
+      applyRoomConfigStateToRow(activeRoomConfigRow, nextConfig);
+      await saveRoomFromRow(activeRoomConfigRow);
+      alert('ルーム設定を保存しました。');
+      closeRoomConfigModal();
     }
 
     function openRoomIdModal(tr) {
@@ -1850,16 +1981,10 @@ const html = String.raw`<!doctype html>
     function buildRoomSettingsPayloadFromRow(tr, roomSortOrder) {
       const roomId = tr.dataset.roomId || '';
       const nameInput = tr.querySelector('.room-name');
-      const enabledInput = tr.querySelector('.room-enabled');
-      const sendSummaryInput = tr.querySelector('.room-send-summary');
-      const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
-      const mediaFileAccessEnabledInput = tr.querySelector('.room-media-file-access-enabled');
-      const calendarAutoCreateInput = tr.querySelector('.room-calendar-auto-create');
-      const silentAutoRegisterInput = tr.querySelector('.room-silent-auto-register');
-      const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
       const hoursInput = tr.querySelector('.room-hours');
       const cleanupTimingInput = tr.querySelector('.room-cleanup-timing');
       const summaryModeInput = tr.querySelector('.room-summary-mode');
+      const roomConfig = getRoomConfigStateFromRow(tr);
       const roomCleanupTiming = normalizeOptionalSelectValue(cleanupTimingInput ? cleanupTimingInput.value : '');
       const roomSummaryMode = normalizeOptionalSelectValue(summaryModeInput ? summaryModeInput.value : '');
       validateRoomModeCombination(roomCleanupTiming, roomSummaryMode);
@@ -1873,16 +1998,16 @@ const html = String.raw`<!doctype html>
       return {
         room_id: roomId,
         room_name: nameInput ? nameInput.value.trim() : '',
-        is_enabled: !!(enabledInput && enabledInput.checked),
-        send_room_summary: !!(sendSummaryInput && sendSummaryInput.checked),
-        calendar_tomorrow_reminder_enabled: !!(tomorrowReminderInput && tomorrowReminderInput.checked),
+        is_enabled: roomConfig.is_enabled,
+        send_room_summary: roomConfig.send_room_summary,
+        calendar_tomorrow_reminder_enabled: roomConfig.calendar_tomorrow_reminder_enabled,
         message_search_enabled: messageSearchEnabled,
         message_search_library_enabled: messageSearchLibraryEnabled,
-        media_file_access_enabled: !!(mediaFileAccessEnabledInput && mediaFileAccessEnabledInput.checked),
+        media_file_access_enabled: roomConfig.media_file_access_enabled,
         bot_reply_enabled: botReplyEnabled,
-        calendar_ai_auto_create_enabled: !!(calendarAutoCreateInput && calendarAutoCreateInput.checked),
-        calendar_silent_auto_register_enabled: !!(silentAutoRegisterInput && silentAutoRegisterInput.checked),
-        gmail_reservation_alert_enabled: !!(gmailAlertEnabledInput && gmailAlertEnabledInput.checked),
+        calendar_ai_auto_create_enabled: roomConfig.calendar_ai_auto_create_enabled,
+        calendar_silent_auto_register_enabled: roomConfig.calendar_silent_auto_register_enabled,
+        gmail_reservation_alert_enabled: roomConfig.gmail_reservation_alert_enabled,
         delivery_hours: parseHoursInput(hoursInput ? hoursInput.value : '', true),
         message_cleanup_timing: roomCleanupTiming,
         last_delivery_summary_mode: roomSummaryMode,
@@ -2220,6 +2345,8 @@ const html = String.raw`<!doctype html>
         } else if (target.classList.contains('room-delete')) {
           await deleteRoomCompletely(tr);
           alert('ルームを削除しました。');
+        } else if (target.classList.contains('room-config-open')) {
+          openRoomConfigModal(tr);
         } else if (target.classList.contains('room-show-id')) {
           openRoomIdModal(tr);
         }
@@ -2237,17 +2364,7 @@ const html = String.raw`<!doctype html>
     dom.roomTableBody.addEventListener('change', function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      const tr = target.closest('tr');
-      if (!tr) return;
-
-      if (target instanceof HTMLInputElement && target.type === 'checkbox' && isAutoSaveToggle(target)) {
-        autoSaveRoomToggle(tr).catch(function(e) {
-          alert(e.message || String(e));
-        });
-        return;
-      }
-
-      markRoomDirty();
+      if (target.closest('tr')) markRoomDirty();
     });
 
     let draggingRoomRow = null;
@@ -2348,6 +2465,18 @@ const html = String.raw`<!doctype html>
       closeRoomIdModal();
     });
 
+    dom.cancelRoomConfigBtn.addEventListener('click', function() {
+      closeRoomConfigModal();
+    });
+
+    dom.saveRoomConfigBtn.addEventListener('click', async function() {
+      try {
+        await saveRoomConfigModal();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
     dom.cancelUserRoomScopeBtn.addEventListener('click', function() {
       closeUserRoomScopeModal();
     });
@@ -2367,6 +2496,12 @@ const html = String.raw`<!doctype html>
     dom.roomIdModal.addEventListener('click', function(event) {
       if (event.target === dom.roomIdModal) {
         closeRoomIdModal();
+      }
+    });
+
+    dom.roomConfigModal.addEventListener('click', function(event) {
+      if (event.target === dom.roomConfigModal) {
+        closeRoomConfigModal();
       }
     });
 
@@ -2392,6 +2527,9 @@ const html = String.raw`<!doctype html>
     document.addEventListener('keydown', function(event) {
       if (event.key === 'Escape' && dom.roomIdModal.classList.contains('open')) {
         closeRoomIdModal();
+      }
+      if (event.key === 'Escape' && dom.roomConfigModal.classList.contains('open')) {
+        closeRoomConfigModal();
       }
       if (event.key === 'Escape' && dom.userRoomScopeModal.classList.contains('open')) {
         closeUserRoomScopeModal();
