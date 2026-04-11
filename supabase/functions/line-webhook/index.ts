@@ -1596,9 +1596,19 @@ async function ensureLineUserPermissionSeed(
   if (cache.has(normalizedUserId)) return
   cache.add(normalizedUserId)
 
-  const displayName = lineAccessToken
-    ? await fetchLineConversationDisplayName({ ...source, type: 'user', userId: normalizedUserId }, lineAccessToken)
-    : null
+  let displayName: string | null = null
+  if (lineAccessToken) {
+    displayName = await fetchLineMessageSenderDisplayName(
+      { ...source, userId: normalizedUserId },
+      lineAccessToken,
+    )
+    if (!displayName) {
+      displayName = await fetchLineConversationDisplayName(
+        { ...source, type: 'user', userId: normalizedUserId },
+        lineAccessToken,
+      )
+    }
+  }
 
   const { data: existing, error: existingError } = await supabase
     .from('line_user_permissions')

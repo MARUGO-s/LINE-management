@@ -683,14 +683,16 @@ async function backfillLineUserPermissionsFromMessages(
 ) {
   const pageSize = 1000
   const userIds = new Set<string>()
+  const latestRoomIdByUserId = new Map<string, string>()
   let offset = 0
 
   while (true) {
     const { data, error } = await supabase
       .from("line_messages")
-      .select("user_id")
+      .select("user_id, room_id, id")
       .not("user_id", "is", null)
       .neq("user_id", "")
+      .order("id", { ascending: false })
       .range(offset, offset + pageSize - 1)
     if (error) {
       throw { status: 500, message: `Failed to scan line_messages users: ${error.message}` } satisfies AppError
@@ -699,7 +701,12 @@ async function backfillLineUserPermissionsFromMessages(
     if (rows.length === 0) break
     for (const row of rows) {
       const userId = String((row as { user_id?: unknown })?.user_id ?? "").trim()
-      if (userId) userIds.add(userId)
+      if (!userId) continue
+      userIds.add(userId)
+      if (!latestRoomIdByUserId.has(userId)) {
+        const roomId = String((row as { room_id?: unknown })?.room_id ?? "").trim()
+        if (roomId) latestRoomIdByUserId.set(userId, roomId)
+      }
     }
     if (rows.length < pageSize) break
     offset += pageSize
@@ -740,7 +747,7 @@ async function backfillLineUserPermissionsFromMessages(
     return !displayName
   })
   const fetchedDisplayNameByUserId = lineAccessToken
-    ? await fetchLineDisplayNamesByUserIds(idsNeedingDisplayName, lineAccessToken)
+    ? await fetchLineDisplayNamesByUserIds(idsNeedingDisplayName, latestRoomIdByUserId, lineAccessToken)
     : new Map<string, string>()
 
   const now = new Date().toISOString()
@@ -800,13 +807,15 @@ async function backfillLineUserPermissionsFromMessages(
 
 async function fetchLineDisplayNamesByUserIds(
   lineUserIds: string[],
+  latestRoomIdByUserId: Map<string, string>,
   lineAccessToken: string,
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>()
   for (const lineUserId of lineUserIds) {
     const userId = String(lineUserId ?? "").trim()
     if (!userId) continue
-    const displayName = await fetchLineDisplayNameByUserId(userId, lineAccessToken)
+    const roomId = String(latestRoomIdByUserId.get(userId) ?? "").trim()
+    const displayName = await fetchLineDisplayNameByUserId(userId, roomId, lineAccessToken)
     if (displayName) {
       result.set(userId, displayName)
     }
@@ -816,10 +825,35 @@ async function fetchLineDisplayNamesByUserIds(
 
 async function fetchLineDisplayNameByUserId(
   lineUserId: string,
+  roomId: string,
+  lineAccessToken: string,
+): Promise<string | null> {
+  if (roomId.startsWith("C")) {
+    const byGroupMember = await fetchLineDisplayNameByUrl(
+      `https://api.line.me/v2/bot/group/${encodeURIComponent(roomId)}/member/${encodeURIComponent(lineUserId)}`,
+      lineAccessToken,
+    )
+    if (byGroupMember) return byGroupMember
+  } else if (roomId.startsWith("R")) {
+    const byRoomMember = await fetchLineDisplayNameByUrl(
+      `https://api.line.me/v2/bot/room/${encodeURIComponent(roomId)}/member/${encodeURIComponent(lineUserId)}`,
+      lineAccessToken,
+    )
+    if (byRoomMember) return byRoomMember
+  }
+
+  return await fetchLineDisplayNameByUrl(
+    `https://api.line.me/v2/bot/profile/${encodeURIComponent(lineUserId)}`,
+    lineAccessToken,
+  )
+}
+
+async function fetchLineDisplayNameByUrl(
+  url: string,
   lineAccessToken: string,
 ): Promise<string | null> {
   try {
-    const response = await fetch(`https://api.line.me/v2/bot/profile/${encodeURIComponent(lineUserId)}`, {
+    const response = await fetch(url, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${lineAccessToken}`,
