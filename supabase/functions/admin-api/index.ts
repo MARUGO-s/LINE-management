@@ -86,7 +86,7 @@ type LineUserPermissionRow = {
 const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
 const MEDIA_LIST_DEFAULT_LIMIT = 24
 const MEDIA_LIST_MAX_LIMIT = 100
-const MEDIA_STORAGE_CAP_BYTES = 500 * 1024 * 1024
+const MEDIA_STORAGE_CAP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
 const MAX_MEDIA_UPLOAD_MAX_MB = 20
 const LINE_DOCUMENT_BUCKET = "line-documents"
@@ -96,11 +96,20 @@ const DOCUMENT_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
 const DOCUMENT_EXTRACT_MAX_CHARS = 250000
 const DOCUMENT_PREVIEW_MAX_CHARS = 240
 const DOCUMENT_PDF_EXTRACT_MAX_PAGES = 120
+const DOCUMENT_TEXT_BINARY_RATIO_MAX = 0.08
 const PDFJS_MODULE_URL = "https://esm.sh/pdfjs-dist@4.10.38/build/pdf.mjs"
 const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 const XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 const DOCUMENT_ARCHIVE_MAX_XML_ENTRIES = 120
+const DOCUMENT_ARCHIVE_MAX_ENTRIES = 400
+const DOCUMENT_ARCHIVE_TOTAL_UNCOMPRESSED_MAX_BYTES = 80 * 1024 * 1024
+const DOCUMENT_ARCHIVE_SINGLE_ENTRY_MAX_BYTES = 24 * 1024 * 1024
+const DOCUMENT_ARCHIVE_MAX_COMPRESSION_RATIO = 40
 const DOCUMENT_ARCHIVE_ENTRY_MAX_BYTES = 8 * 1024 * 1024
+const ADMIN_RATE_LIMIT_DEFAULT_WINDOW_MS = 60 * 1000
+const ADMIN_RATE_LIMIT_DEFAULT_MAX_REQUESTS = 180
+const ADMIN_RATE_LIMIT_UPLOAD_WINDOW_MS = 60 * 1000
+const ADMIN_RATE_LIMIT_UPLOAD_MAX_REQUESTS = 12
 const USER_PERMISSION_LIST_DEFAULT_LIMIT = 100
 const USER_PERMISSION_LIST_MAX_LIMIT = 300
 type MediaUsageStats = {
@@ -151,6 +160,10 @@ Deno.serve(async (req) => {
     return new Response("ok", { headers: corsHeaders })
   }
 
+  const url = new URL(req.url)
+  const path = normalizePath(url.pathname)
+  const clientIp = extractClientIp(req.headers)
+
   const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? ""
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
   if (!supabaseUrl || !serviceRoleKey) {
@@ -158,14 +171,26 @@ Deno.serve(async (req) => {
   }
 
   const supabase = createClient(supabaseUrl, serviceRoleKey)
+  const rateLimit = resolveAdminRateLimit(req.method, path)
+  const rateLimitResult = await consumeRateLimitFromDb(
+    supabase,
+    `${clientIp}:${req.method}:${path}`,
+    rateLimit.maxRequests,
+    rateLimit.windowMs,
+  )
+  if (!rateLimitResult.allowed) {
+    return json({
+      error: "Too many requests. Please retry later.",
+      code: "rate_limited",
+      retry_after_ms: rateLimitResult.retryAfterMs,
+    }, 429)
+  }
+
   const fallbackAdminToken = Deno.env.get("ADMIN_DASHBOARD_TOKEN") ?? ""
   const authResult = await authenticate(req, supabase, fallbackAdminToken)
   if (!authResult.ok) {
     return json({ error: authResult.message }, authResult.status)
   }
-
-  const url = new URL(req.url)
-  const path = normalizePath(url.pathname)
 
   try {
     if (req.method === "GET" && path === "/state") {
@@ -1425,6 +1450,11 @@ async function uploadDocumentFile(
   req: Request,
   supabase: ReturnType<typeof createClient>,
 ) {
+  const contentLength = Number(req.headers.get("content-length") ?? "")
+  if (Number.isFinite(contentLength) && contentLength > DOCUMENT_UPLOAD_MAX_BYTES + 1024 * 1024) {
+    throw { status: 400, message: "payload is too large." } satisfies AppError
+  }
+
   let formData: FormData
   try {
     formData = await req.formData()
@@ -1461,6 +1491,10 @@ async function uploadDocumentFile(
 
   const buffer = await fileValue.arrayBuffer()
   const bytes = new Uint8Array(buffer)
+  const validationError = await validateDocumentPayloadSafety(bytes, mimeType)
+  if (validationError) {
+    throw { status: 400, message: validationError } satisfies AppError
+  }
   const fallbackExtractedText = mimeType === "text/plain"
     ? tryDecodeText(bytes)
     : mimeType === "application/pdf"
@@ -1704,6 +1738,178 @@ async function loadOfficeZip(bytes: Uint8Array): Promise<JSZip | null> {
   } catch (error) {
     console.error("Failed to load office archive:", error)
     return null
+  }
+}
+
+async function validateDocumentPayloadSafety(
+  bytes: Uint8Array,
+  mimeType: DocumentMimeType,
+): Promise<string | null> {
+  if (mimeType === "application/pdf" && !hasPdfMagicHeader(bytes)) {
+    return "Invalid PDF payload."
+  }
+  if (mimeType === DOCX_MIME_TYPE || mimeType === XLSX_MIME_TYPE) {
+    if (!hasZipMagicHeader(bytes)) {
+      return "Office file must be a valid ZIP container."
+    }
+    const inspection = await inspectOfficeArchiveSafety(bytes, mimeType)
+    if (!inspection.ok) return inspection.message
+    return null
+  }
+  if (mimeType === "text/plain" && looksLikeBinaryTextPayload(bytes)) {
+    return "Text file appears to contain binary data."
+  }
+  return null
+}
+
+function hasPdfMagicHeader(bytes: Uint8Array): boolean {
+  if (bytes.length < 5) return false
+  return bytes[0] === 0x25
+    && bytes[1] === 0x50
+    && bytes[2] === 0x44
+    && bytes[3] === 0x46
+    && bytes[4] === 0x2d
+}
+
+function hasZipMagicHeader(bytes: Uint8Array): boolean {
+  if (bytes.length < 4) return false
+  if (bytes[0] !== 0x50 || bytes[1] !== 0x4b) return false
+  const marker = bytes[2] * 256 + bytes[3]
+  return marker === 0x0304 || marker === 0x0506 || marker === 0x0708
+}
+
+function looksLikeBinaryTextPayload(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false
+  const sampleSize = Math.min(bytes.length, 4096)
+  let binaryCount = 0
+  for (let i = 0; i < sampleSize; i += 1) {
+    const value = bytes[i]
+    const isAllowedControl = value === 9 || value === 10 || value === 13
+    const isTextByte = value >= 32 && value <= 126
+    const isMultiByteLead = value >= 0x80
+    if (!isAllowedControl && !isTextByte && !isMultiByteLead) {
+      binaryCount += 1
+    }
+  }
+  return (binaryCount / sampleSize) > DOCUMENT_TEXT_BINARY_RATIO_MAX
+}
+
+async function inspectOfficeArchiveSafety(
+  bytes: Uint8Array,
+  mimeType: DocumentMimeType,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  let zip: JSZip
+  try {
+    zip = await JSZip.loadAsync(bytes, {
+      checkCRC32: false,
+      createFolders: false,
+    })
+  } catch {
+    return { ok: false, message: "Failed to parse Office archive." }
+  }
+
+  const entries = Object.values(zip.files).filter((entry) => !entry.dir)
+  if (entries.length === 0) {
+    return { ok: false, message: "Office archive has no files." }
+  }
+  if (entries.length > DOCUMENT_ARCHIVE_MAX_ENTRIES) {
+    return { ok: false, message: "Office archive has too many entries." }
+  }
+
+  let totalUncompressed = 0
+  let totalCompressed = 0
+  for (const entry of entries) {
+    const entryName = String(entry.name || "")
+    if (!entryName || entryName.startsWith("/") || entryName.includes("../") || entryName.includes("..\\")) {
+      return { ok: false, message: "Office archive contains unsafe entry paths." }
+    }
+    const uncompressedSize = Number((entry as any)?._data?.uncompressedSize ?? 0)
+    const compressedSize = Number((entry as any)?._data?.compressedSize ?? 0)
+    if (Number.isFinite(uncompressedSize) && uncompressedSize > DOCUMENT_ARCHIVE_SINGLE_ENTRY_MAX_BYTES) {
+      return { ok: false, message: "Office archive entry exceeds allowed size." }
+    }
+    if (Number.isFinite(uncompressedSize) && uncompressedSize > 0) {
+      totalUncompressed += uncompressedSize
+      if (totalUncompressed > DOCUMENT_ARCHIVE_TOTAL_UNCOMPRESSED_MAX_BYTES) {
+        return { ok: false, message: "Office archive exceeds uncompressed size limit." }
+      }
+    }
+    if (Number.isFinite(compressedSize) && compressedSize > 0) {
+      totalCompressed += compressedSize
+    }
+  }
+
+  const compressionRatio = totalUncompressed / Math.max(totalCompressed, 1)
+  if (compressionRatio > DOCUMENT_ARCHIVE_MAX_COMPRESSION_RATIO) {
+    return { ok: false, message: "Office archive compression ratio is too high." }
+  }
+
+  const hasContentTypes = !!zip.file("[Content_Types].xml")
+  if (!hasContentTypes) {
+    return { ok: false, message: "Office archive is missing required metadata." }
+  }
+  if (mimeType === DOCX_MIME_TYPE && !zip.file("word/document.xml")) {
+    return { ok: false, message: "DOCX payload is missing word/document.xml." }
+  }
+  if (mimeType === XLSX_MIME_TYPE && !zip.file("xl/workbook.xml")) {
+    return { ok: false, message: "XLSX payload is missing xl/workbook.xml." }
+  }
+  return { ok: true }
+}
+
+function extractClientIp(headers: Headers): string {
+  const candidates = [
+    headers.get("cf-connecting-ip"),
+    headers.get("x-real-ip"),
+    headers.get("x-forwarded-for"),
+  ]
+  for (const raw of candidates) {
+    const value = String(raw ?? "").trim()
+    if (!value) continue
+    const first = value.split(",")[0]?.trim()
+    if (first) return first
+  }
+  return "unknown"
+}
+
+function resolveAdminRateLimit(method: string, path: string): { maxRequests: number; windowMs: number } {
+  if (method === "POST" && path === "/documents") {
+    return {
+      maxRequests: ADMIN_RATE_LIMIT_UPLOAD_MAX_REQUESTS,
+      windowMs: ADMIN_RATE_LIMIT_UPLOAD_WINDOW_MS,
+    }
+  }
+  return {
+    maxRequests: ADMIN_RATE_LIMIT_DEFAULT_MAX_REQUESTS,
+    windowMs: ADMIN_RATE_LIMIT_DEFAULT_WINDOW_MS,
+  }
+}
+
+async function consumeRateLimitFromDb(
+  supabase: ReturnType<typeof createClient>,
+  bucket: string,
+  maxRequests: number,
+  windowMs: number,
+): Promise<{ allowed: boolean; retryAfterMs: number }> {
+  const windowSeconds = Math.max(1, Math.floor(windowMs / 1000))
+  try {
+    const { data, error } = await supabase.rpc("consume_security_rate_limit", {
+      rate_bucket: bucket,
+      window_seconds: windowSeconds,
+      max_hits: maxRequests,
+    })
+    if (error) {
+      console.error("Rate limit RPC failed (admin-api):", error.message)
+      return { allowed: true, retryAfterMs: windowMs }
+    }
+    const row = Array.isArray(data) ? data[0] : null
+    const allowed = row?.allowed !== false
+    const retryAfterSeconds = Number(row?.retry_after_seconds ?? windowSeconds)
+    const retryAfterMs = Math.max(1000, retryAfterSeconds * 1000)
+    return { allowed, retryAfterMs }
+  } catch (error) {
+    console.error("Unexpected rate limit error (admin-api):", error)
+    return { allowed: true, retryAfterMs: windowMs }
   }
 }
 

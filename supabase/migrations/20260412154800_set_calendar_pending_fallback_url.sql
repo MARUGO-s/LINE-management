@@ -1,6 +1,5 @@
--- Run calendar pending auto-registration every minute.
--- Expired confirmations are auto-registered with provisional titles by
--- the calendar-pending-cron Edge Function.
+-- Keep calendar pending cron invoker functional even when ALTER DATABASE is not permitted.
+-- Use project URL fallback when custom.calendar_pending_edge_function_url is not configured.
 
 create or replace function public.invoke_calendar_pending_cron()
 returns void
@@ -13,14 +12,13 @@ declare
   request_id bigint;
 begin
   edge_function_url := nullif(current_setting('custom.calendar_pending_edge_function_url', true), '');
-  cron_auth_token := nullif(current_setting('custom.cron_auth_token', true), '');
-
   if edge_function_url is null then
     edge_function_url := 'https://jhpmzqxqvapdkyvvhyra.supabase.co/functions/v1/calendar-pending-cron';
   end if;
 
+  cron_auth_token := public.resolve_edge_cron_auth_token();
   if cron_auth_token is null then
-    raise warning 'invoke_calendar_pending_cron skipped: custom.cron_auth_token is not set';
+    raise warning 'invoke_calendar_pending_cron skipped: cron auth token is not configured';
     return;
   end if;
 
@@ -35,20 +33,3 @@ begin
   raise log 'invoke_calendar_pending_cron: Triggered Edge Function at %, request_id=%', edge_function_url, request_id;
 end;
 $$;
-
-do $$
-begin
-  begin
-    perform cron.unschedule('calendar-pending-cron-job');
-  exception
-    when others then
-      null;
-  end;
-end
-$$;
-
-select cron.schedule(
-  'calendar-pending-cron-job',
-  '* * * * *',
-  $$ select public.invoke_calendar_pending_cron(); $$
-);

@@ -273,9 +273,13 @@ const SEARCH_AI_SUMMARY_MAX_HITS = 80
 const SEARCH_MAX_DOCUMENT_ROWS = 300
 const LINE_MEDIA_BUCKET = 'line-media'
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
-const LINE_MEDIA_TOTAL_CAP_BYTES = 500 * 1024 * 1024
+const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
 const MAX_MEDIA_UPLOAD_MAX_MB = 20
+const WEBHOOK_REQUEST_WINDOW_MS = 60 * 1000
+const WEBHOOK_REQUEST_MAX_PER_IP = 120
+const WEBHOOK_EVENT_WINDOW_MS = 60 * 1000
+const WEBHOOK_EVENT_MAX_PER_SOURCE = 90
 const CALENDAR_CREATE_TIMEZONE = 'Asia/Tokyo'
 const STORABLE_LINE_MEDIA_TYPES = new Set<StorableLineMediaType>(['image', 'video', 'audio', 'file'])
 const CALENDAR_EVENT_TITLE_KEYWORDS = [
@@ -330,6 +334,32 @@ Deno.serve(async (req) => {
   }
 
   try {
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    if (!supabaseUrl || !supabaseKey) {
+      console.error('SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing.')
+      return new Response('Server misconfigured', { status: 500 })
+    }
+    const supabase = createClient(supabaseUrl, supabaseKey)
+    const clientIp = extractClientIp(req.headers)
+    const ipRateLimit = await consumeRateLimitFromDb(
+      supabase,
+      `ip:${clientIp}`,
+      WEBHOOK_REQUEST_MAX_PER_IP,
+      WEBHOOK_REQUEST_WINDOW_MS,
+    )
+    if (!ipRateLimit.allowed) {
+      return new Response(JSON.stringify({
+        ok: false,
+        error: 'Too many requests. Please retry later.',
+        code: 'rate_limited',
+        retry_after_ms: ipRateLimit.retryAfterMs,
+      }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
     const rawBody = await req.text()
     const signature = req.headers.get('x-line-signature')
     const lineChannelSecret = Deno.env.get('LINE_CHANNEL_SECRET')
@@ -369,10 +399,6 @@ Deno.serve(async (req) => {
     const body = JSON.parse(rawBody)
     const events = body.events || []
 
-    // Initialize Supabase Client
-    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    const supabase = createClient(supabaseUrl, supabaseKey)
     const lineAccessToken = Deno.env.get('LINE_CHANNEL_ACCESS_TOKEN') ?? ''
     const groqApiKey = Deno.env.get('GROQ_API_KEY') ?? ''
     const aiAutoCreateEnvRaw = Deno.env.get('CALENDAR_AI_AUTO_CREATE_ENABLED')
@@ -403,6 +429,17 @@ Deno.serve(async (req) => {
       // Determine room/group ID or user ID as fallback
       const isDirectUserChat = sourceType === 'user'
       const roomId = String(source.groupId || source.roomId || source.userId || 'unknown')
+      const sourceRateKey = `${roomId}:${userId ?? 'unknown'}`
+      const sourceRateLimit = await consumeRateLimitFromDb(
+        supabase,
+        `source:${sourceRateKey}`,
+        WEBHOOK_EVENT_MAX_PER_SOURCE,
+        WEBHOOK_EVENT_WINDOW_MS,
+      )
+      if (!sourceRateLimit.allowed) {
+        console.warn(`Rate-limited webhook source event processing (source=${sourceRateKey}).`)
+        continue
+      }
       const replyToken = String(event.replyToken ?? '')
       let aiAutoCreateReply: string | null = null
       let senderDisplayName: string | null = null
@@ -1339,6 +1376,49 @@ function toNonNegativeInt(value: unknown): number {
   const n = Number(value)
   if (!Number.isFinite(n) || n < 0) return 0
   return Math.floor(n)
+}
+
+function extractClientIp(headers: Headers): string {
+  const candidates = [
+    headers.get('cf-connecting-ip'),
+    headers.get('x-real-ip'),
+    headers.get('x-forwarded-for'),
+  ]
+  for (const raw of candidates) {
+    const value = String(raw ?? '').trim()
+    if (!value) continue
+    const first = value.split(',')[0]?.trim()
+    if (first) return first
+  }
+  return 'unknown'
+}
+
+async function consumeRateLimitFromDb(
+  supabase: ReturnType<typeof createClient>,
+  bucket: string,
+  maxRequests: number,
+  windowMs: number,
+): Promise<{ allowed: boolean; retryAfterMs: number }> {
+  const windowSeconds = Math.max(1, Math.floor(windowMs / 1000))
+  try {
+    const { data, error } = await supabase.rpc('consume_security_rate_limit', {
+      rate_bucket: bucket,
+      window_seconds: windowSeconds,
+      max_hits: maxRequests,
+    })
+    if (error) {
+      console.error('Rate limit RPC failed (line-webhook):', error.message)
+      return { allowed: true, retryAfterMs: windowMs }
+    }
+    const row = Array.isArray(data) ? data[0] : null
+    const allowed = row?.allowed !== false
+    const retryAfterSeconds = Number(row?.retry_after_seconds ?? windowSeconds)
+    const retryAfterMs = Math.max(1000, retryAfterSeconds * 1000)
+    return { allowed, retryAfterMs }
+  } catch (error) {
+    console.error('Unexpected rate limit error (line-webhook):', error)
+    return { allowed: true, retryAfterMs: windowMs }
+  }
 }
 
 function normalizeStorableLineMediaType(value: unknown): StorableLineMediaType | null {

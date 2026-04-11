@@ -15,9 +15,9 @@ BEGIN
     edge_function_url := 'https://ppuzcvstdknliqbendaz.supabase.co/functions/v1/summary-cron';
   END IF;
 
-  -- Fallback to anon JWT only. Do not use service role key in DB function bodies.
   IF cron_auth_token IS NULL THEN
-    cron_auth_token := 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBwdXpjdnN0ZGtubGlxYmVuZGF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE4MzI1ODEsImV4cCI6MjA4NzQwODU4MX0.gnicEgmxnQQj9H_p-sHB_wx0APpJ6wly0T-tKMYhJ-w'; -- gitleaks:allow (Supabase anon JWT default in migration; use vault in prod)
+    RAISE WARNING 'invoke_summary_cron skipped: custom.cron_auth_token is not set';
+    RETURN;
   END IF;
 
   SELECT net.http_post(
