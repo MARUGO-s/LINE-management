@@ -132,6 +132,8 @@ const html = String.raw`<!doctype html>
       margin: 0 0 12px;
       font-size: 1.1rem;
       letter-spacing: 0.02em;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(149, 219, 255, 0.18);
     }
 
     .card.auth {
@@ -159,6 +161,34 @@ const html = String.raw`<!doctype html>
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
+    }
+
+    .setting-stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .setting-block {
+      border: 1px solid rgba(149, 219, 255, 0.14);
+      border-radius: 12px;
+      background: rgba(7, 20, 34, 0.42);
+      padding: 10px;
+    }
+
+    .setting-block-title {
+      margin: 0 0 8px;
+      font-size: 0.82rem;
+      color: #9fd2eb;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .auth .controls .input {
+      flex: 1 1 220px;
+    }
+
+    .auth .controls .button {
+      flex: 0 0 auto;
     }
 
     .input,
@@ -226,6 +256,7 @@ const html = String.raw`<!doctype html>
       font-size: 0.88rem;
       margin-top: 8px;
     }
+    .meta.preline { white-space: pre-line; line-height: 1.45; }
 
     .meta.usage-summary {
       color: #9be8ff;
@@ -679,60 +710,81 @@ const html = String.raw`<!doctype html>
     <main class="panel-grid">
       <section class="card auth">
         <h2>管理トークン</h2>
-        <div class="controls">
-          <input id="tokenInput" class="input" type="password" placeholder="ADMIN_DASHBOARD_TOKEN を入力">
-          <button id="saveTokenBtn" class="button primary">保存して接続</button>
-          <button id="clearTokenBtn" class="button ghost">削除</button>
-          <button id="reloadBtn" class="button">再読み込み</button>
-          <button id="runNowBtn" class="button warn">今すぐ要約実行</button>
-          <a class="button" href="https://marugo-s.github.io/LINE-management/media.html" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
-        </div>
-        <div class="controls" style="margin-top:8px;">
-          <button id="checkGmailAccountBtn" class="button">Gmail連携先を確認</button>
-          <span id="gmailAccountMeta" class="pill">Gmail連携先: 未確認</span>
-        </div>
-        <div class="controls" style="margin-top:8px;">
-          <input id="newTokenInput" class="input" type="password" placeholder="新しい管理トークン">
-          <input id="newTokenConfirmInput" class="input" type="password" placeholder="新しい管理トークン（確認）">
-          <button id="changeTokenBtn" class="button warn">トークン変更</button>
+        <div class="setting-stack">
+          <div class="setting-block">
+            <p class="setting-block-title">接続と実行</p>
+            <div class="controls">
+              <input id="tokenInput" class="input" type="password" placeholder="ADMIN_DASHBOARD_TOKEN を入力">
+              <button id="saveTokenBtn" class="button primary">保存して接続</button>
+              <button id="clearTokenBtn" class="button ghost">削除</button>
+            </div>
+            <div class="controls" style="margin-top:8px;">
+              <button id="reloadBtn" class="button">再読み込み</button>
+              <button id="runNowBtn" class="button warn">今すぐ要約実行</button>
+              <a class="button" href="https://marugo-s.github.io/LINE-management/media.html" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
+            </div>
+          </div>
+          <div class="setting-block">
+            <p class="setting-block-title">連携アカウント</p>
+            <div class="controls">
+              <button id="checkGmailAccountBtn" class="button">Gmail連携先を確認</button>
+              <span id="gmailAccountMeta" class="pill">Gmail連携先: 未確認</span>
+            </div>
+          </div>
+          <div class="setting-block">
+            <p class="setting-block-title">管理トークン変更</p>
+            <div class="controls">
+              <input id="newTokenInput" class="input" type="password" placeholder="新しい管理トークン">
+              <input id="newTokenConfirmInput" class="input" type="password" placeholder="新しい管理トークン（確認）">
+              <button id="changeTokenBtn" class="button warn">トークン変更</button>
+            </div>
+          </div>
         </div>
         <div class="meta">トークンはブラウザの LocalStorage に保存されます。</div>
       </section>
 
       <section class="card global">
         <h2>全体設定</h2>
-        <label class="switch"><input id="globalEnabled" type="checkbox">配信を有効化</label>
-        <div class="controls" style="margin-top:10px;">
-          <input id="globalHoursInput" class="input" type="text" placeholder="例: 12,17,23">
-          <select id="messageCleanupTiming" class="select" aria-label="メッセージ処理タイミング">
-            <option value="after_each_delivery">配信成功ごとに処理済み化</option>
-            <option value="end_of_day">1日の最終配信後に処理済み化</option>
-          </select>
-          <select id="lastDeliverySummaryMode" class="select" aria-label="最終配信の集計方式">
-            <option value="independent">各回独立で要約（従来）</option>
-            <option value="daily_rollup">最終配信のみ1日まとめ</option>
-          </select>
-          <select id="messageRetentionDays" class="select" aria-label="メッセージ保持期間">
-            <option value="365">会話保持: 1年（推奨）</option>
-            <option value="730">会話保持: 2年</option>
-            <option value="1095">会話保持: 3年</option>
-            <option value="0">会話保持: 無制限</option>
-            <option value="60">会話保持: 60日</option>
-            <option value="120">会話保持: 120日</option>
-            <option value="180">会話保持: 180日</option>
-          </select>
-          <button id="saveGlobalBtn" class="button primary">全体設定を保存</button>
+        <div class="setting-stack">
+          <div class="setting-block">
+            <p class="setting-block-title">配信設定</p>
+            <label class="switch"><input id="globalEnabled" type="checkbox">配信を有効化</label>
+            <div class="controls" style="margin-top:8px;">
+              <input id="globalHoursInput" class="input" type="text" placeholder="例: 12,17,23">
+              <select id="messageCleanupTiming" class="select" aria-label="メッセージ処理タイミング">
+                <option value="after_each_delivery">配信成功ごとに処理済み化</option>
+                <option value="end_of_day">1日の最終配信後に処理済み化</option>
+              </select>
+              <select id="lastDeliverySummaryMode" class="select" aria-label="最終配信の集計方式">
+                <option value="independent">各回独立で要約（従来）</option>
+                <option value="daily_rollup">最終配信のみ1日まとめ</option>
+              </select>
+              <select id="messageRetentionDays" class="select" aria-label="メッセージ保持期間">
+                <option value="365">会話保持: 1年（推奨）</option>
+                <option value="730">会話保持: 2年</option>
+                <option value="1095">会話保持: 3年</option>
+                <option value="0">会話保持: 無制限</option>
+                <option value="60">会話保持: 60日</option>
+                <option value="120">会話保持: 120日</option>
+                <option value="180">会話保持: 180日</option>
+              </select>
+              <button id="saveGlobalBtn" class="button primary">全体設定を保存</button>
+            </div>
+          </div>
+          <div class="setting-block">
+            <p class="setting-block-title">翌日予定通知</p>
+            <div class="controls">
+              <label class="switch"><input id="tomorrowReminderEnabled" type="checkbox">翌日予定通知を有効化</label>
+              <input id="tomorrowReminderHoursInput" class="input" type="text" placeholder="翌日予定通知の時刻 例: 19">
+              <select id="tomorrowReminderOnlyIfEvents" class="select" aria-label="予定なし時の通知">
+                <option value="false">予定なしの日も通知する</option>
+                <option value="true">予定がある日だけ通知する</option>
+              </select>
+              <input id="tomorrowReminderMaxItems" class="input narrow" type="number" min="1" max="50" step="1" placeholder="表示件数">
+            </div>
+          </div>
         </div>
-        <div class="controls" style="margin-top:10px;">
-          <label class="switch"><input id="tomorrowReminderEnabled" type="checkbox">翌日予定通知を有効化</label>
-          <input id="tomorrowReminderHoursInput" class="input" type="text" placeholder="翌日予定通知の時刻 例: 19">
-          <select id="tomorrowReminderOnlyIfEvents" class="select" aria-label="予定なし時の通知">
-            <option value="false">予定なしの日も通知する</option>
-            <option value="true">予定がある日だけ通知する</option>
-          </select>
-          <input id="tomorrowReminderMaxItems" class="input narrow" type="number" min="1" max="50" step="1" placeholder="表示件数">
-        </div>
-        <div id="globalMeta" class="meta"></div>
+        <div id="globalMeta" class="meta preline"></div>
         <div id="storageUsageSummary" class="meta usage-summary"></div>
         <div id="storageUsageDetails" class="meta usage-details"></div>
         <div class="storage-chart">
@@ -1258,17 +1310,17 @@ const html = String.raw`<!doctype html>
         ? settings.calendar_tomorrow_reminder_hours.join(',')
         : '19';
       dom.globalMeta.textContent =
-        '配信回数: ' + count + '回/日'
+        '配信: ' + count + '回/日'
         + '  |  消去: ' + cleanupTimingLabel(dom.messageCleanupTiming.value)
         + '  |  最終回: ' + summaryModeLabel(dom.lastDeliverySummaryMode.value)
-        + '  |  会話保持: ' + messageRetentionLabel(dom.messageRetentionDays.value)
+        + '\n'
+        + '会話保持: ' + messageRetentionLabel(dom.messageRetentionDays.value)
         + '  |  翌日予定通知: '
         + (dom.tomorrowReminderEnabled.checked ? ('ON (' + reminderHours + '時)') : 'OFF')
         + '  |  予定なし時: '
         + (dom.tomorrowReminderOnlyIfEvents.value === 'true' ? '送らない' : '送る')
         + '  |  表示上限: '
-        + dom.tomorrowReminderMaxItems.value + '件'
-        + '  |  更新: ' + formatDate(settings.updated_at);
+        + dom.tomorrowReminderMaxItems.value + '件';
     }
 
     function renderLogs(logs) {
