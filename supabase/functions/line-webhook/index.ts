@@ -31,6 +31,8 @@ type CalendarCommand =
       durationMin?: number
       location?: string
       clearLocation?: boolean
+      description?: string
+      clearDescription?: boolean
     }
   | {
       kind: 'list'
@@ -90,12 +92,15 @@ type PendingCalendarConfirmation = {
 type PendingCalendarUpdateTargetEntry = {
   event_id: string
   summary: string
+  date?: string
+  time?: string
 }
 
 type PendingCalendarUpdateContext = {
   id: string
   conversation_key: string
   target_events: PendingCalendarUpdateTargetEntry[]
+  source_line_message_ids: string[]
   expires_at: string
 }
 
@@ -116,6 +121,20 @@ type AiListIntent = {
   year?: number
   keyword?: string
   confidence: number
+}
+
+type AiCalendarUpdateIntent = {
+  shouldUpdate: boolean
+  confidence: number
+  title?: string
+  date?: string
+  time?: string
+  durationMin?: number
+  location?: string
+  clearLocation?: boolean
+  description?: string
+  clearDescription?: boolean
+  reason: string
 }
 
 type GoogleCalendarEvent = {
@@ -178,6 +197,8 @@ type AiPrimaryIntentResult = {
 }
 
 type RoomReplyPolicy = {
+  roomName: string | null
+  requiresRegistration: boolean
   isEnabled: boolean
   botReplyEnabled: boolean
   messageSearchEnabled: boolean
@@ -212,6 +233,7 @@ const AI_LIST_MIN_CONFIDENCE = 0.72
 const AI_MESSAGE_SEARCH_MIN_CONFIDENCE = 0.72
 const AI_PRIMARY_INTENT_MIN_CONFIDENCE = 0.72
 const AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE = 0.60
+const AI_UPDATE_MIN_CONFIDENCE = 0.62
 const AI_AUTO_CREATE_MAX_EVENTS = 5
 const PAST_EVENT_GRACE_MS = 5 * 60 * 1000
 const PENDING_CONFIRMATION_TTL_MIN = 30
@@ -363,6 +385,42 @@ Deno.serve(async (req) => {
         )
         const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
         const text = String(event.message.text ?? '').trim()
+        const quotedMessageId = extractQuotedLineMessageId(event.message)
+        if (roomReplyPolicy.requiresRegistration) {
+          if (!lineAccessToken) {
+            console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room registration guidance.')
+            continue
+          }
+          if (!replyToken) {
+            console.error('Missing replyToken for room registration guidance.')
+            continue
+          }
+          const replyResult = await replyLineMessage(
+            replyToken,
+            buildRoomRegistrationRequiredReply(roomReplyPolicy.roomName),
+            lineAccessToken,
+          )
+          if (!replyResult.ok) {
+            console.error('Failed to reply room registration guidance:', replyResult.error)
+          }
+          continue
+        }
+        const capabilityStatusReply = buildRoomCapabilityStatusReply(roomReplyPolicy, text)
+        if (capabilityStatusReply) {
+          if (!lineAccessToken) {
+            console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room capability status.')
+            continue
+          }
+          if (!replyToken) {
+            console.error('Missing replyToken for room capability status.')
+            continue
+          }
+          const replyResult = await replyLineMessage(replyToken, capabilityStatusReply, lineAccessToken)
+          if (!replyResult.ok) {
+            console.error('Failed to reply room capability status:', replyResult.error)
+          }
+          continue
+        }
         if (isRoomBotReplyEnabled(roomReplyPolicy)) {
           let forceAiMessageSearch = false
           let forceAiCalendarList = false
@@ -391,6 +449,17 @@ Deno.serve(async (req) => {
               const replyResult = await replyLineMessage(replyToken, confirmationReply, lineAccessToken)
               if (!replyResult.ok) {
                 console.error('Failed to reply pending confirmation:', replyResult.error)
+              } else if (
+                calendarEnvState.ok &&
+                confirmationReply.includes('確認済みの予定を登録しました。') &&
+                replyResult.sentMessageIds.length > 0
+              ) {
+                await attachLineMessageIdsToPendingCalendarUpdateContext(
+                  supabase,
+                  roomId,
+                  userId,
+                  replyResult.sentMessageIds,
+                )
               }
               continue
             }
@@ -403,6 +472,8 @@ Deno.serve(async (req) => {
               calendarEnvState.env,
               roomId,
               userId,
+              groqApiKey,
+              quotedMessageId,
             )
             if (updateConversationReply) {
               if (!roomCanReply) {
@@ -588,6 +659,13 @@ Deno.serve(async (req) => {
             const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
             if (!replyResult.ok) {
               console.error('Failed to reply calendar command:', replyResult.error)
+            } else if (commandParse.command?.kind === 'list' && replyResult.sentMessageIds.length > 0) {
+              await attachLineMessageIdsToPendingCalendarUpdateContext(
+                supabase,
+                roomId,
+                userId,
+                replyResult.sentMessageIds,
+              )
             }
             continue
           }
@@ -629,6 +707,13 @@ Deno.serve(async (req) => {
               const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
               if (!replyResult.ok) {
                 console.error('Failed to reply AI list intent:', replyResult.error)
+              } else if (replyResult.sentMessageIds.length > 0) {
+                await attachLineMessageIdsToPendingCalendarUpdateContext(
+                  supabase,
+                  roomId,
+                  userId,
+                  replyResult.sentMessageIds,
+                )
               }
               continue
             }
@@ -718,6 +803,15 @@ Deno.serve(async (req) => {
                   }
                 }
               }
+          }
+
+          if (
+            !aiAutoCreateReply &&
+            roomCanReply &&
+            roomReplyPolicy.messageSearchEnabled &&
+            shouldOfferMessageSearchGuidance(text)
+          ) {
+            aiAutoCreateReply = buildMessageSearchGuidanceReply(text)
           }
         }
       }
@@ -810,6 +904,22 @@ function toStoredMessageContent(message: any): string {
     return '【スタンプが送信されました】'
   }
   return `【その他のメディア (${message.type}) が送信されました】`
+}
+
+function extractQuotedLineMessageId(message: any): string | null {
+  if (!message || typeof message !== 'object') return null
+  const candidates = [
+    (message as any).quotedMessageId,
+    (message as any).quotedMessageID,
+    (message as any).quoteMessageId,
+    (message as any).quote?.messageId,
+    (message as any).quotedMessage?.id,
+  ]
+  for (const candidate of candidates) {
+    const id = String(candidate ?? '').trim()
+    if (id) return id
+  }
+  return null
 }
 
 function buildLineMediaTag(lineMessageId: unknown): string {
@@ -1211,6 +1321,11 @@ async function syncRoomDisplayNameIfMissing(
     .insert({
       room_id: normalizedRoomId,
       room_name: fetchedName,
+      is_enabled: false,
+      bot_reply_enabled: false,
+      message_search_enabled: false,
+      calendar_ai_auto_create_enabled: false,
+      send_room_summary: false,
       updated_at: updatedAt,
     })
 
@@ -1318,41 +1433,63 @@ async function loadRoomReplyPolicy(
   roomId: string,
   cache: Map<string, RoomReplyPolicy>,
 ): Promise<RoomReplyPolicy> {
+  const fallbackPolicy = {
+    roomName: null,
+    requiresRegistration: true,
+    isEnabled: false,
+    botReplyEnabled: false,
+    messageSearchEnabled: false,
+    calendarAiAutoCreateEnabled: false,
+  } satisfies RoomReplyPolicy
   const normalizedRoomId = String(roomId ?? '').trim()
   if (!normalizedRoomId || normalizedRoomId === 'unknown') {
-    return { isEnabled: true, botReplyEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
+    return fallbackPolicy
   }
   if (cache.has(normalizedRoomId)) {
-    return cache.get(normalizedRoomId) ?? { isEnabled: true, botReplyEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
+    return cache.get(normalizedRoomId) ?? fallbackPolicy
   }
 
   try {
     const { data, error } = await supabase
       .from('room_summary_settings')
-      .select('is_enabled, bot_reply_enabled, message_search_enabled, calendar_ai_auto_create_enabled')
+      .select('room_name, is_enabled, bot_reply_enabled, message_search_enabled, calendar_ai_auto_create_enabled')
       .eq('room_id', normalizedRoomId)
       .maybeSingle()
 
     if (error) {
       console.error(`Failed to load room reply policy for ${normalizedRoomId}:`, error.message)
-      const fallback = { isEnabled: true, botReplyEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
-      cache.set(normalizedRoomId, fallback)
-      return fallback
+      cache.set(normalizedRoomId, fallbackPolicy)
+      return fallbackPolicy
     }
 
+    if (!data) {
+      cache.set(normalizedRoomId, fallbackPolicy)
+      return fallbackPolicy
+    }
+
+    const isEnabled = data?.is_enabled !== false
+    const botReplyEnabled = data?.bot_reply_enabled !== false
+    const messageSearchEnabled = data?.message_search_enabled !== false
+    const calendarAiAutoCreateEnabled = data?.calendar_ai_auto_create_enabled !== false
+    const requiresRegistration =
+      data?.is_enabled === false &&
+      data?.bot_reply_enabled === false &&
+      data?.message_search_enabled === false &&
+      data?.calendar_ai_auto_create_enabled === false
     const policy: RoomReplyPolicy = {
-      isEnabled: data?.is_enabled !== false,
-      botReplyEnabled: data?.bot_reply_enabled !== false,
-      messageSearchEnabled: data?.message_search_enabled !== false,
-      calendarAiAutoCreateEnabled: data?.calendar_ai_auto_create_enabled !== false,
+      roomName: normalizeDisplayName(data?.room_name ?? null),
+      requiresRegistration,
+      isEnabled,
+      botReplyEnabled,
+      messageSearchEnabled,
+      calendarAiAutoCreateEnabled,
     }
     cache.set(normalizedRoomId, policy)
     return policy
   } catch (err) {
     console.error(`Unexpected error while loading room reply policy for ${normalizedRoomId}:`, err)
-    const fallback = { isEnabled: true, botReplyEnabled: true, messageSearchEnabled: true, calendarAiAutoCreateEnabled: true }
-    cache.set(normalizedRoomId, fallback)
-    return fallback
+    cache.set(normalizedRoomId, fallbackPolicy)
+    return fallbackPolicy
   }
 }
 
@@ -1366,6 +1503,44 @@ function isRoomBotReplyEnabled(policy: RoomReplyPolicy): boolean {
 
 function shouldSendRoomReply(policy: RoomReplyPolicy): boolean {
   return policy.isEnabled && policy.botReplyEnabled
+}
+
+function looksLikeBotInteractionRequest(text: string): boolean {
+  const normalized = normalizeForRuleParsing(String(text ?? '')).trim()
+  if (!normalized) return false
+  const compact = normalized.replace(/\s+/g, '')
+  if (parseCalendarCommand(normalized).matched) return true
+  if (looksLikeMessageSearchQuestion(normalized)) return true
+  if (looksLikeCalendarListQuestion(normalized)) return true
+  if (looksLikeExplicitCalendarQuestion(compact)) return true
+  if (/(教えて|知りたい|ありますか|ある\?|ある？|検索|参照|確認|一覧|予定|会議|履歴|会話)/.test(compact)) return true
+  return false
+}
+
+function buildRoomCapabilityStatusReply(
+  policy: RoomReplyPolicy,
+  text: string,
+): string | null {
+  if (!policy.isEnabled) return null
+  if (!looksLikeBotInteractionRequest(text)) return null
+
+  if (!policy.botReplyEnabled) {
+    return 'この質問は、現在このルームで権限が付与されていないため実行できません。'
+  } else if (!policy.messageSearchEnabled && looksLikeMessageSearchQuestion(text)) {
+    return 'この質問は、現在このルームで権限が付与されていないため実行できません。'
+  } else {
+    return null
+  }
+}
+
+function buildRoomRegistrationRequiredReply(roomName: string | null): string {
+  const normalizedRoomName = normalizeInlineText(String(roomName ?? ''))
+  const lines = [
+    'このトークルームはまだ利用申請が完了していないため、Bot機能を利用できません。',
+    `管理者に登録申請してください。${normalizedRoomName ? `（ルーム名: ${normalizedRoomName}）` : ''}`.trim(),
+    '管理画面で権限が有効化されると、会話検索・予定確認などが使えるようになります。',
+  ]
+  return lines.join('\n')
 }
 
 function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentionDays): MessageSearchParseResult {
@@ -1756,7 +1931,11 @@ async function buildMessageSearchReply(
       }))
     : []
 
-  const hitsRaw = rows.filter((row) => messageMatchesKeyword(row.content, command.keyword))
+  const hitsRaw = rows.filter((row) => {
+    if (!messageMatchesKeyword(row.content, command.keyword)) return false
+    if (isLikelyBotDirectedSearchPrompt(row.content)) return false
+    return true
+  })
 
   if (hitsRaw.length === 0) {
     const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
@@ -2004,9 +2183,9 @@ function formatMessageSearchPreview(
   includeRoomLabel = false,
 ): string[] {
   const date = formatSearchDateTime(row.created_at)
-  const content = normalizeInlineText(String(row.content ?? ''))
-  const compact = content.length > 180 ? `${content.slice(0, 180)}...` : (content || '（内容なし）')
-  const wrappedContent = wrapTextForLineDisplay(compact, 24)
+  const content = normalizeMessagePreviewText(String(row.content ?? ''))
+  const compact = content.length > 220 ? `${content.slice(0, 220)}...` : (content || '（内容なし）')
+  const previewLines = splitMessagePreviewIntoParagraphLines(compact, 24)
   const lines = [`${index}件目`]
   if (includeRoomLabel) {
     const roomLabel = normalizeInlineText(String(row.room_label ?? '')) || '（ルーム不明）'
@@ -2014,10 +2193,44 @@ function formatMessageSearchPreview(
   }
   lines.push(`  日時: ${date}`)
   lines.push('  内容:')
-  for (const line of wrappedContent) {
-    lines.push(`    ${line}`)
+  for (const line of previewLines) {
+    lines.push(line)
   }
   return lines
+}
+
+function normalizeMessagePreviewText(raw: string): string {
+  const normalized = normalizeInlineText(String(raw ?? ''))
+  if (!normalized) return ''
+  return normalized
+    .replace(/([一-龥ぁ-んァ-ヶー々〆〤])\s+([一-龥ぁ-んァ-ヶー々〆〤])/g, '$1$2')
+    .replace(/([一-龥ぁ-んァ-ヶー々〆〤])\s+([、。．，！？!?：:])/g, '$1$2')
+    .replace(/([、。．，！？!?：:])\s+([一-龥ぁ-んァ-ヶー々〆〤])/g, '$1$2')
+    .replace(/([／/「『（(])\s+/g, '$1')
+    .replace(/\s+([」』）),])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+function splitMessagePreviewIntoParagraphLines(text: string, maxCharsPerLine: number): string[] {
+  const normalized = normalizeMessagePreviewText(text)
+  if (!normalized) return ['（内容なし）']
+
+  const sentenceCandidates = normalized
+    .replace(/([。！？!?])/g, '$1\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+
+  if (sentenceCandidates.length <= 1) {
+    return [normalized]
+  }
+
+  const lines: string[] = []
+  for (const sentence of sentenceCandidates) {
+    lines.push(sentence)
+  }
+  return lines.length > 0 ? lines : ['（内容なし）']
 }
 
 function wrapTextForLineDisplay(text: string, maxCharsPerLine: number): string[] {
@@ -2113,6 +2326,42 @@ async function summarizeMessageSearchHitsWithGroq(
 
 function messageMatchesKeyword(content: string, keyword: string): boolean {
   return keywordMatchesHaystacks(keyword, [String(content ?? '')])
+}
+
+function isLikelyBotDirectedSearchPrompt(text: string): boolean {
+  const normalized = normalizeForRuleParsing(String(text ?? '')).trim()
+  if (!normalized) return false
+  const compact = normalized.replace(/\s+/g, '')
+  if (/^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)) return true
+  if (/について(教えて|知りたい|ありますか|あるか|ある\?|ある？)/.test(compact) && compact.length <= 80) {
+    return true
+  }
+  if (looksLikeMessageSearchQuestion(normalized) && /(教えて|知りたい|参照|検索|見せて|表示|出して)/.test(compact)) {
+    return true
+  }
+  return false
+}
+
+function shouldOfferMessageSearchGuidance(text: string): boolean {
+  const normalized = normalizeForRuleParsing(String(text ?? '')).trim()
+  if (!normalized) return false
+  const compact = normalized.replace(/\s+/g, '')
+  if (looksLikeMessageSearchQuestion(normalized)) return false
+  if (looksLikeCalendarListQuestion(normalized)) return false
+  if (looksLikeExplicitCalendarQuestion(compact)) return false
+  if (parseCalendarCommand(normalized).matched) return false
+  if (looksLikeAnnouncementText(compact)) return false
+  const hasQuestionIntent = /(教えて|知りたい|ありますか|ある\?|ある？|何|どこ|いつ)/.test(compact)
+  return hasQuestionIntent && /について/.test(compact)
+}
+
+function buildMessageSearchGuidanceReply(text: string): string {
+  const keyword = extractMessageSearchKeyword(text) || normalizeKeywordForFilter(text)
+  const exampleKeyword = keyword || 'キーワード'
+  return [
+    '履歴検索の意図かもしれないですが、通常文では自動検索しない設定です。',
+    `会話検索する場合は「会話検索 ${exampleKeyword}」の形式で送ってください。`,
+  ].join('\n')
 }
 
 function looksLikeCalendarCandidate(text: string): boolean {
@@ -2394,6 +2643,325 @@ async function extractCalendarIntentWithGroq(
   }
 }
 
+function normalizeAiCalendarUpdateDateCandidate(raw: unknown): string | undefined {
+  const value = normalizeForRuleParsing(String(raw ?? '')).trim()
+  if (!value) return undefined
+  if (isValidDate(value)) return value
+
+  const m = value.match(/^(\d{4})[\/.\-年](\d{1,2})[\/.\-月](\d{1,2})日?$/)
+  if (!m) return undefined
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  return toIsoDateStringSafe(year, month, day) ?? undefined
+}
+
+function normalizeAiCalendarUpdateTimeCandidate(raw: unknown): string | undefined {
+  const value = normalizeForRuleParsing(String(raw ?? '')).trim()
+  if (!value) return undefined
+  if (isValidTime(value)) return value
+
+  const parsed = parseFlexibleTimeToken(value)
+  if (!parsed) return undefined
+  const normalized = `${String(parsed.hour).padStart(2, '0')}:${String(parsed.minute).padStart(2, '0')}`
+  return isValidTime(normalized) ? normalized : undefined
+}
+
+function normalizeAiCalendarUpdateDurationCandidate(raw: unknown): number | undefined {
+  const text = normalizeForRuleParsing(String(raw ?? '')).trim()
+  if (!text) return undefined
+  const direct = Number(text)
+  if (Number.isInteger(direct) && direct > 0 && direct <= MAX_DURATION_MIN) {
+    return direct
+  }
+  const matched = text.match(/(\d{1,3})/)
+  if (!matched || !matched[1]) return undefined
+  const value = Number(matched[1])
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_DURATION_MIN) return undefined
+  return value
+}
+
+async function extractCalendarUpdateIntentWithGroq(
+  text: string,
+  timezone: string,
+  groqApiKey: string,
+  currentTitle: string,
+): Promise<AiCalendarUpdateIntent | null> {
+  try {
+    const now = new Date()
+    const nowText = new Intl.DateTimeFormat('ja-JP', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(now)
+
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${groqApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        temperature: 0,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'あなたは「予定変更」専用のJSON抽出器です。',
+              '入力は1件の予定に対する修正指示です。返すのは「変更項目のみ」です。',
+              `現在時刻は ${nowText} (${timezone})。`,
+              `現在の予定名: ${cleanCalendarTitle(currentTitle || '予定')}`,
+              '言葉の揺れを同義として解釈してください。',
+              '例: 変更/修正/更新/直して/変えて/ずらして/前倒し/後ろ倒し/早めて/遅らせて。',
+              '例: 件名/タイトル/予定名/中身、場所/会場/開催場所、時間/時刻/開始時間/スタート、内容/詳細/説明。',
+              '「19時半」「7時」「20:15」は time に HH:mm で返してください。',
+              '「場所なし」「会場未設定」「場所をクリア」は clear_location=true を返してください。',
+              '「内容なし」「説明をクリア」は clear_description=true を返してください。',
+              'title/location/description は実際に登録する値のみ返してください。',
+              '操作説明語（例: 次の/以下/下記/言葉/文言/文章/テキスト/変えて/変更して/記載して）は値に含めないでください。',
+              'description には管理メタ行（例: LINE room_id:, LINE user_id:, source: line-webhook）を含めないでください。',
+              '例: 「内容に次の言葉に変えて、店長のみの会議ですと記載して」→ description=店長のみの会議です',
+              '例: 「予定の会議を店長会議に変更して」→ title=店長会議',
+              '例: 「場所をmarugoにして」→ location=marugo',
+              '複数変更があれば同時に抽出してください。',
+              '変更が読み取れない・曖昧な場合は should_update=false にしてください。',
+              '日付は YYYY-MM-DD、時刻は HH:mm、duration_min は分(整数)で返してください。',
+              'JSONのみ返してください。説明文やコードブロックは禁止です。',
+              '返却JSONスキーマ:',
+              '{"should_update":boolean,"confidence":number(0-1),"title":"string|optional","date":"YYYY-MM-DD|optional","time":"HH:mm|optional","duration_min":number|optional,"location":"string|optional","clear_location":boolean|optional,"description":"string|optional","clear_description":boolean|optional,"reason":string}',
+            ].join('\n'),
+          },
+          { role: 'user', content: text },
+        ],
+      }),
+    })
+
+    if (!response.ok) {
+      const err = await response.text()
+      console.error('Groq update extraction failed:', response.status, err)
+      return null
+    }
+
+    const json = await response.json()
+    const content = String(json?.choices?.[0]?.message?.content ?? '').trim()
+    if (!content) return null
+
+    const extracted = parseFirstJsonObject(content)
+    if (!extracted || typeof extracted !== 'object') return null
+
+    const raw = extracted as Record<string, unknown>
+    const shouldUpdate = Boolean(raw.should_update ?? raw.shouldUpdate ?? false)
+    const confidenceNum = Number(raw.confidence ?? 0)
+    const confidence = Number.isFinite(confidenceNum)
+      ? Math.max(0, Math.min(1, confidenceNum))
+      : 0
+    const titleRaw = normalizeForRuleParsing(String(raw.title ?? raw.summary ?? raw.event_name ?? '')).trim()
+    const title = titleRaw ? cleanCalendarTitle(titleRaw) : undefined
+    const date = normalizeAiCalendarUpdateDateCandidate(raw.date ?? raw.start_date ?? raw.day)
+    const time = normalizeAiCalendarUpdateTimeCandidate(raw.time ?? raw.start_time ?? raw.start)
+    const durationMin = normalizeAiCalendarUpdateDurationCandidate(
+      raw.duration_min ?? raw.durationMin ?? raw.duration ?? raw.length_min,
+    )
+    const locationRaw = normalizeForRuleParsing(String(raw.location ?? raw.place ?? raw.venue ?? '')).trim()
+    let clearLocation = Boolean(raw.clear_location ?? raw.clearLocation ?? false)
+    let location: string | undefined
+    if (locationRaw) {
+      const compactLocation = normalizeForRuleParsing(locationRaw).replace(/\s+/g, '')
+      if (/^(なし|未設定|空|クリア|削除|消去)$/.test(compactLocation)) {
+        clearLocation = true
+      } else {
+        const cleanedLocation = cleanCalendarLocation(locationRaw)
+        if (cleanedLocation) location = cleanedLocation
+      }
+    }
+    if (clearLocation) {
+      location = undefined
+    }
+    const descriptionRaw = normalizeForRuleParsing(String(raw.description ?? raw.content ?? raw.detail ?? '')).trim()
+    let clearDescription = Boolean(raw.clear_description ?? raw.clearDescription ?? false)
+    let description: string | undefined
+    if (descriptionRaw) {
+      const compactDescription = normalizeForRuleParsing(descriptionRaw).replace(/\s+/g, '')
+      if (/^(なし|未設定|空|クリア|削除|消去)$/.test(compactDescription)) {
+        clearDescription = true
+      } else {
+        const cleanedDescription = cleanCalendarDescription(descriptionRaw)
+        if (cleanedDescription) description = cleanedDescription
+      }
+    }
+    if (clearDescription) {
+      description = undefined
+    }
+    const reason = normalizeForRuleParsing(String(raw.reason ?? '')).trim()
+
+    return {
+      shouldUpdate,
+      confidence,
+      ...(title ? { title } : {}),
+      ...(date ? { date } : {}),
+      ...(time ? { time } : {}),
+      ...(typeof durationMin === 'number' ? { durationMin } : {}),
+      ...(location ? { location } : {}),
+      ...(clearLocation ? { clearLocation: true } : {}),
+      ...(description ? { description } : {}),
+      ...(clearDescription ? { clearDescription: true } : {}),
+      reason,
+    }
+  } catch (err) {
+    console.error('Failed to extract calendar update intent with Groq:', err)
+    return null
+  }
+}
+
+function isAcceptableAiCalendarUpdateIntent(intent: AiCalendarUpdateIntent): boolean {
+  if (!intent.shouldUpdate) return false
+  if (intent.confidence < AI_UPDATE_MIN_CONFIDENCE) return false
+  if (intent.date && !isValidDate(intent.date)) return false
+  if (intent.time && !isValidTime(intent.time)) return false
+  if (typeof intent.durationMin === 'number') {
+    if (!Number.isInteger(intent.durationMin) || intent.durationMin <= 0 || intent.durationMin > MAX_DURATION_MIN) {
+      return false
+    }
+  }
+  if (intent.title && cleanCalendarTitle(intent.title) === '予定') return false
+  if (intent.location && !cleanCalendarLocation(intent.location)) return false
+  if (intent.description && !cleanCalendarDescription(intent.description)) return false
+  const hasAnyField =
+    !!intent.title
+    || !!intent.date
+    || !!intent.time
+    || typeof intent.durationMin === 'number'
+    || !!intent.location
+    || !!intent.clearLocation
+    || !!intent.description
+    || !!intent.clearDescription
+  return hasAnyField
+}
+
+function buildCalendarUpdateCommandFromAiIntent(
+  eventId: string,
+  intent: AiCalendarUpdateIntent,
+): CalendarUpdateCommand | null {
+  if (!isAcceptableAiCalendarUpdateIntent(intent)) return null
+  return {
+    kind: 'update',
+    eventId,
+    ...(intent.title ? { title: cleanCalendarTitle(intent.title) } : {}),
+    ...(intent.date ? { date: intent.date } : {}),
+    ...(intent.time ? { time: intent.time } : {}),
+    ...(typeof intent.durationMin === 'number' ? { durationMin: intent.durationMin } : {}),
+    ...(intent.location ? { location: intent.location } : {}),
+    ...(intent.clearLocation ? { clearLocation: true } : {}),
+    ...(intent.description ? { description: intent.description } : {}),
+    ...(intent.clearDescription ? { clearDescription: true } : {}),
+  }
+}
+
+function mergeCalendarUpdateCommands(
+  base: CalendarUpdateCommand,
+  override: CalendarUpdateCommand,
+): CalendarUpdateCommand {
+  const merged: CalendarUpdateCommand = {
+    kind: 'update',
+    eventId: base.eventId,
+  }
+
+  const title = override.title ?? base.title
+  if (title) merged.title = title
+
+  // Keep rule-based schedule when available. AI is primarily for semantic fields.
+  const date = base.date ?? override.date
+  if (date) merged.date = date
+
+  const time = base.time ?? override.time
+  if (time) merged.time = time
+
+  const durationMin = typeof base.durationMin === 'number' ? base.durationMin : override.durationMin
+  if (typeof durationMin === 'number') merged.durationMin = durationMin
+
+  if (override.clearLocation) {
+    merged.clearLocation = true
+  } else {
+    if (override.location) {
+      merged.location = override.location
+    } else if (base.location) {
+      merged.location = base.location
+    }
+    if (base.clearLocation) merged.clearLocation = true
+  }
+
+  if (override.clearDescription) {
+    merged.clearDescription = true
+  } else {
+    if (override.description) {
+      merged.description = override.description
+    } else if (base.description) {
+      merged.description = base.description
+    }
+    if (base.clearDescription) merged.clearDescription = true
+  }
+
+  return merged
+}
+
+function looksLikeSemanticFieldUpdateText(rawText: string): boolean {
+  const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
+  if (!compact) return false
+  const hasSemanticFieldCue = /(内容|詳細|説明|件名|タイトル|予定名|中身|場所|会場|開催場所|開催会場)/.test(compact)
+  if (!hasSemanticFieldCue) return false
+  return /(変更|修正|更新|直して|直す|変えて|変える|にして|記載|記入|追記|追加|書いて|入れて|載せて|残して|メモして)/.test(compact)
+}
+
+function isLikelyInstructionOnlyFieldValue(raw: string): boolean {
+  const normalized = normalizeForRuleParsing(raw).trim()
+  if (!normalized) return true
+  const compact = normalized.replace(/\s+/g, '')
+  if (!compact) return true
+  if (/^(?:言葉|文言|文章|テキスト|内容|詳細|説明|件名|タイトル|予定名|場所|会場|予定)$/i.test(compact)) return true
+  if (/^(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの)$/.test(compact)) return true
+  if (
+    /^(?:(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの))?(?:言葉|文言|文章|テキスト|内容|詳細|説明|件名|タイトル|予定名|場所|会場)/.test(compact) &&
+    /(変更|修正|更新|変えて|して|書き換えて|置き換えて|記載|記入|追記|追加|入れて|書いて|載せて|残して)/.test(compact)
+  ) {
+    return true
+  }
+  return false
+}
+
+function isLikelyLowQualityRuleBasedUpdateCommand(
+  command: CalendarUpdateCommand,
+  rawText: string,
+): boolean {
+  const normalized = normalizeForRuleParsing(rawText)
+  if (command.title) {
+    const cleaned = cleanCalendarTitle(command.title)
+    if (!cleaned || cleaned === '予定') return true
+    if (isLikelyInstructionOnlyFieldValue(cleaned)) return true
+  }
+  if (command.location) {
+    const cleaned = cleanCalendarLocation(command.location)
+    if (!cleaned) return true
+    if (isLikelyInstructionOnlyFieldValue(cleaned)) return true
+  }
+  if (command.description) {
+    const cleaned = cleanCalendarDescription(command.description)
+    if (!cleaned) return true
+    if (isLikelyInstructionOnlyFieldValue(cleaned)) return true
+    if (
+      cleaned.length <= 3 &&
+      /(内容|詳細|説明|記載|記入|追記|追加|入れて|書いて|載せて|残して)/.test(normalized)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 function parseFirstJsonObject(raw: string): unknown | null {
   const trimmed = raw
     .replace(/^```json\s*/i, '')
@@ -2470,6 +3038,13 @@ function isMissingCalendarUpdatePendingTableError(error: any): boolean {
     && (text.includes('does not exist') || text.includes('relation'))
 }
 
+function isMissingCalendarUpdatePendingSourceIdsColumnError(error: any): boolean {
+  const code = String(error?.code ?? '')
+  if (code === '42703') return true
+  const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
+  return text.includes('source_line_message_ids_json')
+}
+
 function normalizePendingCalendarUpdateTargetEntries(raw: unknown): PendingCalendarUpdateTargetEntry[] {
   if (!Array.isArray(raw)) return []
   const out: PendingCalendarUpdateTargetEntry[] = []
@@ -2477,10 +3052,29 @@ function normalizePendingCalendarUpdateTargetEntries(raw: unknown): PendingCalen
     const eventId = String((item as any)?.event_id ?? '').trim()
     if (!eventId) continue
     const summary = cleanCalendarTitle(String((item as any)?.summary ?? ''))
+    const dateRaw = normalizeForRuleParsing(String((item as any)?.date ?? '')).trim()
+    const timeRaw = normalizeForRuleParsing(String((item as any)?.time ?? '')).trim()
+    const date = isValidDate(dateRaw) ? dateRaw : undefined
+    const time = isValidTime(timeRaw) ? timeRaw : undefined
     out.push({
       event_id: eventId,
       summary: summary || '(無題)',
+      ...(date ? { date } : {}),
+      ...(time ? { time } : {}),
     })
+  }
+  return out
+}
+
+function normalizeLineMessageIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const unique = new Set<string>()
+  const out: string[] = []
+  for (const item of raw) {
+    const id = String(item ?? '').trim()
+    if (!id || unique.has(id)) continue
+    unique.add(id)
+    out.push(id)
   }
   return out
 }
@@ -2493,28 +3087,47 @@ async function fetchPendingCalendarUpdateContext(
   const conversationKey = buildConversationKey(roomId, userId)
   const { data, error } = await supabase
     .from(CALENDAR_UPDATE_PENDING_TABLE)
-    .select('id, conversation_key, target_events_json, expires_at')
+    .select('id, conversation_key, target_events_json, source_line_message_ids_json, expires_at')
     .eq('conversation_key', conversationKey)
     .eq('status', 'pending')
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle()
+  let row = data as any
   if (error) {
-    if (!isMissingCalendarUpdatePendingTableError(error)) {
-      console.error('Failed to fetch pending calendar update context:', error)
+    if (!isMissingCalendarUpdatePendingSourceIdsColumnError(error)) {
+      if (!isMissingCalendarUpdatePendingTableError(error)) {
+        console.error('Failed to fetch pending calendar update context:', error)
+      }
+      return null
     }
-    return null
+    const fallback = await supabase
+      .from(CALENDAR_UPDATE_PENDING_TABLE)
+      .select('id, conversation_key, target_events_json, expires_at')
+      .eq('conversation_key', conversationKey)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    if (fallback.error) {
+      if (!isMissingCalendarUpdatePendingTableError(fallback.error)) {
+        console.error('Failed to fetch pending calendar update context (fallback):', fallback.error)
+      }
+      return null
+    }
+    row = fallback.data as any
   }
-  if (!data) return null
+  if (!row) return null
 
-  const targetEvents = normalizePendingCalendarUpdateTargetEntries((data as any).target_events_json)
+  const targetEvents = normalizePendingCalendarUpdateTargetEntries(row.target_events_json)
   if (targetEvents.length === 0) return null
 
   return {
-    id: String((data as any).id ?? ''),
-    conversation_key: String((data as any).conversation_key ?? ''),
+    id: String(row.id ?? ''),
+    conversation_key: String(row.conversation_key ?? ''),
     target_events: targetEvents,
-    expires_at: String((data as any).expires_at ?? ''),
+    source_line_message_ids: normalizeLineMessageIds(row.source_line_message_ids_json),
+    expires_at: String(row.expires_at ?? ''),
   }
 }
 
@@ -2541,16 +3154,28 @@ async function savePendingCalendarUpdateContext(
   roomId: string,
   userId: string | null,
   events: GoogleCalendarEvent[],
-): Promise<void> {
+  timezone: string,
+): Promise<PendingCalendarUpdateTargetEntry[]> {
   const entries = events
-    .map((event) => ({
-      event_id: String(event.id ?? '').trim(),
-      summary: cleanCalendarTitle(String(event.summary ?? '(無題)')),
-    }))
-    .filter((entry) => entry.event_id.length > 0)
+    .map((event) => {
+      const eventId = String(event.id ?? '').trim()
+      if (!eventId) return null
+      const detail = formatEventDetailBlock(event, timezone)
+      const dateCandidate = normalizeForRuleParsing(detail.date).replace(/\//g, '-')
+      const timeCandidate = normalizeForRuleParsing(detail.time).split('-')[0]?.trim() ?? ''
+      const date = isValidDate(dateCandidate) ? dateCandidate : undefined
+      const time = isValidTime(timeCandidate) ? timeCandidate : undefined
+      return {
+        event_id: eventId,
+        summary: cleanCalendarTitle(String(event.summary ?? '(無題)')),
+        ...(date ? { date } : {}),
+        ...(time ? { time } : {}),
+      }
+    })
+    .filter((entry): entry is PendingCalendarUpdateTargetEntry => !!entry)
     .slice(0, 20)
 
-  if (entries.length === 0) return
+  if (entries.length === 0) return []
 
   const conversationKey = buildConversationKey(roomId, userId)
   const nowIso = new Date().toISOString()
@@ -2568,18 +3193,69 @@ async function savePendingCalendarUpdateContext(
     console.error('Failed to supersede pending calendar update context:', supersedeError)
   }
 
+  const payloadBase = {
+    conversation_key: conversationKey,
+    room_id: roomId,
+    user_id: userId,
+    target_events_json: entries,
+    status: 'pending',
+    expires_at: expiresAt,
+  }
   const { error: insertError } = await supabase
     .from(CALENDAR_UPDATE_PENDING_TABLE)
-    .insert({
-      conversation_key: conversationKey,
-      room_id: roomId,
-      user_id: userId,
-      target_events_json: entries,
-      status: 'pending',
-      expires_at: expiresAt,
-    })
-  if (insertError && !isMissingCalendarUpdatePendingTableError(insertError)) {
-    console.error('Failed to save pending calendar update context:', insertError)
+    .insert({ ...payloadBase, source_line_message_ids_json: [] })
+  if (insertError) {
+    if (isMissingCalendarUpdatePendingSourceIdsColumnError(insertError)) {
+      const fallbackInsert = await supabase
+        .from(CALENDAR_UPDATE_PENDING_TABLE)
+        .insert(payloadBase)
+      if (fallbackInsert.error && !isMissingCalendarUpdatePendingTableError(fallbackInsert.error)) {
+        console.error('Failed to save pending calendar update context (fallback):', fallbackInsert.error)
+      }
+    } else if (!isMissingCalendarUpdatePendingTableError(insertError)) {
+      console.error('Failed to save pending calendar update context:', insertError)
+    }
+  }
+  return entries
+}
+
+async function attachLineMessageIdsToPendingCalendarUpdateContext(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  lineMessageIds: string[],
+): Promise<void> {
+  const ids = normalizeLineMessageIds(lineMessageIds)
+  if (ids.length === 0) return
+  const conversationKey = buildConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(CALENDAR_UPDATE_PENDING_TABLE)
+    .select('id, source_line_message_ids_json')
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    if (!isMissingCalendarUpdatePendingTableError(error) && !isMissingCalendarUpdatePendingSourceIdsColumnError(error)) {
+      console.error('Failed to fetch pending calendar update context for message-id attach:', error)
+    }
+    return
+  }
+  if (!data) return
+  const current = normalizeLineMessageIds((data as any).source_line_message_ids_json)
+  const merged = normalizeLineMessageIds([...current, ...ids])
+  const { error: updateError } = await supabase
+    .from(CALENDAR_UPDATE_PENDING_TABLE)
+    .update({ source_line_message_ids_json: merged })
+    .eq('id', Number((data as any).id ?? 0))
+    .eq('status', 'pending')
+  if (
+    updateError &&
+    !isMissingCalendarUpdatePendingTableError(updateError) &&
+    !isMissingCalendarUpdatePendingSourceIdsColumnError(updateError)
+  ) {
+    console.error('Failed to attach line message ids to pending calendar update context:', updateError)
   }
 }
 
@@ -2951,24 +3627,18 @@ async function savePendingCalendarConfirmation(
 
 function buildPendingCalendarConfirmationPrompt(
   intent: AiCalendarIntent,
-  timezone: string,
+  _timezone: string,
 ): string {
-  const title = cleanCalendarTitle(intent.title)
   const lines = [
     '予定候補を見つけました。登録しますか？',
+    ...buildCalendarDetailTemplateLines({
+      title: intent.title,
+      date: formatDateForCalendarTemplate(intent.date),
+      time: formatTimeRangeForCalendarTemplate(intent.date, intent.time, intent.durationMin),
+      location: intent.location ?? null,
+      content: null,
+    }),
   ]
-  const start = parseJstDateTime(intent.date, intent.time)
-  if (start) {
-    lines.push(formatDateOnlyForLine(start, timezone))
-    lines.push(formatTimeOnlyForLine(start, timezone))
-  } else {
-    lines.push(intent.date)
-    lines.push(intent.time)
-  }
-  lines.push(title)
-  if (intent.location) {
-    lines.push(`場所: ${intent.location}`)
-  }
   lines.push('')
   lines.push('修正する場合は「場所をmarugoに変更」「時間を19:00に変更」のように送ってください。')
   lines.push('「はい」で登録 / 「いいえ」でキャンセル')
@@ -2999,7 +3669,16 @@ function appendCorrectionToPendingSourceText(sourceText: string | null | undefin
 function looksLikePendingCorrectionText(rawText: string): boolean {
   const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
   if (!compact) return false
-  return /(訂正|修正|変更|変えて|直して|更新|場所|会場|時間|時刻|開始|日付|日にち|日時|件名|タイトル|予定名|内容)/.test(compact)
+  if (/(訂正|修正|変更|変えて|直して|更新|場所|会場|時間|時刻|開始|日付|日にち|日時|件名|タイトル|予定名|内容)/.test(compact)) {
+    return true
+  }
+  const normalized = normalizeForRuleParsing(rawText).trim()
+  if (!normalized) return false
+  if (/(?:件名|タイトル|予定名|内容|予定)?(?:の)?[^\n。]{1,24}を[^\n。]{1,40}(?:に|へ)(?:変更|修正|更新|して|直して|変えて|してください|します|する)/i.test(normalized)) {
+    return true
+  }
+  return /(試飲会|打ち合わせ|打合せ|会議|ミーティング|meeting|mtg|商談|面談|イベント|予約|アポ|グランドオープン|オープン|ランチ|ディナー).*(?:に|へ)(?:変更|修正|更新|して|直して|変えて|してください|します|する)/i
+    .test(normalized)
 }
 
 function extractCorrectionLocation(rawText: string): string | undefined {
@@ -3007,6 +3686,7 @@ function extractCorrectionLocation(rawText: string): string | undefined {
   if (!normalized) return undefined
   const patterns = [
     /(?:場所|会場|開催場所|開催会場)\s*(?:を|は)?\s*([^\n。]+?)\s*(?:に(?:変更|して|変えて|してください)|へ(?:変更|して|変えて|してください)|です|でお願いします|でおねがい|にします|にする)/i,
+    /(?:場所|会場|開催場所|開催会場)\s*(?:を|は)?\s*([^\n。]+?)\s*(?:で|に|へ)\s*$/i,
     /(?:場所|会場|開催場所|開催会場)\s*[：:]\s*([^\n。]+)/i,
   ]
   for (const pattern of patterns) {
@@ -3026,14 +3706,79 @@ function extractCorrectionTitle(rawText: string): string | undefined {
   const normalized = normalizeForRuleParsing(rawText).trim()
   if (!normalized) return undefined
   const patterns = [
-    /(?:件名|タイトル|予定名|内容)\s*(?:を|は)?\s*([^\n。]+?)\s*(?:に(?:変更|して|変えて|してください)|です|でお願いします|にします|にする)/i,
-    /(?:件名|タイトル|予定名|内容)\s*[：:]\s*([^\n。]+)/i,
+    /(?:件名|タイトル|予定名)\s*(?:を|は)?\s*([^\n。]+?)\s*(?:に(?:変更|して|変えて|してください)|です|でお願いします|にします|にする)/i,
+    /(?:件名|タイトル|予定名)\s*[：:]\s*([^\n。]+)/i,
   ]
   for (const pattern of patterns) {
     const match = normalized.match(pattern)
     if (!match || !match[1]) continue
     const cleaned = normalizeEventTitleCandidate(match[1]) || cleanCalendarTitle(match[1])
     if (cleaned && cleaned !== '予定') return cleaned
+  }
+
+  const replacePattern = /(?:件名|タイトル|予定名|予定)?(?:の)?\s*([^\n。]{1,40}?)\s*を\s*([^\n。]{1,80}?)\s*(?:に|へ)(?:変更|修正|更新|して|直して|変えて|してください|します|する)/i
+  const replaceMatch = normalized.match(replacePattern)
+  if (replaceMatch && replaceMatch[2]) {
+    const fromTokenCompact = normalizeForRuleParsing(String(replaceMatch[1] ?? '')).replace(/\s+/g, '')
+    if (!/^(時間|時刻|開始|日付|日にち|日時|場所|会場|所要|内容|詳細|説明|duration|location|description)$/i.test(fromTokenCompact)) {
+      const toRaw = String(replaceMatch[2] ?? '')
+        .replace(/^[\s、,。．:：\-]+/, '')
+        .trim()
+      const toCompact = normalizeForRuleParsing(toRaw).replace(/\s+/g, '')
+      const looksLikeDateOrTime =
+        isValidDate(toRaw)
+        || isValidTime(toRaw)
+        || !!parseFlexibleTimeToken(toRaw)
+        || /^(\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?|\d{1,2}月\d{1,2}日)$/.test(toCompact)
+      if (!looksLikeDateOrTime) {
+        const cleaned = normalizeEventTitleCandidate(toRaw) || cleanCalendarTitle(toRaw)
+        if (cleaned && cleaned !== '予定') return cleaned
+      }
+    }
+  }
+
+  const directToPattern = /^([^\n。]{1,80}?)\s*(?:に|へ)(?:変更|修正|更新|して|直して|変えて|してください|します|する)$/
+  const directToMatch = normalized.match(directToPattern)
+  if (directToMatch && directToMatch[1]) {
+    const candidateRaw = String(directToMatch[1]).trim()
+    const candidateCompact = normalizeForRuleParsing(candidateRaw).replace(/\s+/g, '')
+    const looksLikeDateOrTime =
+      isValidDate(candidateRaw)
+      || isValidTime(candidateRaw)
+      || !!parseFlexibleTimeToken(candidateRaw)
+      || /^(\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?|\d{1,2}月\d{1,2}日)$/.test(candidateCompact)
+    const hasFieldWord = /(時間|時刻|開始|日付|日にち|日時|場所|会場|所要|内容|詳細|説明|duration|location|description)/i.test(candidateRaw)
+    if (!looksLikeDateOrTime && !hasFieldWord) {
+      const cleaned = normalizeEventTitleCandidate(candidateRaw) || cleanCalendarTitle(candidateRaw)
+      if (cleaned && cleaned !== '予定') return cleaned
+    }
+  }
+  return undefined
+}
+
+function extractCorrectionDescription(rawText: string): string | undefined {
+  const normalized = normalizeForRuleParsing(rawText).trim()
+  if (!normalized) return undefined
+
+  const quoted = normalized.match(/(?:内容|詳細|説明)[^「『"']*[「『"']([^"'」』\n]{1,500})[」』"']/i)
+  if (quoted && quoted[1]) {
+    const cleanedQuoted = cleanCalendarDescription(quoted[1])
+    if (cleanedQuoted) return cleanedQuoted
+  }
+
+  const patterns = [
+    /(?:内容|詳細|説明)\s*(?:を|は|に|へ)?\s*(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの)?\s*(?:言葉|文言|文章|テキスト)\s*(?:に|へ)?\s*(?:変更|修正|更新|変えて|して|書き換えて|置き換えて)\s*[、,。．:：\-]?\s*([^\n。]+)/i,
+    /(?:内容|詳細|説明)\s*(?:を|は)?\s*(?:次(?:の)?(?:よう)?|以下(?:の)?|下記(?:の)?|つぎの)\s*(?:ように)?\s*(?:変更|修正|更新|して|変えて)\s*[、,。．:：\-]?\s*([^\n。]+)/i,
+    /(?:内容|詳細|説明)\s*(?:に|へ)\s*(?:(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの)\s*[、,。．:：\-]?\s*)?([^\n。]+?)\s*(?:と)?\s*(?:記載|記入|追記|追加|入れて|書いて|載せて|残して)(?:ください|下さい|して|ほしい|欲しい)?/i,
+    /(?:内容|詳細|説明)\s*(?:を|は)?\s*(?:(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの)\s*[、,。．:：\-]?\s*)?([^\n。]+?)\s*(?:と)?\s*(?:記載|記入|追記|追加|入れて|書いて|載せて|残して)(?:ください|下さい|して|ほしい|欲しい)?/i,
+    /(?:内容|詳細|説明)\s*(?:を|は)?\s*([^\n。]+?)\s*(?:に(?:変更|して|変えて|してください)|です|でお願いします|にします|にする)/i,
+    /(?:内容|詳細|説明)\s*[：:]\s*([^\n]+)/i,
+  ]
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern)
+    if (!match || !match[1]) continue
+    const cleaned = cleanCalendarDescription(match[1])
+    if (cleaned) return cleaned
   }
   return undefined
 }
@@ -3319,27 +4064,60 @@ async function tryHandlePendingCalendarConfirmation(
     return `予定登録に失敗しました。${result.error}\n再試行する場合は「はい」、中止する場合は「いいえ」を送ってください。`
   }
 
+  if (result.eventId) {
+    const pendingEvent: GoogleCalendarEvent = {
+      id: result.eventId,
+      summary: result.summary,
+      ...(command.location ? { location: command.location } : {}),
+      ...(result.savedStartRaw ? { start: { dateTime: result.savedStartRaw, timeZone: result.savedStartTimeZone ?? env.timezone } } : {}),
+      ...(result.savedEndRaw ? { end: { dateTime: result.savedEndRaw, timeZone: result.savedEndTimeZone ?? env.timezone } } : {}),
+    }
+    await savePendingCalendarUpdateContext(
+      supabase,
+      roomId,
+      userId,
+      [pendingEvent],
+      env.timezone,
+    )
+  }
+
   await resolvePendingCalendarConfirmation(supabase, pending, 'confirmed')
+  const registeredDate = formatDateOnlyForLine(result.startDate, env.timezone)
+  const registeredTime = `${formatTimeOnlyForLine(result.startDate, env.timezone)}-${formatTimeOnlyForLine(result.endDate, env.timezone)}`
   const lines = [
     '確認済みの予定を登録しました。',
-    formatDateOnlyForLine(result.startDate, env.timezone),
-    formatTimeOnlyForLine(result.startDate, env.timezone),
-    cleanCalendarTitle(result.summary),
+    ...buildCalendarDetailTemplateLines({
+      title: result.summary,
+      date: registeredDate,
+      time: registeredTime,
+      location: command.location ?? null,
+      content: null,
+    }),
   ]
-  if (command.location) {
-    lines.push(`場所: ${command.location}`)
-  }
   return lines.join('\n')
 }
 
 function looksLikeCalendarUpdateConversationText(rawText: string): boolean {
-  const compact = normalizeForRuleParsing(rawText).replace(/\s+/g, '')
+  const normalized = normalizeForRuleParsing(rawText).trim()
+  if (!normalized) return false
+  const compact = normalized.replace(/\s+/g, '')
   if (!compact) return false
   if (/^予定変更/.test(compact)) return false
   if (parseCalendarCommand(rawText).matched) return false
-  const hasChangeCue = /(変更|修正|更新|ずらして|ずらす|移動|直して|直す|変えて|変える|にして)/.test(compact)
-  const hasFieldCue = /(時間|時刻|開始|日付|日にち|日時|件名|タイトル|予定名|場所|会場|所要|分)/.test(compact)
-  return hasChangeCue && hasFieldCue
+  const hasChangeCue = /(変更|修正|更新|ずらして|ずらす|移動|直して|直す|変えて|変える|にして|前倒し|後ろ倒し|早めて|早める|遅らせて|遅らせる|リスケ|書き換えて|置き換えて|記載|記入|追記|追加|書いて|入れて|載せて|残して|メモして)/.test(compact)
+  const hasFieldCue = /(時間|時刻|開始|日付|日にち|日時|件名|タイトル|予定名|内容|場所|会場|所要|分|duration|location)/i.test(compact)
+  const hasAssignmentCue = /(?:時間|時刻|開始|日付|日にち|日時|件名|タイトル|予定名|内容|場所|会場|所要|duration|location)\s*(?:は|を|:|：|=)/i
+    .test(normalized)
+  const hasTitleRewriteCue = /(?:件名|タイトル|予定名|内容|予定)?(?:の)?[^\n。]{1,24}を[^\n。]{1,40}(?:に|へ)(?:変更|修正|更新|して|直して|変えて|してください|します|する)/i
+    .test(normalized)
+  const hasEventWordCue = /(試飲会|打ち合わせ|打合せ|会議|ミーティング|meeting|mtg|商談|面談|イベント|予約|アポ|グランドオープン|オープン|ランチ|ディナー|研修|セミナー|講習会|説明会)/i
+    .test(normalized)
+  const hasTargetCue = extractPendingCalendarTargetIndex(rawText) != null
+  if (hasTitleRewriteCue) return true
+  if (hasFieldCue && (hasChangeCue || hasAssignmentCue || hasTargetCue)) return true
+  if (hasEventWordCue && hasChangeCue) return true
+  if (hasTargetCue && hasChangeCue) return true
+  return false
 }
 
 function extractPendingCalendarTargetIndex(rawText: string): number | null {
@@ -3349,6 +4127,64 @@ function extractPendingCalendarTargetIndex(rawText: string): number | null {
   const idx = Number(match[1])
   if (!Number.isInteger(idx) || idx <= 0) return null
   return idx - 1
+}
+
+function extractPendingCalendarTargetSummaryHint(rawText: string): string | null {
+  const normalized = normalizeForRuleParsing(rawText)
+    .trim()
+  if (!normalized) return null
+
+  const patterns = [
+    /(?:予定|件名|タイトル|予定名|内容)?(?:の)?\s*([^\n。]{1,40}?)\s*を\s*[^\n。]{1,80}\s*(?:に|へ)(?:変更|修正|更新|して|直して|変えて|してください|します|する)/i,
+    /([^\n。]{1,40}?)\s*(?:の予定|の件名|のタイトル|の予定名|の内容)\s*(?:を)?\s*[^\n。]{1,80}\s*(?:に|へ)(?:変更|修正|更新|して|直して|変えて|してください|します|する)/i,
+    /(?:対象|予定)\s*(?:は|を|:|：)\s*([^\n。]{1,40})/i,
+  ]
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern)
+    const raw = String(match?.[1] ?? '').trim()
+    if (!raw) continue
+    const cleaned = normalizeForRuleParsing(raw)
+      .replace(/^[\s、,。．:：\-]+/, '')
+      .replace(/[」』"'\s、,。．:：\-]+$/g, '')
+      .trim()
+    if (!cleaned) continue
+    if (/(時間|時刻|開始|日付|日にち|日時|件名|タイトル|予定名|内容|場所|会場|所要|分|duration|location)/i.test(cleaned)) {
+      continue
+    }
+    if (cleaned.length <= 1) continue
+    return cleaned
+  }
+  return null
+}
+
+function pendingTargetMentionsDateOrTime(entry: PendingCalendarUpdateTargetEntry, rawText: string): boolean {
+  const normalized = normalizeForRuleParsing(rawText)
+  const compact = normalizeKeywordForSearch(rawText)
+  if (entry.date) {
+    const slashDate = entry.date.replace(/-/g, '/')
+    const monthDay = slashDate.split('/').slice(1).join('/')
+    if (normalized.includes(entry.date) || normalized.includes(slashDate) || (monthDay && normalized.includes(monthDay))) {
+      return true
+    }
+  }
+  if (entry.time) {
+    const [hh, mm] = entry.time.split(':')
+    const hour = Number(hh)
+    const minute = Number(mm)
+    const jaTime = Number.isInteger(hour) && Number.isInteger(minute)
+      ? (minute === 0 ? `${hour}時` : `${hour}時${minute}分`)
+      : ''
+    if (
+      compact.includes(entry.time)
+      || compact.includes(`${hour}:${String(minute).padStart(2, '0')}`)
+      || compact.includes(`${hour}時`)
+      || (jaTime && compact.includes(jaTime))
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
 function extractCalendarDurationForUpdate(rawText: string): number | null {
@@ -3381,25 +4217,40 @@ function buildCalendarUpdateCommandFromConversation(
   const dateOnly = dateFromSlot ? null : extractCorrectionDate(text)
   const timeOnly = timeFromSlot ? null : extractCorrectionTime(text)
   const explicitTitle = extractCorrectionTitle(text)
+  const explicitDescription = extractCorrectionDescription(text)
   const location = extractCorrectionLocation(text)
   const duration = durationFromSlot ?? extractCalendarDurationForUpdate(text)
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   const clearLocation = /(場所|会場).*(なし|未設定|クリア|削除|消去)/.test(compact)
+  const clearDescription = /(内容|詳細|説明).*(なし|未設定|クリア|削除|消去)/.test(compact)
 
   const nextDate = dateFromSlot ?? dateOnly ?? undefined
   const nextTime = timeFromSlot ?? timeOnly ?? undefined
   const nextTitle = explicitTitle ? cleanCalendarTitle(explicitTitle) : undefined
+  const nextDescription = explicitDescription ? cleanCalendarDescription(explicitDescription) ?? undefined : undefined
   const nextLocation = location ?? undefined
   const nextDuration = (typeof duration === 'number' && Number.isInteger(duration) && duration > 0 && duration <= MAX_DURATION_MIN)
     ? duration
     : undefined
 
-  if (!nextDate && !nextTime && !nextTitle && !nextLocation && !clearLocation && typeof nextDuration === 'undefined') {
+  if (
+    !nextDate &&
+    !nextTime &&
+    !nextTitle &&
+    !nextLocation &&
+    !nextDescription &&
+    !clearLocation &&
+    !clearDescription &&
+    typeof nextDuration === 'undefined'
+  ) {
     return {
       command: null,
       guidance: [
         '変更内容を読み取れませんでした。',
         '例: 「時間を19:00に変更」「2件目の日付を2026-05-20に変更」「件名を試飲会に変更」',
+        '例: 「開始を19時半にして」「会場はmarugoで」「タイトルをシェフミーティングに修正」',
+        '例: 「内容に、店長のみの会議ですと記載して」',
+        '例: 「予定を店長会議に変更」「店長会議にして」',
       ].join('\n'),
     }
   }
@@ -3414,6 +4265,8 @@ function buildCalendarUpdateCommandFromConversation(
       ...(typeof nextDuration === 'number' ? { durationMin: nextDuration } : {}),
       ...(nextLocation ? { location: nextLocation } : {}),
       ...(clearLocation ? { clearLocation: true } : {}),
+      ...(nextDescription ? { description: nextDescription } : {}),
+      ...(clearDescription ? { clearDescription: true } : {}),
     },
   }
 }
@@ -3421,18 +4274,60 @@ function buildCalendarUpdateCommandFromConversation(
 function selectCalendarUpdateTargetFromPending(
   text: string,
   pending: PendingCalendarUpdateContext,
-): { entry: PendingCalendarUpdateTargetEntry | null; requiresIndex: boolean } {
+): { entry: PendingCalendarUpdateTargetEntry | null; requiresIndex: boolean; hint?: string | null } {
   const index = extractPendingCalendarTargetIndex(text)
   if (index != null) {
     if (index < 0 || index >= pending.target_events.length) {
-      return { entry: null, requiresIndex: true }
+      return { entry: null, requiresIndex: true, hint: null }
     }
-    return { entry: pending.target_events[index], requiresIndex: false }
+    return { entry: pending.target_events[index], requiresIndex: false, hint: null }
   }
+
+  const hint = extractPendingCalendarTargetSummaryHint(text)
+  if (hint) {
+    const normalizedHint = normalizeKeywordForSearch(hint)
+    const compactHint = compactSearchText(hint)
+    const matched = pending.target_events.filter((entry) => {
+      const normalizedSummary = normalizeKeywordForSearch(entry.summary)
+      const compactSummary = compactSearchText(entry.summary)
+      if (normalizedHint && normalizedSummary && normalizedSummary.includes(normalizedHint)) return true
+      if (compactHint && compactSummary && compactSummary.includes(compactHint)) return true
+      if (normalizedHint && normalizedSummary && normalizedHint.includes(normalizedSummary)) return true
+      if (compactHint && compactSummary && compactHint.includes(compactSummary)) return true
+      return false
+    })
+    if (matched.length === 1) {
+      return { entry: matched[0], requiresIndex: false, hint }
+    }
+  }
+
+  const textNormalized = normalizeKeywordForSearch(text)
+  const textCompact = compactSearchText(text)
+  const scored = pending.target_events
+    .map((entry) => {
+      let score = 0
+      const summaryNormalized = normalizeKeywordForSearch(entry.summary)
+      const summaryCompact = compactSearchText(entry.summary)
+      if (summaryNormalized && textNormalized.includes(summaryNormalized)) score += 5
+      if (summaryCompact && textCompact.includes(summaryCompact)) score += 4
+      if (pendingTargetMentionsDateOrTime(entry, text)) score += 3
+      return { entry, score }
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)
+
+  if (scored.length > 0) {
+    const top = scored[0]
+    const second = scored[1]
+    if (!second || top.score > second.score) {
+      return { entry: top.entry, requiresIndex: false, hint: null }
+    }
+  }
+
   if (pending.target_events.length === 1) {
-    return { entry: pending.target_events[0], requiresIndex: false }
+    return { entry: pending.target_events[0], requiresIndex: false, hint: null }
   }
-  return { entry: null, requiresIndex: true }
+  return { entry: null, requiresIndex: true, hint }
 }
 
 async function tryHandlePendingCalendarUpdateConversation(
@@ -3441,6 +4336,8 @@ async function tryHandlePendingCalendarUpdateConversation(
   env: CalendarEnv,
   roomId: string,
   userId: string | null,
+  groqApiKey: string,
+  quotedMessageId: string | null,
 ): Promise<string | null> {
   if (!looksLikeCalendarUpdateConversationText(text)) return null
 
@@ -3453,6 +4350,9 @@ async function tryHandlePendingCalendarUpdateConversation(
     return '変更対象の候補が期限切れです。もう一度「予定確認」を実行してから変更してください。'
   }
 
+  const hasQuotedContext = !!quotedMessageId && pending.source_line_message_ids.length > 0
+  const quotedMessageMatched = !hasQuotedContext || pending.source_line_message_ids.includes(String(quotedMessageId))
+
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   if (/^(いいえ|no|n|キャンセル|中止|やめる)$/.test(compact)) {
     await resolvePendingCalendarUpdateContext(supabase, pending, 'cancelled')
@@ -3463,19 +4363,50 @@ async function tryHandlePendingCalendarUpdateConversation(
   if (!selected.entry) {
     if (selected.requiresIndex) {
       return [
-        '変更する予定を指定してください。',
-        '例: 「1件目の時間を19:00に変更」「2件目の件名を試飲会に変更」',
+        ...(hasQuotedContext && !quotedMessageMatched
+          ? ['返信先の予定候補とは一致しなかったため、本文からも特定を試みましたが対象を絞れませんでした。']
+          : []),
+        selected.hint
+          ? `「${selected.hint}」に一致する予定を特定できませんでした。`
+          : '変更する予定を特定できませんでした。',
+        '変更したい予定のメッセージに返信して、次のように送ってください。',
+        '例: 「1件目の時間を19:00に変更」',
+        '例: 「会議を店長会議に変更」「5/15の予定の場所をmarugoに変更」',
       ].join('\n')
     }
     return null
   }
 
   const updateCommand = buildCalendarUpdateCommandFromConversation(text, selected.entry.event_id)
-  if (!updateCommand.command) {
-    return updateCommand.guidance ?? null
+  let resolvedCommand = updateCommand.command
+  const shouldTryAiFallback =
+    !!groqApiKey &&
+    (
+      !resolvedCommand ||
+      isLikelyLowQualityRuleBasedUpdateCommand(resolvedCommand, text) ||
+      looksLikeSemanticFieldUpdateText(text)
+    )
+  if (shouldTryAiFallback) {
+    const aiIntent = await extractCalendarUpdateIntentWithGroq(
+      text,
+      env.timezone,
+      groqApiKey,
+      selected.entry.summary,
+    )
+    if (aiIntent) {
+      const aiCommand = buildCalendarUpdateCommandFromAiIntent(selected.entry.event_id, aiIntent)
+      if (aiCommand) {
+        resolvedCommand = resolvedCommand
+          ? mergeCalendarUpdateCommands(resolvedCommand, aiCommand)
+          : aiCommand
+      }
+    }
   }
 
-  return await updateCalendarEventReply(updateCommand.command, env)
+  if (!resolvedCommand) {
+    return updateCommand.guidance ?? null
+  }
+  return await updateCalendarEventReply(resolvedCommand, env)
 }
 
 async function tryHandlePendingLibrarySearchConfirmation(
@@ -3756,6 +4687,13 @@ function parseFlexibleTimeToken(raw: string): { hour: number; minute: number } |
     if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null
     if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null
     return { hour, minute }
+  }
+
+  m = token.match(/^(\d{1,2})時半$/)
+  if (m) {
+    const hour = Number(m[1])
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) return null
+    return { hour, minute: 30 }
   }
 
   return null
@@ -4113,6 +5051,35 @@ function cleanCalendarTitle(raw: string): string {
   return cleaned.length > 120 ? cleaned.slice(0, 120) : cleaned
 }
 
+function cleanCalendarDescription(raw: string): string | null {
+  const cleaned = normalizeSpaces(raw)
+    .replace(/^[\s、,。．:：\-]+/, '')
+    .replace(/^(?:内容|詳細|説明)\s*(?:は|を|に|へ)?\s*[、,。．:：\-]*/i, '')
+    .replace(/^(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの)\s*[、,。．:：\-]*/i, '')
+    .replace(
+      /^(?:(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの)\s*)?(?:言葉|文言|文章|テキスト|内容|詳細|説明)\s*(?:を|に|へ)?\s*(?:変更|修正|更新|変えて|して|書き換えて|置き換えて)\s*[、,。．:：\-]*/i,
+      '',
+    )
+    .replace(
+      /^(?:(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの)\s*)?(?:言葉|文言|文章|テキスト)\s*(?:を|に|へ)?\s*(?:変更|修正|更新|変えて|して|書き換えて|置き換えて)\s*[、,。．:：\-]*/i,
+      '',
+    )
+    .replace(/^(?:言葉|文言|文章|テキスト)\s*(?:を|に|へ)?\s*(?:変更|修正|更新|変えて|して)\s*[、,。．:：\-]*/i, '')
+    .replace(/\s*(?:と)?\s*(?:記載|記入|追記|追加|入れて|書いて|載せて|残して|メモして)(?:ください|下さい|して|お願いします|お願い|ほしい|欲しい)?\s*$/i, '')
+    .replace(/\s*(?:に|へ)\s*(?:変更|修正|更新|して|変えて|書き換えて|置き換えて)(?:ください|下さい|ほしい|欲しい)?\s*$/i, '')
+    .replace(/^(?:に|へ|を|は)\s*[、,。．:：\-]*/i, '')
+    .replace(/^(?:「|『|“|\"|')+/, '')
+    .replace(/(?:」|』|”|\"|')+$/g, '')
+    .replace(/[\s]+$/g, '')
+    .trim()
+  if (!cleaned) return null
+  if (/^(?:次(?:の)?|以下(?:の)?|下記(?:の)?|つぎの)$/i.test(cleaned)) return null
+  if (/^(?:言葉|文言|文章|テキスト|内容|詳細|説明)$/i.test(cleaned)) return null
+  const compact = compactSearchText(cleaned)
+  if (!compact) return null
+  return cleaned.length > 1000 ? cleaned.slice(0, 1000) : cleaned
+}
+
 function normalizeForRuleParsing(text: string): string {
   return normalizeSpaces(text)
     .replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
@@ -4297,8 +5264,8 @@ function parseCalendarUpdateCommand(bodyRaw: string): {
       command: null,
       error: [
         '形式エラーです。',
-        '例: 予定変更 <eventId> | 件名=試飲会(更新) | 時刻=19:00',
-        '例: 予定変更 <eventId> | 日付=2026-05-10 | 時刻=19:00 | 所要=90 | 場所=marugo',
+        '例: 予定変更 <event_id> | 時刻=19:00',
+        '例: 予定確認のあと「1件目の時間を19:00に変更」',
       ].join('\n'),
     }
   }
@@ -4309,14 +5276,16 @@ function parseCalendarUpdateCommand(bodyRaw: string): {
       command: null,
       error: [
         '変更内容を指定してください。',
-        '例: 予定変更 <eventId> | 件名=試飲会(更新)',
+        '例: 予定変更 <event_id> | 件名=試飲会(更新)',
+        '例: 予定変更 <event_id> | 内容=店長のみの会議です',
+        '例: 予定確認のあと「1件目の件名を試飲会(更新)に変更」',
       ].join('\n'),
     }
   }
 
   const eventId = parts[0]
   if (!/^[a-zA-Z0-9@._-]+$/.test(eventId)) {
-    return { command: null, error: 'eventId の形式が不正です。予定一覧に表示された ID を指定してください。' }
+    return { command: null, error: '変更対象の指定形式が不正です。もう一度「予定確認」を実行してから変更してください。' }
   }
 
   let title: string | undefined
@@ -4325,6 +5294,8 @@ function parseCalendarUpdateCommand(bodyRaw: string): {
   let durationMin: number | undefined
   let location: string | undefined
   let clearLocation = false
+  let description: string | undefined
+  let clearDescription = false
 
   for (let i = 1; i < parts.length; i += 1) {
     const segment = parts[i]
@@ -4374,11 +5345,33 @@ function parseCalendarUpdateCommand(bodyRaw: string): {
       }
       continue
     }
+    if (rawKey === '内容' || rawKey === '詳細' || rawKey === '説明' || rawKey === 'description') {
+      const compact = normalizeForRuleParsing(value).replace(/\s+/g, '')
+      if (/^(なし|空|未設定|クリア|削除|消去)$/.test(compact)) {
+        clearDescription = true
+        description = undefined
+      } else {
+        const cleanedDescription = cleanCalendarDescription(value)
+        if (!cleanedDescription) return { command: null, error: '内容の指定が不正です。' }
+        description = cleanedDescription
+        clearDescription = false
+      }
+      continue
+    }
     return { command: null, error: `未対応の更新キーです: ${rawKey}` }
   }
 
-  if (!title && !date && !time && typeof durationMin === 'undefined' && !location && !clearLocation) {
-    return { command: null, error: '変更項目がありません。件名・日付・時刻・所要・場所のいずれかを指定してください。' }
+  if (
+    !title &&
+    !date &&
+    !time &&
+    typeof durationMin === 'undefined' &&
+    !location &&
+    !clearLocation &&
+    !description &&
+    !clearDescription
+  ) {
+    return { command: null, error: '変更項目がありません。件名・日付・時刻・所要・場所・内容のいずれかを指定してください。' }
   }
 
   return {
@@ -4391,6 +5384,8 @@ function parseCalendarUpdateCommand(bodyRaw: string): {
       ...(typeof durationMin === 'number' ? { durationMin } : {}),
       ...(location ? { location } : {}),
       ...(clearLocation ? { clearLocation: true } : {}),
+      ...(description ? { description } : {}),
+      ...(clearDescription ? { clearDescription: true } : {}),
     },
     error: null,
   }
@@ -4673,15 +5668,18 @@ async function createCalendarEventReply(
   if (!result.ok) {
     return `予定登録に失敗しました。${result.error}`
   }
-  const startText = formatDateTimeForLine(result.startDate, env.timezone)
-  const endText = formatDateTimeForLine(result.endDate, env.timezone)
+  const registeredDate = formatDateOnlyForLine(result.startDate, env.timezone)
+  const registeredTime = `${formatTimeOnlyForLine(result.startDate, env.timezone)}-${formatTimeOnlyForLine(result.endDate, env.timezone)}`
 
   return [
     '予定を登録しました。',
-    `件名: ${result.summary}`,
-    ...(command.location ? [`場所: ${command.location}`] : []),
-    `開始: ${startText}`,
-    `終了: ${endText}`,
+    ...buildCalendarDetailTemplateLines({
+      title: result.summary,
+      date: registeredDate,
+      time: registeredTime,
+      location: command.location ?? null,
+      content: null,
+    }),
   ].join('\n')
 }
 
@@ -4695,13 +5693,17 @@ async function updateCalendarEventReply(
   }
 
   const detail = formatEventDetailBlock(result.event, env.timezone)
+  const location = cleanCalendarLocation(String(result.event.location ?? '')) ?? null
+  const description = sanitizeEventDescriptionForList(String(result.event.description ?? ''))
   return [
     '予定を変更しました。',
-    `ID: ${result.event.id ?? command.eventId}`,
-    `件名: ${detail.title}`,
-    `日付: ${detail.date}`,
-    `時間: ${detail.time}`,
-    `内容: ${detail.content}`,
+    ...buildCalendarDetailTemplateLines({
+      title: detail.title,
+      date: detail.date,
+      time: detail.time,
+      location,
+      content: description || null,
+    }),
   ].join('\n')
 }
 
@@ -4721,7 +5723,7 @@ async function updateCalendarEvent(
   if (!eventResponse.ok) {
     const text = await eventResponse.text()
     if (eventResponse.status === 404) {
-      return { ok: false, error: '指定した ID の予定が見つかりません。予定一覧の ID を確認してください。' }
+      return { ok: false, error: '指定した予定が見つかりません。もう一度「予定確認」を実行してから変更してください。' }
     }
     return { ok: false, error: `Google Calendar API error (${eventResponse.status}): ${text}` }
   }
@@ -4733,6 +5735,14 @@ async function updateCalendarEvent(
     payload.location = ''
   } else if (command.location) {
     payload.location = command.location
+  }
+  const existingDescriptionRaw = String(existing.description ?? '')
+  const existingMetadataLines = extractCalendarSourceMetadataLines(existingDescriptionRaw)
+  if (command.clearDescription) {
+    payload.description = composeCalendarDescriptionWithMetadata('', existingMetadataLines)
+  } else if (command.description) {
+    const userContent = stripCalendarSourceMetadataLines(command.description)
+    payload.description = composeCalendarDescriptionWithMetadata(userContent, existingMetadataLines)
   }
 
   const needsScheduleUpdate =
@@ -4838,7 +5848,7 @@ async function createCalendarEvent(
     body: JSON.stringify({
       summary: command.title,
       ...(command.location ? { location: command.location } : {}),
-      description: `LINE room_id: ${roomId}\nLINE user_id: ${userId ?? 'unknown'}\nsource: line-webhook`,
+      description: buildCalendarSourceMetadataLines(roomId, userId).join('\n'),
       start: {
         dateTime: startDateTimeLocal,
         timeZone: CALENDAR_CREATE_TIMEZONE,
@@ -4940,7 +5950,7 @@ async function listCalendarEventsReply(
     return `予定はありません（${range.label}）`
   }
 
-  await savePendingCalendarUpdateContext(supabase, roomId, userId, items)
+  await savePendingCalendarUpdateContext(supabase, roomId, userId, items, env.timezone)
 
   const heading = command.keyword
     ? `予定一覧（${range.label} / キーワード: ${command.keyword}）`
@@ -4951,7 +5961,6 @@ async function listCalendarEventsReply(
     const item = items[i]
     const detail = formatEventDetailBlock(item, env.timezone)
     lines.push(`${i + 1}.`)
-    lines.push(`  ID: ${item.id ?? '(ID不明)'}`)
     lines.push(`  日付: ${detail.date}`)
     lines.push(`  時間: ${detail.time}`)
     lines.push(`  予定: ${detail.title}`)
@@ -4962,9 +5971,10 @@ async function listCalendarEventsReply(
   }
   lines.push('')
   if (items.length === 1) {
-    lines.push('この予定を変更する場合は「時間を19:00に変更」のように続けて送ってください。')
+    lines.push('この予定を変更する場合は、このメッセージに返信して「時間を19:00に変更」のように送ってください。')
   } else {
-    lines.push('表示した予定を変更する場合は「2件目の時間を19:00に変更」のように送ってください。')
+    lines.push('表示した予定を変更する場合は、このメッセージに返信して送ってください。')
+    lines.push('例: 「2件目の時間を19:00に変更」「会議を店長会議に変更」')
   }
   return lines.join('\n')
 }
@@ -5269,6 +6279,46 @@ function expandKeywordVariants(token: string): string[] {
   return Array.from(variants).filter((v) => v.length > 0)
 }
 
+function formatDateForCalendarTemplate(rawDate: string): string {
+  const date = normalizeForRuleParsing(String(rawDate ?? '')).trim()
+  if (!date) return '(日付不明)'
+  if (isValidDate(date)) return date.replace(/-/g, '/')
+  return date
+}
+
+function formatTimeRangeForCalendarTemplate(date: string, time: string, durationMin: number): string {
+  const normalizedTime = normalizeForRuleParsing(String(time ?? '')).trim()
+  if (!normalizedTime) return '(時間不明)'
+  if (!isValidDate(date) || !isValidTime(normalizedTime)) return normalizedTime
+  if (!Number.isInteger(durationMin) || durationMin <= 0 || durationMin > MAX_DURATION_MIN) return normalizedTime
+  const end = addMinutesToLocalDateTime(date, normalizedTime, durationMin)
+  if (!end) return normalizedTime
+  if (end.date === date) return `${normalizedTime}-${end.time}`
+  return `${normalizedTime}-${end.time}(翌日)`
+}
+
+function buildCalendarDetailTemplateLines(detail: {
+  title: string
+  date: string
+  time: string
+  location?: string | null
+  content?: string | null
+}): string[] {
+  const title = cleanCalendarTitle(String(detail.title ?? ''))
+  const date = normalizeForRuleParsing(String(detail.date ?? '')).trim() || '(日付不明)'
+  const time = normalizeForRuleParsing(String(detail.time ?? '')).trim() || '(時間不明)'
+  const locationRaw = String(detail.location ?? '')
+  const location = cleanCalendarLocation(locationRaw) ?? normalizeInlineText(locationRaw)
+  const content = normalizeInlineText(String(detail.content ?? ''))
+  return [
+    `件名: ${title || '予定'}`,
+    `日付: ${date}`,
+    `時間: ${time}`,
+    `場所: ${location || '（未設定）'}`,
+    `内容: ${content || '（内容なし）'}`,
+  ]
+}
+
 function formatEventDetailBlock(
   event: GoogleCalendarEvent,
   timezone: string,
@@ -5322,7 +6372,7 @@ function sanitizeEventDescriptionForList(raw: string): string {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .filter((line) => !/^(LINE room_id:|LINE user_id:|source:\s*line-webhook)/i.test(line))
+    .filter((line) => !isCalendarSourceMetadataLine(line))
 
   const merged = normalizeInlineText(lines.join(' / '))
   if (!merged) return ''
@@ -5332,6 +6382,63 @@ function sanitizeEventDescriptionForList(raw: string): string {
 
 function normalizeInlineText(raw: string): string {
   return normalizeSpaces(raw).replace(/\s+/g, ' ')
+}
+
+function isCalendarSourceMetadataLine(rawLine: string): boolean {
+  const line = normalizeInlineText(String(rawLine ?? ''))
+  if (!line) return false
+  if (/^source\s*:\s*line-webhook\b/i.test(line)) return true
+  if (
+    /^LINE\s+(?:room_id|room_name|room_label|group_id|group_name|user_id|user_name|sender_name|poster_name|投稿者|送信者)\s*:/i
+      .test(line)
+  ) {
+    return true
+  }
+  return false
+}
+
+function extractCalendarSourceMetadataLines(rawDescription: string): string[] {
+  const unique = new Set<string>()
+  const out: string[] = []
+  const lines = String(rawDescription ?? '')
+    .split(/\r?\n/)
+    .map((line) => normalizeInlineText(line))
+    .filter((line) => line.length > 0)
+  for (const line of lines) {
+    if (!isCalendarSourceMetadataLine(line)) continue
+    if (unique.has(line)) continue
+    unique.add(line)
+    out.push(line)
+  }
+  return out
+}
+
+function stripCalendarSourceMetadataLines(rawDescription: string): string {
+  const lines = String(rawDescription ?? '')
+    .split(/\r?\n/)
+    .map((line) => normalizeInlineText(line))
+    .filter((line) => line.length > 0)
+    .filter((line) => !isCalendarSourceMetadataLine(line))
+  return lines.join('\n').trim()
+}
+
+function buildCalendarSourceMetadataLines(roomId: string, userId: string | null): string[] {
+  return [
+    `LINE room_id: ${roomId}`,
+    `LINE user_id: ${userId ?? 'unknown'}`,
+    'source: line-webhook',
+  ]
+}
+
+function composeCalendarDescriptionWithMetadata(
+  content: string | null | undefined,
+  metadataLines: string[],
+): string {
+  const body = normalizeInlineText(String(content ?? '')).trim()
+  const metadata = extractCalendarSourceMetadataLines(metadataLines.join('\n'))
+  if (!body) return metadata.join('\n')
+  if (metadata.length === 0) return body
+  return `${body}\n\n${metadata.join('\n')}`
 }
 
 function formatEventSchedule(event: GoogleCalendarEvent, timezone: string): string {
@@ -5511,7 +6618,7 @@ async function replyLineMessage(
   replyToken: string,
   text: string | string[],
   channelAccessToken: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; sentMessageIds: string[] } | { ok: false; error: string }> {
   const inputTexts = Array.isArray(text) ? text : [text]
   const preparedTexts = inputTexts
     .flatMap((item) => splitTextForLineReply(item, 4900))
@@ -5545,5 +6652,13 @@ async function replyLineMessage(
     const errText = await response.text()
     return { ok: false, error: `LINE reply API error (${response.status}): ${errText}` }
   }
-  return { ok: true }
+  let sentMessageIds: string[] = []
+  try {
+    const payload = await response.json() as Record<string, unknown>
+    const sentMessages = Array.isArray(payload?.sentMessages) ? payload.sentMessages : []
+    sentMessageIds = normalizeLineMessageIds(sentMessages.map((item) => String((item as any)?.id ?? '')))
+  } catch {
+    sentMessageIds = []
+  }
+  return { ok: true, sentMessageIds }
 }
