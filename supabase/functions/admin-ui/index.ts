@@ -981,6 +981,7 @@ const html = String.raw`<!doctype html>
           <button id="openNewRoomConfigBtn" class="button" type="button">追加時の設定</button>
           <span id="newRoomConfigSummary" class="new-room-config-summary">-</span>
           <button id="addRoomBtn" class="button primary">ルーム設定を追加</button>
+          <button id="refreshRoomNamesBtn" class="button">ルーム名再取得</button>
         </div>
         <div class="table-wrap" style="margin-top:12px;">
           <table class="rooms-table">
@@ -1152,6 +1153,7 @@ const html = String.raw`<!doctype html>
       cancelNewRoomConfigBtn: document.getElementById('cancelNewRoomConfigBtn'),
       saveNewRoomConfigBtn: document.getElementById('saveNewRoomConfigBtn'),
       addRoomBtn: document.getElementById('addRoomBtn'),
+      refreshRoomNamesBtn: document.getElementById('refreshRoomNamesBtn'),
       roomIdModal: document.getElementById('roomIdModal'),
       roomIdModalName: document.getElementById('roomIdModalName'),
       roomIdModalValue: document.getElementById('roomIdModalValue'),
@@ -2197,6 +2199,11 @@ const html = String.raw`<!doctype html>
       const roomId = tr.dataset.roomId || '';
       await api('/settings/rooms/' + encodeURIComponent(roomId), { method: 'DELETE' });
       isRoomDirty = false;
+      try {
+        await refreshRoomNames(roomId);
+      } catch (_) {
+        // ignore name refresh failure on reset
+      }
       await safeLoadState();
     }
 
@@ -2250,6 +2257,15 @@ const html = String.raw`<!doctype html>
       dom.newRoomSummaryMode.value = '';
       refreshNewRoomConfigSummary();
       await safeLoadState();
+    }
+
+    async function refreshRoomNames(roomId) {
+      const payload = roomId ? { room_id: roomId } : {};
+      const response = await api('/rooms/refresh-names', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      return response && response.refresh ? response.refresh : null;
     }
 
     function normalizeOptionalSelectValue(value) {
@@ -2477,6 +2493,21 @@ const html = String.raw`<!doctype html>
     dom.addRoomBtn.addEventListener('click', async function() {
       try {
         await addRoomSetting();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
+    dom.refreshRoomNamesBtn.addEventListener('click', async function() {
+      try {
+        const stats = await refreshRoomNames();
+        await safeLoadState();
+        alert(
+          'ルーム名の再取得が完了しました。'
+          + '\n対象: ' + Number(stats && stats.attempted || 0) + '件'
+          + '\n更新: ' + Number(stats && stats.refreshed || 0) + '件'
+          + '\n未取得: ' + Number(stats && stats.not_found || 0) + '件'
+        );
       } catch (e) {
         alert(e.message || String(e));
       }

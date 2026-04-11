@@ -370,6 +370,13 @@ Deno.serve(async (req) => {
       return json({ success: true, backfill: result }, 200)
     }
 
+    if (req.method === "POST" && path === "/rooms/refresh-names") {
+      const body = await parseJson(req).catch(() => ({}))
+      const roomId = isRecord(body) ? String(body.room_id ?? "").trim() : ""
+      const result = await refreshRoomNamesFromLine(supabase, roomId || null)
+      return json({ success: true, refresh: result }, 200)
+    }
+
     if (req.method === "DELETE" && path.startsWith("/settings/rooms/")) {
       const roomId = decodeURIComponent(path.replace("/settings/rooms/", ""))
       if (!roomId) {
@@ -887,6 +894,125 @@ async function fetchLineDisplayNameByUrl(
     const body = await response.json()
     const displayName = String(body?.displayName ?? "").trim()
     return displayName || null
+  } catch {
+    return null
+  }
+}
+
+async function refreshRoomNamesFromLine(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string | null,
+) {
+  const lineAccessToken = String(Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "").trim()
+  if (!lineAccessToken) {
+    throw { status: 500, message: "LINE_CHANNEL_ACCESS_TOKEN is not set." } satisfies AppError
+  }
+
+  const roomIds = new Set<string>()
+  if (roomId) {
+    roomIds.add(roomId)
+  } else {
+    const { data, error } = await supabase.rpc("get_room_overview")
+    if (error) {
+      throw { status: 500, message: `Failed to fetch room overview for name refresh: ${error.message}` } satisfies AppError
+    }
+    const rows = Array.isArray(data) ? data : []
+    for (const row of rows) {
+      const id = String((row as { room_id?: unknown })?.room_id ?? "").trim()
+      if (id) roomIds.add(id)
+    }
+  }
+
+  let refreshed = 0
+  let attempted = 0
+  let notFound = 0
+  const now = new Date().toISOString()
+  for (const id of roomIds) {
+    attempted += 1
+    const name = await fetchLineConversationNameByRoomId(id, lineAccessToken)
+    if (!name) {
+      notFound += 1
+      continue
+    }
+
+    const { error: settingsError } = await supabase
+      .from("room_summary_settings")
+      .update({
+        room_name: name,
+        updated_at: now,
+      })
+      .eq("room_id", id)
+    if (settingsError) {
+      throw { status: 500, message: `Failed to refresh room name in settings (${id}): ${settingsError.message}` } satisfies AppError
+    }
+
+    const { error: messagesError } = await supabase
+      .from("line_messages")
+      .update({ room_name: name })
+      .eq("room_id", id)
+    if (messagesError) {
+      throw { status: 500, message: `Failed to refresh room name in messages (${id}): ${messagesError.message}` } satisfies AppError
+    }
+    refreshed += 1
+  }
+
+  return {
+    attempted,
+    refreshed,
+    not_found: notFound,
+    generated_at: now,
+  }
+}
+
+async function fetchLineConversationNameByRoomId(
+  roomId: string,
+  lineAccessToken: string,
+): Promise<string | null> {
+  const normalizedRoomId = String(roomId ?? "").trim()
+  if (!normalizedRoomId) return null
+
+  if (normalizedRoomId.startsWith("C")) {
+    return await fetchLineConversationNameByUrl(
+      `https://api.line.me/v2/bot/group/${encodeURIComponent(normalizedRoomId)}/summary`,
+      lineAccessToken,
+      "groupName",
+    )
+  }
+  if (normalizedRoomId.startsWith("R")) {
+    return await fetchLineConversationNameByUrl(
+      `https://api.line.me/v2/bot/room/${encodeURIComponent(normalizedRoomId)}/summary`,
+      lineAccessToken,
+      "roomName",
+    )
+  }
+  if (normalizedRoomId.startsWith("U")) {
+    return await fetchLineConversationNameByUrl(
+      `https://api.line.me/v2/bot/profile/${encodeURIComponent(normalizedRoomId)}`,
+      lineAccessToken,
+      "displayName",
+    )
+  }
+  return null
+}
+
+async function fetchLineConversationNameByUrl(
+  url: string,
+  lineAccessToken: string,
+  key: "groupName" | "roomName" | "displayName",
+): Promise<string | null> {
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${lineAccessToken}`,
+      },
+    })
+    if (!response.ok) {
+      return null
+    }
+    const body = await response.json()
+    const value = String(body?.[key] ?? "").trim()
+    return value || null
   } catch {
     return null
   }
