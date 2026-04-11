@@ -401,8 +401,8 @@ const html = String.raw`<!doctype html>
     }
 
     .rooms-table {
-      width: max(100%, 1520px);
-      min-width: 1520px;
+      width: max(100%, 1420px);
+      min-width: 1420px;
       table-layout: fixed;
     }
 
@@ -412,13 +412,12 @@ const html = String.raw`<!doctype html>
     }
 
     .rooms-table th:nth-child(1), .rooms-table td:nth-child(1) { width: 120px; text-align: center; }
-    .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 220px; }
+    .rooms-table th:nth-child(2), .rooms-table td:nth-child(2) { width: 300px; }
     .rooms-table th:nth-child(3), .rooms-table td:nth-child(3) { width: 92px; text-align: center; }
-    .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 150px; }
-    .rooms-table th:nth-child(5), .rooms-table td:nth-child(5) { width: 190px; text-align: center; }
-    .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 170px; }
-    .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 180px; }
-    .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 260px; }
+    .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 190px; text-align: center; }
+    .rooms-table th:nth-child(5), .rooms-table td:nth-child(5) { width: 170px; }
+    .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 180px; }
+    .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 260px; }
 
     /* Keep ID / Display Name fixed while horizontally scrolling */
     .rooms-table td:nth-child(1),
@@ -450,6 +449,18 @@ const html = String.raw`<!doctype html>
     .rooms-table .room-hours {
       width: 100%;
       min-width: 0;
+    }
+
+    .rooms-table .room-name-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .rooms-table .room-last-post {
+      font-size: 0.75rem;
+      color: var(--muted);
+      line-height: 1.3;
     }
 
     .rooms-table .room-show-id {
@@ -986,7 +997,6 @@ const html = String.raw`<!doctype html>
                 <th>ID</th>
                 <th>表示名</th>
                 <th>未処理件数</th>
-                <th>最終投稿</th>
                 <th>設定</th>
                 <th>配信時刻</th>
                 <th>最終回集計</th>
@@ -1774,7 +1784,7 @@ const html = String.raw`<!doctype html>
       dom.roomTableBody.innerHTML = '';
       const rooms = Array.isArray(roomOverview) ? roomOverview : [];
       if (rooms.length === 0) {
-        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="8">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
+        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="7">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
         return;
       }
 
@@ -1831,9 +1841,8 @@ const html = String.raw`<!doctype html>
         tr.draggable = false;
         tr.innerHTML =
           '<td><span class="room-id-tools"><span class="room-drag-handle" draggable="true" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
-          '<td><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"></td>' +
+          '<td><div class="room-name-stack"><input class="input room-name" type="text" value="' + escapeHtml((setting && setting.room_name) || room.room_name || '') + '"><div class="room-last-post">最終投稿: ' + escapeHtml(formatDate(room.last_message_at)) + '</div></div></td>' +
           '<td>' + Number(room.pending_messages || 0) + '件</td>' +
-          '<td>' + formatDate(room.last_message_at) + '</td>' +
           '<td><button class="button room-config-open" type="button">設定</button><div class="room-config-badge ' + configToneClass + '">' + escapeHtml(configSummary) + '</div></td>' +
           '<td><input class="input room-hours" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : ROOM_DEFAULT_HOURS) + '"></td>' +
           '<td><select class="select room-summary-mode">' +
