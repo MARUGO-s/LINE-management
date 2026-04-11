@@ -417,9 +417,8 @@ const html = String.raw`<!doctype html>
     .rooms-table th:nth-child(4), .rooms-table td:nth-child(4) { width: 150px; }
     .rooms-table th:nth-child(5), .rooms-table td:nth-child(5) { width: 190px; text-align: center; }
     .rooms-table th:nth-child(6), .rooms-table td:nth-child(6) { width: 170px; }
-    .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 170px; }
-    .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 170px; }
-    .rooms-table th:nth-child(9), .rooms-table td:nth-child(9) { width: 238px; }
+    .rooms-table th:nth-child(7), .rooms-table td:nth-child(7) { width: 180px; }
+    .rooms-table th:nth-child(8), .rooms-table td:nth-child(8) { width: 260px; }
 
     /* Keep ID / Display Name fixed while horizontally scrolling */
     .rooms-table td:nth-child(1),
@@ -993,7 +992,6 @@ const html = String.raw`<!doctype html>
                 <th>最終投稿</th>
                 <th>設定</th>
                 <th>配信時刻</th>
-                <th>処理タイミング</th>
                 <th>最終回集計</th>
                 <th>操作</th>
               </tr>
@@ -1186,7 +1184,6 @@ const html = String.raw`<!doctype html>
     let isUserPermissionDirty = false;
     let activeUserRoomScopeRow = null;
     let activeRoomConfigRow = null;
-    const roomAutoSaveInFlight = new Set();
 
     function token() {
       return localStorage.getItem(TOKEN_KEY) || '';
@@ -1462,29 +1459,22 @@ const html = String.raw`<!doctype html>
       isUserPermissionDirty = true;
     }
 
-    function isAutoSaveToggle(target) {
-      return target.classList.contains('room-enabled')
-        || target.classList.contains('room-send-summary')
-        || target.classList.contains('room-tomorrow-reminder')
-        || target.classList.contains('room-media-file-access-enabled')
-        || target.classList.contains('room-calendar-auto-create')
-        || target.classList.contains('room-silent-auto-register')
-        || target.classList.contains('room-gmail-alert-enabled');
-    }
+    const roomAutoSaveTimers = new Map();
 
-    async function autoSaveRoomToggle(tr) {
-      const roomId = String(tr.dataset.roomId || '').trim();
+    function scheduleRoomAutoSave(tr, delayMs) {
+      const roomId = String(tr && tr.dataset ? tr.dataset.roomId || '' : '').trim();
       if (!roomId) return;
-      if (roomAutoSaveInFlight.has(roomId)) return;
-      roomAutoSaveInFlight.add(roomId);
-      try {
-        await saveRoomFromRow(tr);
-      } catch (error) {
-        await safeLoadState({ silent: true });
-        throw error;
-      } finally {
-        roomAutoSaveInFlight.delete(roomId);
-      }
+      const wait = Number.isFinite(Number(delayMs)) ? Math.max(0, Number(delayMs)) : 450;
+      const prev = roomAutoSaveTimers.get(roomId);
+      if (prev) clearTimeout(prev);
+      const timer = setTimeout(function() {
+        roomAutoSaveTimers.delete(roomId);
+        saveRoomFromRow(tr, { reload: false }).catch(function(error) {
+          alert(error.message || String(error));
+          safeLoadState({ silent: true });
+        });
+      }, wait);
+      roomAutoSaveTimers.set(roomId, timer);
     }
 
     async function safeLoadState(options) {
@@ -1802,7 +1792,7 @@ const html = String.raw`<!doctype html>
       dom.roomTableBody.innerHTML = '';
       const rooms = Array.isArray(roomOverview) ? roomOverview : [];
       if (rooms.length === 0) {
-        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="9">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
+        dom.roomTableBody.innerHTML = '<tr><td class="empty" colspan="8">ルーム情報がありません。最初のメッセージ受信後に表示されます。</td></tr>';
         return;
       }
 
@@ -1837,6 +1827,7 @@ const html = String.raw`<!doctype html>
         tr.dataset.roomCalendarAutoCreate = String(((setting && setting.calendar_ai_auto_create_enabled) !== false));
         tr.dataset.roomSilentAutoRegister = String((setting && setting.calendar_silent_auto_register_enabled === true));
         tr.dataset.roomGmailAlertEnabled = String((setting && setting.gmail_reservation_alert_enabled === true));
+        tr.dataset.messageCleanupTiming = String((setting && setting.message_cleanup_timing) || '');
         const configSummary = buildRoomConfigSummary({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
           send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
@@ -1863,18 +1854,12 @@ const html = String.raw`<!doctype html>
           '<td>' + formatDate(room.last_message_at) + '</td>' +
           '<td><button class="button room-config-open" type="button">設定</button><div class="room-config-badge ' + configToneClass + '">' + escapeHtml(configSummary) + '</div></td>' +
           '<td><input class="input room-hours" type="text" placeholder="空欄=全体設定" value="' + escapeHtml(setting && Array.isArray(setting.delivery_hours) ? setting.delivery_hours.join(',') : ROOM_DEFAULT_HOURS) + '"></td>' +
-          '<td><select class="select room-cleanup-timing">' +
-          '<option value="" ' + (((setting && setting.message_cleanup_timing) ? '' : 'selected')) + '>継承</option>' +
-          '<option value="after_each_delivery" ' + ((setting && setting.message_cleanup_timing === 'after_each_delivery') ? 'selected' : '') + '>配信ごとに処理</option>' +
-          '<option value="end_of_day" ' + ((setting && setting.message_cleanup_timing === 'end_of_day') ? 'selected' : '') + '>最終配信後に処理</option>' +
-          '</select></td>' +
           '<td><select class="select room-summary-mode">' +
           '<option value="" ' + (((setting && setting.last_delivery_summary_mode) ? '' : 'selected')) + '>継承</option>' +
           '<option value="independent" ' + ((setting && setting.last_delivery_summary_mode === 'independent') ? 'selected' : '') + '>各回独立</option>' +
           '<option value="daily_rollup" ' + ((setting && setting.last_delivery_summary_mode === 'daily_rollup') ? 'selected' : '') + '>1日まとめ</option>' +
           '</select></td>' +
           '<td><span class="row-actions">' +
-          '<button class="button primary room-save">保存</button>' +
           '<button class="button ghost room-reset">継承</button>' +
           '<button class="button warn room-delete">ルーム削除</button>' +
           '</span></td>';
@@ -2147,10 +2132,9 @@ const html = String.raw`<!doctype html>
       const roomId = tr.dataset.roomId || '';
       const nameInput = tr.querySelector('.room-name');
       const hoursInput = tr.querySelector('.room-hours');
-      const cleanupTimingInput = tr.querySelector('.room-cleanup-timing');
       const summaryModeInput = tr.querySelector('.room-summary-mode');
       const roomConfig = getRoomConfigStateFromRow(tr);
-      const roomCleanupTiming = normalizeOptionalSelectValue(cleanupTimingInput ? cleanupTimingInput.value : '');
+      const roomCleanupTiming = normalizeOptionalSelectValue(String(tr.dataset.messageCleanupTiming || ''));
       const roomSummaryMode = normalizeOptionalSelectValue(summaryModeInput ? summaryModeInput.value : '');
       validateRoomModeCombination(roomCleanupTiming, roomSummaryMode);
 
@@ -2194,7 +2178,8 @@ const html = String.raw`<!doctype html>
       await safeLoadState();
     }
 
-    async function saveRoomFromRow(tr) {
+    async function saveRoomFromRow(tr, options) {
+      const opts = options || {};
       const visualIndex = Array.from(dom.roomTableBody.querySelectorAll('tr')).indexOf(tr);
       const payload = buildRoomSettingsPayloadFromRow(tr, visualIndex >= 0 ? visualIndex : 0);
 
@@ -2203,7 +2188,9 @@ const html = String.raw`<!doctype html>
         body: JSON.stringify(payload),
       });
       isRoomDirty = false;
-      await safeLoadState();
+      if (opts.reload !== false) {
+        await safeLoadState();
+      }
     }
 
     async function resetRoomToGlobal(tr) {
@@ -2502,10 +2489,7 @@ const html = String.raw`<!doctype html>
       if (!tr) return;
 
       try {
-        if (target.classList.contains('room-save')) {
-          await saveRoomFromRow(tr);
-          alert('ルーム設定を保存しました。');
-        } else if (target.classList.contains('room-reset')) {
+        if (target.classList.contains('room-reset')) {
           await resetRoomToGlobal(tr);
           alert('ルーム設定を削除し、全体設定継承に戻しました。');
         } else if (target.classList.contains('room-delete')) {
@@ -2524,13 +2508,27 @@ const html = String.raw`<!doctype html>
     dom.roomTableBody.addEventListener('input', function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (target.closest('tr')) markRoomDirty();
+      const tr = target.closest('tr');
+      if (!tr) return;
+      markRoomDirty();
+      if (target.classList.contains('room-name') || target.classList.contains('room-hours')) {
+        scheduleRoomAutoSave(tr, 500);
+      }
     });
 
     dom.roomTableBody.addEventListener('change', function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (target.closest('tr')) markRoomDirty();
+      const tr = target.closest('tr');
+      if (!tr) return;
+      markRoomDirty();
+      if (
+        target.classList.contains('room-name') ||
+        target.classList.contains('room-hours') ||
+        target.classList.contains('room-summary-mode')
+      ) {
+        scheduleRoomAutoSave(tr, 0);
+      }
     });
 
     let draggingRoomRow = null;
