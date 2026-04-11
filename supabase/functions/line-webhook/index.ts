@@ -207,6 +207,11 @@ type RoomReplyPolicy = {
   calendarAiAutoCreateEnabled: boolean
 }
 
+type CalendarSourceMeta = {
+  roomName: string | null
+  userName: string | null
+}
+
 type SearchMessageRow = {
   room_id: string
   room_label?: string | null
@@ -369,10 +374,13 @@ Deno.serve(async (req) => {
 
       // Determine room/group ID or user ID as fallback
       const source = event.source || {}
+      const sourceType = String(source?.type ?? '').trim().toLowerCase()
+      const isDirectUserChat = sourceType === 'user'
       const roomId = String(source.groupId || source.roomId || source.userId || 'unknown')
       const userId = source.userId ? String(source.userId) : null
       const replyToken = String(event.replyToken ?? '')
       let aiAutoCreateReply: string | null = null
+      let senderDisplayName: string | null = null
 
       if (!roomNameSyncDone.has(roomId)) {
         roomNameSyncDone.add(roomId)
@@ -383,15 +391,25 @@ Deno.serve(async (req) => {
         roomId,
         roomReplyPolicyCache,
       )
+      if (isDirectUserChat) {
+        roomReplyPolicy = buildDirectUserRoomPolicy(roomReplyPolicy)
+      }
       const shouldPersistMessage = shouldPersistLineMessage(source, event.message)
       const storableMediaType = normalizeStorableLineMediaType(event.message?.type)
       const shouldStoreMediaFile = !!storableMediaType && roomReplyPolicy.mediaFileAccessEnabled
 
       if (event.message?.type === 'text') {
+        if (lineAccessToken && !senderDisplayName) {
+          senderDisplayName = await fetchLineMessageSenderDisplayName(source, lineAccessToken)
+        }
+        const calendarSourceMeta: CalendarSourceMeta = {
+          roomName: roomReplyPolicy.roomName,
+          userName: senderDisplayName,
+        }
         const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
         const text = String(event.message.text ?? '').trim()
         const quotedMessageId = extractQuotedLineMessageId(event.message)
-        if (roomReplyPolicy.requiresRegistration) {
+        if (!isDirectUserChat && roomReplyPolicy.requiresRegistration) {
           if (!lineAccessToken) {
             console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room registration guidance.')
             continue
@@ -410,7 +428,9 @@ Deno.serve(async (req) => {
           }
           continue
         }
-        const capabilityStatusReply = buildRoomCapabilityStatusReply(roomReplyPolicy, text)
+        const capabilityStatusReply = isDirectUserChat
+          ? null
+          : buildRoomCapabilityStatusReply(roomReplyPolicy, text)
         if (capabilityStatusReply) {
           if (!lineAccessToken) {
             console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room capability status.')
@@ -438,6 +458,7 @@ Deno.serve(async (req) => {
               calendarEnvState.env,
               roomId,
               userId,
+              calendarSourceMeta,
             )
             if (confirmationReply) {
               if (!roomCanReply) {
@@ -497,6 +518,13 @@ Deno.serve(async (req) => {
                 console.error('Failed to reply calendar update conversation:', replyResult.error)
               }
               continue
+            }
+            if (looksLikeCalendarUpdateConversationText(text)) {
+              aiAutoCreateReply = [
+                '予定変更の対象を特定できませんでした。',
+                '先に「予定確認」で候補を表示してから、対象メッセージに返信して変更してください。',
+                '例: 「1件目の時間を19:00に変更」「先ほどの予定を5月7日に戻して」',
+              ].join('\n')
             }
           }
 
@@ -648,6 +676,7 @@ Deno.serve(async (req) => {
               supabase,
               roomId,
               userId,
+              calendarSourceMeta,
             )
             if (!roomCanReply) {
               continue
@@ -768,6 +797,7 @@ Deno.serve(async (req) => {
                   calendarEnvState.env,
                   roomId,
                   userId,
+                  calendarSourceMeta,
                 )
                 if (roomCanReply) {
                   aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${reply}`
@@ -786,6 +816,8 @@ Deno.serve(async (req) => {
                   calendarEnvState.env,
                   roomId,
                   userId,
+                  undefined,
+                  calendarSourceMeta,
                 )
                 if (!silentResult.ok) {
                   console.error('Silent auto-create failed:', silentResult.error)
@@ -818,6 +850,13 @@ Deno.serve(async (req) => {
             shouldOfferMessageSearchGuidance(text)
           ) {
             aiAutoCreateReply = buildMessageSearchGuidanceReply(text)
+          }
+          if (
+            !aiAutoCreateReply &&
+            roomCanReply &&
+            shouldOfferUnknownIntentFallback(text)
+          ) {
+            aiAutoCreateReply = buildUnknownIntentReply()
           }
         }
       }
@@ -854,6 +893,10 @@ Deno.serve(async (req) => {
             )
           }
         }
+      }
+
+      if (!aiAutoCreateReply && isDirectUserChat) {
+        aiAutoCreateReply = buildDirectUserFallbackReply(event.message)
       }
 
       if (aiAutoCreateReply) {
@@ -1385,6 +1428,43 @@ async function fetchLineConversationDisplayName(source: any, lineAccessToken: st
   return null
 }
 
+async function fetchLineMessageSenderDisplayName(source: any, lineAccessToken: string): Promise<string | null> {
+  const sourceType = String(source?.type ?? '').trim().toLowerCase()
+  const userId = String(source?.userId ?? '').trim()
+  if (!userId) return null
+  if (!lineAccessToken) return null
+
+  if (sourceType === 'group') {
+    const groupId = String(source?.groupId ?? '').trim()
+    if (!groupId) return null
+    const profile = await fetchLineJson(
+      `https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(userId)}`,
+      lineAccessToken,
+    )
+    return normalizeDisplayName(profile?.displayName)
+  }
+
+  if (sourceType === 'room') {
+    const roomId = String(source?.roomId ?? '').trim()
+    if (!roomId) return null
+    const profile = await fetchLineJson(
+      `https://api.line.me/v2/bot/room/${encodeURIComponent(roomId)}/member/${encodeURIComponent(userId)}`,
+      lineAccessToken,
+    )
+    return normalizeDisplayName(profile?.displayName)
+  }
+
+  if (sourceType === 'user') {
+    const profile = await fetchLineJson(
+      `https://api.line.me/v2/bot/profile/${encodeURIComponent(userId)}`,
+      lineAccessToken,
+    )
+    return normalizeDisplayName(profile?.displayName)
+  }
+
+  return null
+}
+
 async function fetchLineJson(url: string, lineAccessToken: string): Promise<any | null> {
   try {
     const response = await fetch(url, {
@@ -1420,12 +1500,31 @@ function shouldPersistLineMessage(source: any, message: any): boolean {
   if (!senderUserId) return false
   // Optional hard guard: when bot user id is configured, never persist bot-origin messages.
   if (botUserId && senderUserId === botUserId) return false
-
-  if (message?.type === 'text') {
-    const text = String(message?.text ?? '').trim()
-    if (isLikelyBotConversationText(text)) return false
-  }
   return true
+}
+
+function buildDirectUserRoomPolicy(base: RoomReplyPolicy): RoomReplyPolicy {
+  return {
+    ...base,
+    requiresRegistration: false,
+    isEnabled: true,
+    botReplyEnabled: true,
+    messageSearchEnabled: true,
+    messageSearchLibraryEnabled: true,
+    mediaFileAccessEnabled: false,
+    calendarAiAutoCreateEnabled: true,
+  }
+}
+
+function buildDirectUserFallbackReply(message: any): string {
+  const type = String(message?.type ?? '').trim().toLowerCase()
+  if (type !== 'text') {
+    return 'メッセージありがとうございます。内容を正確に解釈するため、テキストで送ってください。'
+  }
+  return [
+    'うまく意図を解釈できませんでした。',
+    '会話検索なら「会話検索 キーワード」、予定確認なら「予定確認 5月」、予定変更なら「1件目の時間を19:00に変更」の形式で送ってください。',
+  ].join('\n')
 }
 
 async function loadMessageRetentionDays(
@@ -2440,6 +2539,26 @@ function buildMessageSearchGuidanceReply(text: string): string {
   return [
     '履歴検索の意図かもしれないですが、通常文では自動検索しない設定です。',
     `会話検索する場合は「会話検索 ${exampleKeyword}」の形式で送ってください。`,
+  ].join('\n')
+}
+
+function shouldOfferUnknownIntentFallback(text: string): boolean {
+  const normalized = normalizeForRuleParsing(String(text ?? '')).trim()
+  if (!normalized) return false
+  if (!looksLikeBotInteractionRequest(normalized)) return false
+  if (parseCalendarCommand(normalized).matched) return false
+  if (isExplicitBotCommandText(normalized)) return true
+  if (looksLikeMessageSearchQuestion(normalized)) return true
+  if (looksLikeCalendarListQuestion(normalized)) return true
+  if (looksLikeCalendarUpdateConversationText(normalized)) return true
+  return true
+}
+
+function buildUnknownIntentReply(): string {
+  return [
+    'ごめんなさい。内容を正確に理解できませんでした。',
+    'もう少し具体的に、対象・日時・やりたい操作を教えてください。',
+    '例: 「会話検索 ペローニ」「予定確認 5月」「1件目の時間を19:00に変更」',
   ].join('\n')
 }
 
@@ -3803,12 +3922,7 @@ function extractCorrectionTitle(rawText: string): string | undefined {
       const toRaw = String(replaceMatch[2] ?? '')
         .replace(/^[\s、,。．:：\-]+/, '')
         .trim()
-      const toCompact = normalizeForRuleParsing(toRaw).replace(/\s+/g, '')
-      const looksLikeDateOrTime =
-        isValidDate(toRaw)
-        || isValidTime(toRaw)
-        || !!parseFlexibleTimeToken(toRaw)
-        || /^(\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?|\d{1,2}月\d{1,2}日)$/.test(toCompact)
+      const looksLikeDateOrTime = isLikelyDateOrTimeExpressionForTitleCandidate(toRaw)
       if (!looksLikeDateOrTime) {
         const cleaned = normalizeEventTitleCandidate(toRaw) || cleanCalendarTitle(toRaw)
         if (cleaned && cleaned !== '予定') return cleaned
@@ -3820,12 +3934,7 @@ function extractCorrectionTitle(rawText: string): string | undefined {
   const directToMatch = normalized.match(directToPattern)
   if (directToMatch && directToMatch[1]) {
     const candidateRaw = String(directToMatch[1]).trim()
-    const candidateCompact = normalizeForRuleParsing(candidateRaw).replace(/\s+/g, '')
-    const looksLikeDateOrTime =
-      isValidDate(candidateRaw)
-      || isValidTime(candidateRaw)
-      || !!parseFlexibleTimeToken(candidateRaw)
-      || /^(\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?|\d{1,2}月\d{1,2}日)$/.test(candidateCompact)
+    const looksLikeDateOrTime = isLikelyDateOrTimeExpressionForTitleCandidate(candidateRaw)
     const hasFieldWord = /(時間|時刻|開始|日付|日にち|日時|場所|会場|所要|内容|詳細|説明|duration|location|description)/i.test(candidateRaw)
     if (!looksLikeDateOrTime && !hasFieldWord) {
       const cleaned = normalizeEventTitleCandidate(candidateRaw) || cleanCalendarTitle(candidateRaw)
@@ -3833,6 +3942,19 @@ function extractCorrectionTitle(rawText: string): string | undefined {
     }
   }
   return undefined
+}
+
+function isLikelyDateOrTimeExpressionForTitleCandidate(raw: string): boolean {
+  const normalized = normalizeForRuleParsing(String(raw ?? '')).trim()
+  if (!normalized) return false
+  const compact = normalized.replace(/\s+/g, '')
+  return (
+    isValidDate(normalized)
+    || isValidTime(normalized)
+    || !!parseFlexibleTimeToken(normalized)
+    || /^(\d{4}[\/.\-年]\d{1,2}[\/.\-月]\d{1,2}日?|\d{1,2}月\d{1,2}日|\d{1,2}日)$/.test(compact)
+    || /(^|[^\d])\d{1,2}日(?:$|[^\d])/u.test(compact)
+  )
 }
 
 function extractCorrectionDescription(rawText: string): string | undefined {
@@ -3891,6 +4013,13 @@ function extractCorrectionDate(rawText: string, baseDate = new Date()): string |
   }
 
   match = normalized.match(/(?:日付|日にち|日程|日時)\s*(?:を|は|:|：)?\s*(\d{1,2})日/)
+  if (match) {
+    const { year, month } = getJstYearMonth(baseDate)
+    const day = Number(match[1])
+    return toIsoDateStringSafe(year, month, day)
+  }
+
+  match = normalized.match(/(\d{1,2})日(?:に|へ)?(?:変更|修正|更新|して|にして|戻して|に戻して|へ戻して)/)
   if (match) {
     const { year, month } = getJstYearMonth(baseDate)
     const day = Number(match[1])
@@ -4083,6 +4212,7 @@ async function tryHandlePendingCalendarConfirmation(
   env: CalendarEnv,
   roomId: string,
   userId: string | null,
+  sourceMeta?: CalendarSourceMeta,
 ): Promise<string | null> {
   const pending = await fetchPendingCalendarConfirmation(supabase, roomId, userId)
   if (!pending) return null
@@ -4138,7 +4268,7 @@ async function tryHandlePendingCalendarConfirmation(
     title: resolvedPendingTitle,
     ...(resolvedPendingLocation ? { location: resolvedPendingLocation } : {}),
   }
-  const result = await createCalendarEvent(command, env, roomId, userId)
+  const result = await createCalendarEvent(command, env, roomId, userId, undefined, sourceMeta)
   if (!result.ok) {
     return `予定登録に失敗しました。${result.error}\n再試行する場合は「はい」、中止する場合は「いいえ」を送ってください。`
   }
@@ -4192,7 +4322,9 @@ function looksLikeCalendarUpdateConversationText(rawText: string): boolean {
   const hasEventWordCue = /(試飲会|打ち合わせ|打合せ|会議|ミーティング|meeting|mtg|商談|面談|イベント|予約|アポ|グランドオープン|オープン|ランチ|ディナー|研修|セミナー|講習会|説明会)/i
     .test(normalized)
   const hasTargetCue = extractPendingCalendarTargetIndex(rawText) != null
+  const hasDayOnlyUpdateCue = /(\d{1,2})日(?:に|へ)?(?:変更|修正|更新|して|にして|戻して|に戻して|へ戻して)/.test(compact)
   if (hasTitleRewriteCue) return true
+  if (hasDayOnlyUpdateCue) return true
   if (hasFieldCue && (hasChangeCue || hasAssignmentCue || hasTargetCue)) return true
   if (hasEventWordCue && hasChangeCue) return true
   if (hasTargetCue && hasChangeCue) return true
@@ -4285,6 +4417,7 @@ function extractCalendarDurationForUpdate(rawText: string): number | null {
 function buildCalendarUpdateCommandFromConversation(
   rawText: string,
   eventId: string,
+  baseDate: Date = new Date(),
 ): { command: CalendarUpdateCommand | null; guidance?: string } {
   const text = String(rawText ?? '').trim()
   if (!text) return { command: null }
@@ -4293,7 +4426,7 @@ function buildCalendarUpdateCommandFromConversation(
   const dateFromSlot = slot?.date
   const timeFromSlot = slot?.time
   const durationFromSlot = slot?.durationMin
-  const dateOnly = dateFromSlot ? null : extractCorrectionDate(text)
+  const dateOnly = dateFromSlot ? null : extractCorrectionDate(text, baseDate)
   const timeOnly = timeFromSlot ? null : extractCorrectionTime(text)
   const explicitTitle = extractCorrectionTitle(text)
   const explicitDescription = extractCorrectionDescription(text)
@@ -4419,6 +4552,10 @@ async function tryHandlePendingCalendarUpdateConversation(
   quotedMessageId: string | null,
 ): Promise<string | null> {
   if (!looksLikeCalendarUpdateConversationText(text)) return null
+  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
+  const hasExplicitUpdateCue = /(変更|修正|更新|戻して|に戻して|へ戻して|直して|直す|ずらして|ずらす|リスケ)/.test(compact)
+  // Guard: when user sends a fresh event announcement (date/time + event), prefer new registration flow.
+  if (!hasExplicitUpdateCue && looksLikeSingleEventAnnouncement(text)) return null
 
   const pending = await fetchPendingCalendarUpdateContext(supabase, roomId, userId)
   if (!pending) return null
@@ -4432,7 +4569,6 @@ async function tryHandlePendingCalendarUpdateConversation(
   const hasQuotedContext = !!quotedMessageId && pending.source_line_message_ids.length > 0
   const quotedMessageMatched = !hasQuotedContext || pending.source_line_message_ids.includes(String(quotedMessageId))
 
-  const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   if (/^(いいえ|no|n|キャンセル|中止|やめる)$/.test(compact)) {
     await resolvePendingCalendarUpdateContext(supabase, pending, 'cancelled')
     return '予定変更の操作をキャンセルしました。'
@@ -4456,7 +4592,12 @@ async function tryHandlePendingCalendarUpdateConversation(
     return null
   }
 
-  const updateCommand = buildCalendarUpdateCommandFromConversation(text, selected.entry.event_id)
+  const selectedBaseDate = parseBaseDateForCalendarUpdate(selected.entry.date)
+  const updateCommand = buildCalendarUpdateCommandFromConversation(
+    text,
+    selected.entry.event_id,
+    selectedBaseDate,
+  )
   let resolvedCommand = updateCommand.command
   const shouldTryAiFallback =
     !!groqApiKey &&
@@ -4486,6 +4627,15 @@ async function tryHandlePendingCalendarUpdateConversation(
     return updateCommand.guidance ?? null
   }
   return await updateCalendarEventReply(resolvedCommand, env)
+}
+
+function parseBaseDateForCalendarUpdate(date: string | null | undefined): Date {
+  const normalized = String(date ?? '').trim()
+  if (isValidDate(normalized)) {
+    const [year, month, day] = normalized.split('-').map(Number)
+    return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0))
+  }
+  return new Date()
 }
 
 async function tryHandlePendingLibrarySearchConfirmation(
@@ -5674,6 +5824,7 @@ async function buildCalendarReplyMessage(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
   userId: string | null,
+  sourceMeta?: CalendarSourceMeta,
 ): Promise<string> {
   if (parseResult.error) {
     return parseResult.error
@@ -5696,6 +5847,7 @@ async function buildCalendarReplyMessage(
         calendarEnvState.env,
         roomId,
         userId,
+        sourceMeta,
       )
     }
     if (parseResult.command.kind === 'update') {
@@ -5742,8 +5894,9 @@ async function createCalendarEventReply(
   env: CalendarEnv,
   roomId: string,
   userId: string | null,
+  sourceMeta?: CalendarSourceMeta,
 ): Promise<string> {
-  const result = await createCalendarEvent(command, env, roomId, userId)
+  const result = await createCalendarEvent(command, env, roomId, userId, undefined, sourceMeta)
   if (!result.ok) {
     return `予定登録に失敗しました。${result.error}`
   }
@@ -5816,12 +5969,11 @@ async function updateCalendarEvent(
     payload.location = command.location
   }
   const existingDescriptionRaw = String(existing.description ?? '')
-  const existingMetadataLines = extractCalendarSourceMetadataLines(existingDescriptionRaw)
   if (command.clearDescription) {
-    payload.description = composeCalendarDescriptionWithMetadata('', existingMetadataLines)
+    payload.description = ''
   } else if (command.description) {
     const userContent = stripCalendarSourceMetadataLines(command.description)
-    payload.description = composeCalendarDescriptionWithMetadata(userContent, existingMetadataLines)
+    payload.description = userContent
   }
 
   const needsScheduleUpdate =
@@ -5898,6 +6050,7 @@ async function createCalendarEvent(
   roomId: string,
   userId: string | null,
   providedAccessToken?: string,
+  sourceMeta?: CalendarSourceMeta,
 ): Promise<CalendarCreateResult> {
   const normalizedStartTime = normalizeTimeToHhMm(command.time)
   if (!normalizedStartTime) {
@@ -5927,7 +6080,10 @@ async function createCalendarEvent(
     body: JSON.stringify({
       summary: command.title,
       ...(command.location ? { location: command.location } : {}),
-      description: buildCalendarSourceMetadataLines(roomId, userId).join('\n'),
+      description: buildCalendarSourceMetadataLines(roomId, userId, sourceMeta).join('\n'),
+      extendedProperties: {
+        private: buildCalendarSourceMetadataMap(roomId, userId, sourceMeta),
+      },
       start: {
         dateTime: startDateTimeLocal,
         timeZone: CALENDAR_CREATE_TIMEZONE,
@@ -6454,9 +6610,10 @@ function sanitizeEventDescriptionForList(raw: string): string {
     .filter((line) => !isCalendarSourceMetadataLine(line))
 
   const merged = normalizeInlineText(lines.join(' / '))
-  if (!merged) return ''
-  if (merged.length > 140) return `${merged.slice(0, 140)}...`
-  return merged
+  const cleaned = stripCalendarSourceMetadataFragments(merged)
+  if (!cleaned) return ''
+  if (cleaned.length > 140) return `${cleaned.slice(0, 140)}...`
+  return cleaned
 }
 
 function normalizeInlineText(raw: string): string {
@@ -6466,14 +6623,34 @@ function normalizeInlineText(raw: string): string {
 function isCalendarSourceMetadataLine(rawLine: string): boolean {
   const line = normalizeInlineText(String(rawLine ?? ''))
   if (!line) return false
-  if (/^source\s*:\s*line-webhook\b/i.test(line)) return true
+  if (/^source\s*[:：=]\s*line-webhook\b/i.test(line)) return true
   if (
-    /^LINE\s+(?:room_id|room_name|room_label|group_id|group_name|user_id|user_name|sender_name|poster_name|投稿者|送信者)\s*:/i
+    /^LINE\s+(?:room_id|room_name|room_label|group_id|group_name|user_id|user_name|sender_name|poster_name|投稿者|送信者)\s*[:：=]/i
+      .test(line)
+  ) {
+    return true
+  }
+  if (
+    /^(?:room_id|user_id|group_id|room_name|group_name|sender_name|poster_name)\s*[:：=]/i
       .test(line)
   ) {
     return true
   }
   return false
+}
+
+function stripCalendarSourceMetadataFragments(text: string): string {
+  const raw = normalizeInlineText(String(text ?? ''))
+  if (!raw) return ''
+  const cleaned = raw
+    .replace(/(?:^|[\/\s])source\s*[:：=]\s*line-webhook(?:$|[\/\s])/ig, ' ')
+    .replace(/(?:^|[\/\s])LINE\s+(?:room_id|room_name|room_label|group_id|group_name|user_id|user_name|sender_name|poster_name|投稿者|送信者)\s*[:：=]\s*[^\s/]+/ig, ' ')
+    .replace(/(?:^|[\/\s])(?:room_id|user_id|group_id)\s*[:：=]\s*[^\s/]+/ig, ' ')
+    .replace(/\s*\/\s*\/+\s*/g, ' / ')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/^\s*\/\s*|\s*\/\s*$/g, '')
+    .trim()
+  return cleaned
 }
 
 function extractCalendarSourceMetadataLines(rawDescription: string): string[] {
@@ -6501,12 +6678,32 @@ function stripCalendarSourceMetadataLines(rawDescription: string): string {
   return lines.join('\n').trim()
 }
 
-function buildCalendarSourceMetadataLines(roomId: string, userId: string | null): string[] {
+function buildCalendarSourceMetadataLines(
+  roomId: string,
+  userId: string | null,
+  sourceMeta?: CalendarSourceMeta,
+): string[] {
+  const roomName = normalizeDisplayName(sourceMeta?.roomName) ?? '（未取得）'
+  const userName = normalizeDisplayName(sourceMeta?.userName) ?? '（未取得）'
   return [
-    `LINE room_id: ${roomId}`,
-    `LINE user_id: ${userId ?? 'unknown'}`,
+    `LINE room_name: ${roomName}`,
+    `LINE user_name: ${userName}`,
     'source: line-webhook',
   ]
+}
+
+function buildCalendarSourceMetadataMap(
+  roomId: string,
+  userId: string | null,
+  sourceMeta?: CalendarSourceMeta,
+): Record<string, string> {
+  return {
+    line_room_id: String(roomId ?? ''),
+    line_user_id: String(userId ?? 'unknown'),
+    line_room_name: normalizeDisplayName(sourceMeta?.roomName) ?? '',
+    line_user_name: normalizeDisplayName(sourceMeta?.userName) ?? '',
+    source: 'line-webhook',
+  }
 }
 
 function composeCalendarDescriptionWithMetadata(
