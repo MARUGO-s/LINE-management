@@ -906,10 +906,6 @@ const html = String.raw`<!doctype html>
             <label class="switch"><input id="globalEnabled" type="checkbox">配信を有効化</label>
             <div class="controls" style="margin-top:8px;">
               <input id="globalHoursInput" class="input" type="text" placeholder="例: 12,17,23">
-              <select id="messageCleanupTiming" class="select" aria-label="メッセージ処理タイミング">
-                <option value="after_each_delivery">配信成功ごとに処理済み化</option>
-                <option value="end_of_day">1日の最終配信後に処理済み化</option>
-              </select>
               <select id="lastDeliverySummaryMode" class="select" aria-label="最終配信の集計方式">
                 <option value="independent">各回独立で要約（従来）</option>
                 <option value="daily_rollup">最終配信のみ1日まとめ</option>
@@ -1072,11 +1068,6 @@ const html = String.raw`<!doctype html>
         <label class="room-scope-option"><input id="newRoomGmailAlertEnabled" type="checkbox">Gmail予約通知</label>
       </div>
       <div class="controls" style="margin-top:10px;">
-        <select id="newRoomCleanupTiming" class="select" aria-label="ルーム処理タイミング">
-          <option value="">処理: 全体設定を継承</option>
-          <option value="after_each_delivery">処理: 配信成功ごと</option>
-          <option value="end_of_day">処理: 1日の最終配信後</option>
-        </select>
         <select id="newRoomSummaryMode" class="select" aria-label="ルーム最終配信の集計方式">
           <option value="">最終回: 全体設定を継承</option>
           <option value="independent">最終回: 各回独立</option>
@@ -1116,7 +1107,6 @@ const html = String.raw`<!doctype html>
       gmailAccountMeta: document.getElementById('gmailAccountMeta'),
       globalEnabled: document.getElementById('globalEnabled'),
       globalHoursInput: document.getElementById('globalHoursInput'),
-      messageCleanupTiming: document.getElementById('messageCleanupTiming'),
       lastDeliverySummaryMode: document.getElementById('lastDeliverySummaryMode'),
       messageRetentionDays: document.getElementById('messageRetentionDays'),
       tomorrowReminderEnabled: document.getElementById('tomorrowReminderEnabled'),
@@ -1145,7 +1135,6 @@ const html = String.raw`<!doctype html>
       newRoomCalendarAutoCreate: document.getElementById('newRoomCalendarAutoCreate'),
       newRoomSilentAutoRegister: document.getElementById('newRoomSilentAutoRegister'),
       newRoomGmailAlertEnabled: document.getElementById('newRoomGmailAlertEnabled'),
-      newRoomCleanupTiming: document.getElementById('newRoomCleanupTiming'),
       newRoomSummaryMode: document.getElementById('newRoomSummaryMode'),
       openNewRoomConfigBtn: document.getElementById('openNewRoomConfigBtn'),
       newRoomConfigSummary: document.getElementById('newRoomConfigSummary'),
@@ -1233,17 +1222,12 @@ const html = String.raw`<!doctype html>
         (dom.newRoomCalendarAutoCreate.checked ? 1 : 0) +
         (dom.newRoomSilentAutoRegister.checked ? 1 : 0) +
         (dom.newRoomGmailAlertEnabled.checked ? 1 : 0);
-      const cleanup = dom.newRoomCleanupTiming.value === 'end_of_day'
-        ? '最終配信後'
-        : dom.newRoomCleanupTiming.value === 'after_each_delivery'
-        ? '配信ごと'
-        : '継承';
       const summary = dom.newRoomSummaryMode.value === 'daily_rollup'
         ? '1日まとめ'
         : dom.newRoomSummaryMode.value === 'independent'
         ? '各回独立'
         : '継承';
-      return enabledCount + '/7 有効 ・ 処理:' + cleanup + ' ・ 最終回:' + summary;
+      return enabledCount + '/7 有効 ・ 最終回:' + summary;
     }
 
     function refreshNewRoomConfigSummary() {
@@ -1520,9 +1504,6 @@ const html = String.raw`<!doctype html>
       dom.globalHoursInput.value = Array.isArray(settings.delivery_hours)
         ? settings.delivery_hours.join(',')
         : '12,17,23';
-      dom.messageCleanupTiming.value = settings.message_cleanup_timing === 'end_of_day'
-        ? 'end_of_day'
-        : 'after_each_delivery';
       dom.lastDeliverySummaryMode.value = settings.last_delivery_summary_mode === 'daily_rollup'
         ? 'daily_rollup'
         : 'independent';
@@ -1545,7 +1526,6 @@ const html = String.raw`<!doctype html>
         : '19';
       dom.globalMeta.textContent =
         '配信: ' + count + '回/日'
-        + '  |  消去: ' + cleanupTimingLabel(dom.messageCleanupTiming.value)
         + '  |  最終回: ' + summaryModeLabel(dom.lastDeliverySummaryMode.value)
         + '\n'
         + '会話保持: ' + messageRetentionLabel(dom.messageRetentionDays.value)
@@ -2076,7 +2056,7 @@ const html = String.raw`<!doctype html>
       const payload = {
         is_enabled: !!dom.globalEnabled.checked,
         delivery_hours: parseHoursInput(dom.globalHoursInput.value, false),
-        message_cleanup_timing: dom.messageCleanupTiming.value,
+        message_cleanup_timing: 'end_of_day',
         last_delivery_summary_mode: dom.lastDeliverySummaryMode.value,
         message_retention_days: Number(dom.messageRetentionDays.value),
         calendar_tomorrow_reminder_enabled: !!dom.tomorrowReminderEnabled.checked,
@@ -2094,13 +2074,9 @@ const html = String.raw`<!doctype html>
     }
 
     function validateGlobalModeCombination() {
-      if (dom.lastDeliverySummaryMode.value === 'daily_rollup' && dom.messageCleanupTiming.value !== 'end_of_day') {
-        throw new Error('「最終配信のみ1日まとめ」を使う場合、処理タイミングは「1日の最終配信後に処理済み化」を選択してください。');
+      if (dom.lastDeliverySummaryMode.value !== 'daily_rollup' && dom.lastDeliverySummaryMode.value !== 'independent') {
+        throw new Error('最終回集計方式の値が不正です。');
       }
-    }
-
-    function cleanupTimingLabel(value) {
-      return value === 'end_of_day' ? '1日の最終配信後に処理' : '配信成功ごとに処理';
     }
 
     function summaryModeLabel(value) {
@@ -2136,7 +2112,7 @@ const html = String.raw`<!doctype html>
       const hoursInput = tr.querySelector('.room-hours');
       const summaryModeInput = tr.querySelector('.room-summary-mode');
       const roomConfig = getRoomConfigStateFromRow(tr);
-      const roomCleanupTiming = normalizeOptionalSelectValue(String(tr.dataset.messageCleanupTiming || ''));
+      const roomCleanupTiming = null;
       const roomSummaryMode = normalizeOptionalSelectValue(summaryModeInput ? summaryModeInput.value : '');
       validateRoomModeCombination(roomCleanupTiming, roomSummaryMode);
 
@@ -2239,7 +2215,7 @@ const html = String.raw`<!doctype html>
         calendar_silent_auto_register_enabled: !!dom.newRoomSilentAutoRegister.checked,
         gmail_reservation_alert_enabled: !!dom.newRoomGmailAlertEnabled.checked,
         delivery_hours: parseHoursInput(dom.newRoomHours.value, true),
-        message_cleanup_timing: normalizeOptionalSelectValue(dom.newRoomCleanupTiming.value),
+        message_cleanup_timing: null,
         last_delivery_summary_mode: normalizeOptionalSelectValue(dom.newRoomSummaryMode.value),
         room_sort_order: Array.from(dom.roomTableBody.querySelectorAll('tr')).length,
       };
@@ -2253,7 +2229,6 @@ const html = String.raw`<!doctype html>
       dom.newRoomName.value = '';
       dom.newRoomHours.value = '';
       applyNewRoomDefaultCheckboxes();
-      dom.newRoomCleanupTiming.value = '';
       dom.newRoomSummaryMode.value = '';
       refreshNewRoomConfigSummary();
       await safeLoadState();
@@ -2274,10 +2249,7 @@ const html = String.raw`<!doctype html>
 
     function validateRoomModeCombination(roomCleanupTiming, roomSummaryMode) {
       if (roomSummaryMode !== 'daily_rollup') return;
-      const fallbackCleanup =
-        (currentState && currentState.global_settings && currentState.global_settings.message_cleanup_timing)
-        || dom.messageCleanupTiming.value
-        || 'after_each_delivery';
+      const fallbackCleanup = 'end_of_day';
       const effectiveCleanup = roomCleanupTiming || fallbackCleanup;
       if (effectiveCleanup !== 'end_of_day') {
         throw new Error('ルーム設定で「最終回: 1日まとめ」を使う場合、処理タイミングは「1日の最終配信後」または「継承（全体が最終配信後）」を選択してください。');
@@ -2477,7 +2449,6 @@ const html = String.raw`<!doctype html>
     [
       dom.globalEnabled,
       dom.globalHoursInput,
-      dom.messageCleanupTiming,
       dom.lastDeliverySummaryMode,
       dom.messageRetentionDays,
       dom.tomorrowReminderEnabled,
@@ -2626,7 +2597,6 @@ const html = String.raw`<!doctype html>
       dom.newRoomCalendarAutoCreate,
       dom.newRoomSilentAutoRegister,
       dom.newRoomGmailAlertEnabled,
-      dom.newRoomCleanupTiming,
       dom.newRoomSummaryMode,
     ].forEach(function(el) {
       if (!el) return;
@@ -2663,7 +2633,6 @@ const html = String.raw`<!doctype html>
       dom.newRoomCalendarAutoCreate,
       dom.newRoomSilentAutoRegister,
       dom.newRoomGmailAlertEnabled,
-      dom.newRoomCleanupTiming,
       dom.newRoomSummaryMode,
     ].forEach(function(el) {
       if (!el) return;
