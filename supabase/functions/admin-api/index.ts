@@ -363,6 +363,11 @@ Deno.serve(async (req) => {
       return json({ user_permission: data }, 200)
     }
 
+    if (req.method === "POST" && path === "/permissions/users/backfill") {
+      const result = await backfillLineUserPermissionsFromMessages(supabase)
+      return json({ success: true, backfill: result }, 200)
+    }
+
     if (req.method === "DELETE" && path.startsWith("/settings/rooms/")) {
       const roomId = decodeURIComponent(path.replace("/settings/rooms/", ""))
       if (!roomId) {
@@ -670,6 +675,90 @@ async function fetchLineUserPermissions(
     has_more: nextOffset < safeTotal,
     next_offset: nextOffset < safeTotal ? nextOffset : null,
     generated_at: new Date().toISOString(),
+  }
+}
+
+async function backfillLineUserPermissionsFromMessages(
+  supabase: ReturnType<typeof createClient>,
+) {
+  const pageSize = 1000
+  const userIds = new Set<string>()
+  let offset = 0
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("line_messages")
+      .select("user_id")
+      .not("user_id", "is", null)
+      .neq("user_id", "")
+      .range(offset, offset + pageSize - 1)
+    if (error) {
+      throw { status: 500, message: `Failed to scan line_messages users: ${error.message}` } satisfies AppError
+    }
+    const rows = Array.isArray(data) ? data : []
+    if (rows.length === 0) break
+    for (const row of rows) {
+      const userId = String((row as { user_id?: unknown })?.user_id ?? "").trim()
+      if (userId) userIds.add(userId)
+    }
+    if (rows.length < pageSize) break
+    offset += pageSize
+  }
+
+  const allUserIds = Array.from(userIds)
+  if (allUserIds.length === 0) {
+    return {
+      scanned_user_ids: 0,
+      inserted: 0,
+      already_existing: 0,
+    }
+  }
+
+  const existingSet = new Set<string>()
+  for (let i = 0; i < allUserIds.length; i += pageSize) {
+    const chunk = allUserIds.slice(i, i + pageSize)
+    const { data: existingRows, error: existingError } = await supabase
+      .from("line_user_permissions")
+      .select("line_user_id")
+      .in("line_user_id", chunk)
+    if (existingError) {
+      throw { status: 500, message: `Failed to inspect existing user permissions: ${existingError.message}` } satisfies AppError
+    }
+    for (const row of existingRows ?? []) {
+      const lineUserId = String((row as { line_user_id?: unknown })?.line_user_id ?? "").trim()
+      if (lineUserId) existingSet.add(lineUserId)
+    }
+  }
+
+  const now = new Date().toISOString()
+  const inserts = allUserIds
+    .filter((id) => !existingSet.has(id))
+    .map((lineUserId) => ({
+      line_user_id: lineUserId,
+      display_name: null,
+      is_active: true,
+      can_message_search: true,
+      can_library_search: true,
+      can_calendar_create: true,
+      can_calendar_update: true,
+      can_media_access: true,
+      note: null,
+      updated_at: now,
+    }))
+
+  if (inserts.length > 0) {
+    const { error: insertError } = await supabase
+      .from("line_user_permissions")
+      .insert(inserts, { defaultToNull: false, ignoreDuplicates: true })
+    if (insertError) {
+      throw { status: 500, message: `Failed to backfill user permissions: ${insertError.message}` } satisfies AppError
+    }
+  }
+
+  return {
+    scanned_user_ids: allUserIds.length,
+    inserted: inserts.length,
+    already_existing: allUserIds.length - inserts.length,
   }
 }
 

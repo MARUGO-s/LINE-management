@@ -721,6 +721,7 @@ const html = String.raw`<!doctype html>
         </div>
         <div class="controls" style="margin-top:8px;">
           <button id="reloadUserPermissionsBtn" class="button">再読込</button>
+          <button id="backfillUserPermissionsBtn" class="button">既存ユーザー取込</button>
           <button id="saveUserPermissionsBtn" class="button primary">変更を保存</button>
         </div>
       </section>
@@ -780,6 +781,7 @@ const html = String.raw`<!doctype html>
       logTableBody: document.getElementById('logTableBody'),
       userPermissionTableBody: document.getElementById('userPermissionTableBody'),
       reloadUserPermissionsBtn: document.getElementById('reloadUserPermissionsBtn'),
+      backfillUserPermissionsBtn: document.getElementById('backfillUserPermissionsBtn'),
       saveUserPermissionsBtn: document.getElementById('saveUserPermissionsBtn'),
       newRoomId: document.getElementById('newRoomId'),
       newRoomName: document.getElementById('newRoomName'),
@@ -1379,6 +1381,21 @@ const html = String.raw`<!doctype html>
       alert('ユーザー権限を保存しました。');
     }
 
+    async function backfillUserPermissions() {
+      const response = await api('/permissions/users/backfill', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      await safeLoadState();
+      const stats = response && response.backfill ? response.backfill : {};
+      alert(
+        '既存ユーザー取込が完了しました。'
+        + '\n検出: ' + Number(stats.scanned_user_ids || 0) + '件'
+        + '\n新規追加: ' + Number(stats.inserted || 0) + '件'
+        + '\n既存: ' + Number(stats.already_existing || 0) + '件'
+      );
+    }
+
     async function saveGlobal() {
       validateGlobalModeCombination();
       const reminderMaxItems = Number(dom.tomorrowReminderMaxItems.value);
@@ -1690,6 +1707,14 @@ const html = String.raw`<!doctype html>
     dom.reloadUserPermissionsBtn.addEventListener('click', async function() {
       try {
         await safeLoadState();
+      } catch (e) {
+        alert(e.message || String(e));
+      }
+    });
+
+    dom.backfillUserPermissionsBtn.addEventListener('click', async function() {
+      try {
+        await backfillUserPermissions();
       } catch (e) {
         alert(e.message || String(e));
       }
