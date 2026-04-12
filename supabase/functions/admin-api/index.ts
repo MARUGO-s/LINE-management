@@ -464,6 +464,19 @@ Deno.serve(async (req) => {
       return json({ success: true, refresh: result }, 200)
     }
 
+    if (req.method === "POST" && path === "/rooms/sync-chat-members") {
+      const body = await parseJson(req)
+      if (!isRecord(body)) {
+        throw { status: 400, message: "Invalid JSON body." } satisfies AppError
+      }
+      const roomId = String(body.room_id ?? "").trim()
+      if (!roomId) {
+        throw { status: 400, message: "room_id is required." } satisfies AppError
+      }
+      const sync = await syncLineUserPermissionsFromChatMembers(supabase, roomId)
+      return json({ success: true, sync }, 200)
+    }
+
     if (req.method === "DELETE" && path.startsWith("/settings/rooms/")) {
       const roomId = decodeURIComponent(path.replace("/settings/rooms/", ""))
       if (!roomId) {
@@ -990,6 +1003,163 @@ async function fetchLineDisplayNameByUrl(
     return displayName || null
   } catch {
     return null
+  }
+}
+
+async function fetchLineChatMemberIdsPaginated(
+  roomId: string,
+  lineAccessToken: string,
+): Promise<string[]> {
+  const rid = String(roomId ?? "").trim()
+  if (!rid) {
+    throw { status: 400, message: "room_id is required." } satisfies AppError
+  }
+  let baseUrl: string
+  if (rid.startsWith("C")) {
+    baseUrl = `https://api.line.me/v2/bot/group/${encodeURIComponent(rid)}/members/ids`
+  } else if (rid.startsWith("R")) {
+    baseUrl = `https://api.line.me/v2/bot/room/${encodeURIComponent(rid)}/members/ids`
+  } else {
+    throw {
+      status: 400,
+      message: "room_id must be a LINE group (C...) or multi-person chat room (R...).",
+    } satisfies AppError
+  }
+
+  const all: string[] = []
+  let start: string | undefined
+  for (let page = 0; page < 500; page++) {
+    const url = start ? `${baseUrl}?start=${encodeURIComponent(start)}` : baseUrl
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${lineAccessToken}`,
+      },
+    })
+    const errorText = await response.text()
+    if (!response.ok) {
+      const detail = errorText.trim().slice(0, 400)
+      throw {
+        status: response.status === 404 ? 404 : 502,
+        message: `LINE members/ids failed (${response.status}): ${detail || response.statusText}`,
+      } satisfies AppError
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(errorText)
+    } catch {
+      throw { status: 502, message: "LINE members/ids returned invalid JSON." } satisfies AppError
+    }
+    const body = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+    const idsRaw = body.memberIds
+    const ids = Array.isArray(idsRaw) ? idsRaw : []
+    for (const id of ids) {
+      const u = String(id ?? "").trim()
+      if (u) all.push(u)
+    }
+    const next = body.next
+    if (typeof next === "string" && next.length > 0) {
+      start = next
+      continue
+    }
+    break
+  }
+  return Array.from(new Set(all))
+}
+
+async function syncLineUserPermissionsFromChatMembers(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+): Promise<{
+  room_id: string
+  chat_kind: "group" | "room"
+  member_ids: number
+  inserted: number
+  updated: number
+  display_name_missing: number
+  errors: string[]
+}> {
+  const normalizedRoomId = String(roomId ?? "").trim()
+  const lineAccessToken = String(Deno.env.get("LINE_CHANNEL_ACCESS_TOKEN") ?? "").trim()
+  if (!lineAccessToken) {
+    throw { status: 500, message: "LINE_CHANNEL_ACCESS_TOKEN is not set." } satisfies AppError
+  }
+
+  const memberIds = await fetchLineChatMemberIdsPaginated(normalizedRoomId, lineAccessToken)
+  const chatKind: "group" | "room" = normalizedRoomId.startsWith("C") ? "group" : "room"
+  let inserted = 0
+  let updated = 0
+  let displayNameMissing = 0
+  const errors: string[] = []
+  const now = new Date().toISOString()
+
+  for (const lineUserId of memberIds) {
+    const displayName = await fetchLineDisplayNameByUserId(lineUserId, normalizedRoomId, lineAccessToken)
+    if (!displayName) {
+      displayNameMissing += 1
+    }
+
+    const { data: existing, error: selErr } = await supabase
+      .from("line_user_permissions")
+      .select("line_user_id")
+      .eq("line_user_id", lineUserId)
+      .maybeSingle()
+
+    if (selErr) {
+      errors.push(`${lineUserId}: ${selErr.message}`)
+      continue
+    }
+
+    if (existing?.line_user_id) {
+      const patch: Record<string, unknown> = { updated_at: now }
+      if (displayName) {
+        patch.display_name = displayName
+      }
+      const { error: upErr } = await supabase
+        .from("line_user_permissions")
+        .update(patch)
+        .eq("line_user_id", lineUserId)
+      if (upErr) {
+        errors.push(`${lineUserId}: ${upErr.message}`)
+        continue
+      }
+      updated += 1
+    } else {
+      const { error: insErr } = await supabase
+        .from("line_user_permissions")
+        .insert({
+          line_user_id: lineUserId,
+          display_name: displayName,
+          is_active: false,
+          can_message_search: false,
+          can_library_search: false,
+          can_calendar_create: false,
+          can_calendar_update: false,
+          can_calendar_view: false,
+          can_media_access: false,
+          excluded_message_search_room_ids: [],
+          assigned_store: null,
+          assigned_job_title: null,
+          updated_at: now,
+        })
+      if (insErr) {
+        errors.push(`${lineUserId}: ${insErr.message}`)
+        continue
+      }
+      inserted += 1
+    }
+  }
+
+  return {
+    room_id: normalizedRoomId,
+    chat_kind: chatKind,
+    member_ids: memberIds.length,
+    inserted,
+    updated,
+    display_name_missing: displayNameMissing,
+    errors,
   }
 }
 

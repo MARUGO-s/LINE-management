@@ -2142,6 +2142,11 @@ const html = String.raw`<!doctype html>
           calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, false),
           gmail_reservation_alert_enabled: parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
         }));
+        const roomIdRaw = String(room.room_id || '');
+        const canSyncChatMembers = roomIdRaw.startsWith('C') || roomIdRaw.startsWith('R');
+        const syncMembersBtn = canSyncChatMembers
+          ? '<button class="button room-sync-chat-members" type="button" title="LINEのメンバー一覧APIで全員分をユーザー権限に取り込み">メンバー同期</button>'
+          : '';
         tr.draggable = false;
         tr.innerHTML =
           '<td><span class="room-id-tools"><span class="room-drag-handle" draggable="true" title="ドラッグで並び替え" aria-label="並び替え" role="button">⋮⋮</span><button class="button room-show-id" type="button">ID表示</button></span></td>' +
@@ -2155,6 +2160,7 @@ const html = String.raw`<!doctype html>
           '<option value="daily_rollup" ' + ((setting && setting.last_delivery_summary_mode === 'daily_rollup') ? 'selected' : '') + '>1日まとめ</option>' +
           '</select></td>' +
           '<td><span class="row-actions">' +
+          syncMembersBtn +
           '<button class="button ghost room-reset">継承</button>' +
           '<button class="button warn room-delete">ルーム削除</button>' +
           '</span></td>';
@@ -2573,6 +2579,14 @@ const html = String.raw`<!doctype html>
       return response && response.refresh ? response.refresh : null;
     }
 
+    async function syncChatMembersFromRoom(roomId) {
+      const response = await api('/rooms/sync-chat-members', {
+        method: 'POST',
+        body: JSON.stringify({ room_id: roomId }),
+      });
+      return response && response.sync ? response.sync : null;
+    }
+
     function normalizeOptionalSelectValue(value) {
       return value ? value : null;
     }
@@ -2846,6 +2860,28 @@ const html = String.raw`<!doctype html>
           openRoomConfigModal(tr);
         } else if (target.classList.contains('room-show-id')) {
           openRoomIdModal(tr);
+        } else if (target.classList.contains('room-sync-chat-members')) {
+          const roomId = String(tr.dataset.roomId || '').trim();
+          if (!roomId.startsWith('C') && !roomId.startsWith('R')) {
+            alert('グループ（C…）または複数人トーク（R…）のルームのみ実行できます。');
+            return;
+          }
+          if (!window.confirm('LINE のメンバー一覧を取得し、ユーザー権限一覧に反映します。よろしいですか？')) {
+            return;
+          }
+          const stats = await syncChatMembersFromRoom(roomId);
+          await safeLoadState();
+          const errLines = stats && Array.isArray(stats.errors) && stats.errors.length
+            ? '\nエラー（先頭のみ）: ' + String(stats.errors[0])
+            : '';
+          alert(
+            'メンバー同期が完了しました。'
+            + '\nメンバー数: ' + Number(stats && stats.member_ids || 0)
+            + '\n新規行: ' + Number(stats && stats.inserted || 0)
+            + '\n既存更新: ' + Number(stats && stats.updated || 0)
+            + '\n表示名未取得: ' + Number(stats && stats.display_name_missing || 0)
+            + errLines
+          );
         }
       } catch (e) {
         alert(e.message || String(e));
