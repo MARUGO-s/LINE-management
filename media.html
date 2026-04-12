@@ -438,7 +438,8 @@
       background: rgba(5, 17, 28, 0.55);
       padding: 8px;
       display: grid;
-      gap: 6px;
+      gap: 8px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       max-height: 52vh;
       overflow-y: auto;
     }
@@ -472,16 +473,15 @@
       font-size: 1rem;
       font-weight: 700;
       line-height: 1.22;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      word-break: break-word;
     }
 
-    .permission-user-id {
-      color: #90bbd3;
-      font-size: 0.79rem;
-      line-height: 1.25;
-      word-break: break-all;
+    .modal-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: -2px;
     }
 
     .modal-actions {
@@ -501,6 +501,7 @@
         padding: 12px;
       }
       .permission-user-list {
+        grid-template-columns: 1fr;
         max-height: 58vh;
       }
     }
@@ -617,6 +618,9 @@
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="documentPermissionModalTitle">
       <h3 id="documentPermissionModalTitle" class="modal-title">資料の閲覧許可ユーザー選択</h3>
       <div id="documentPermissionModalMeta" class="modal-meta">対象資料: -</div>
+      <div class="modal-tools">
+        <button id="selectAllDocumentPermissionBtn" class="button" type="button">全員一括選択</button>
+      </div>
       <div id="documentPermissionUserList" class="permission-user-list"></div>
       <div class="modal-actions">
         <button id="cancelDocumentPermissionBtn" class="button">キャンセル</button>
@@ -686,6 +690,7 @@
       documentPermissionModal: document.getElementById('documentPermissionModal'),
       documentPermissionModalMeta: document.getElementById('documentPermissionModalMeta'),
       documentPermissionUserList: document.getElementById('documentPermissionUserList'),
+      selectAllDocumentPermissionBtn: document.getElementById('selectAllDocumentPermissionBtn'),
       cancelDocumentPermissionBtn: document.getElementById('cancelDocumentPermissionBtn'),
       saveDocumentPermissionBtn: document.getElementById('saveDocumentPermissionBtn'),
     };
@@ -825,8 +830,7 @@
 
     function getLineUserDisplayLabel(user) {
       const name = normalizeDisplayName(user && user.display_name);
-      const lineUserId = normalizeLineUserId(user && user.line_user_id);
-      return name || lineUserId || '不明ユーザー';
+      return name || '名称未設定ユーザー';
     }
 
     async function loadPermissionSelectableUsers(forceReload) {
@@ -863,11 +867,18 @@
           '<input class="document-permission-check" type="checkbox" data-line-user-id="' + escapeHtml(lineUserId) + '" ' + (isChecked ? 'checked' : '') + '>',
           '<div>',
           '<div class="permission-user-name">' + escapeHtml(displayLabel) + '</div>',
-          '<div class="permission-user-id">' + escapeHtml(lineUserId) + '</div>',
           '</div>',
           '</label>',
         ].join('');
       }).join('');
+    }
+
+    function selectAllUsersInPermissionModal() {
+      const checks = Array.from(dom.documentPermissionUserList.querySelectorAll('.document-permission-check'));
+      for (const input of checks) {
+        if (!(input instanceof HTMLInputElement)) continue;
+        input.checked = true;
+      }
     }
 
     function closeDocumentPermissionModal() {
@@ -1607,6 +1618,10 @@
 
     dom.cancelDocumentPermissionBtn.addEventListener('click', function() {
       closeDocumentPermissionModal();
+    });
+
+    dom.selectAllDocumentPermissionBtn.addEventListener('click', function() {
+      selectAllUsersInPermissionModal();
     });
 
     dom.saveDocumentPermissionBtn.addEventListener('click', async function() {
