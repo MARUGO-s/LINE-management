@@ -110,4 +110,4 @@ LINEグループ/ルームの会話を蓄積し、AI（Groq）を活用して以
 
 - 機能面: 要約・検索・カレンダー・Gmail通知・メディア運用まで一貫運用可能。
 - セキュリティ面: Secrets統一、ZIP爆弾対策、分散対応レート制限、日次クリーンアップまで導入済み。
-- 運用面: `README.md` と `SECURITY_AUTOMATION.md` を最新仕様に更新済みで、監視SQLも整備済み。
+- 運用面: リポジトリ直下の `README.md` と `docs/SECURITY_AUTOMATION.md` を最新仕様に更新済みで、監視SQLも整備済み。
