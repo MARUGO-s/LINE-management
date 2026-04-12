@@ -301,6 +301,25 @@
       text-decoration: underline;
     }
 
+    .media-select-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(155, 220, 255, 0.2);
+      border-radius: 9px;
+      padding: 6px 8px;
+      background: rgba(12, 38, 56, 0.4);
+      color: #cbe9fb;
+      font-size: 0.8rem;
+    }
+
+    .media-select-row input {
+      width: 17px;
+      height: 17px;
+      margin: 0;
+      accent-color: #48d1ff;
+    }
+
     .context-block {
       margin-top: 2px;
       border: 1px solid rgba(155, 220, 255, 0.18);
@@ -550,6 +569,7 @@
         </select>
         <button id="applyFilterBtn" class="button primary">表示</button>
         <button id="reloadBtn" class="button">再読み込み</button>
+        <button id="toggleMediaBulkDeleteBtn" class="button danger">一括削除</button>
       </div>
       <div class="controls" style="margin-top:8px;">
         <span class="meta" style="margin:0;">アップロード上限（MB未満）</span>
@@ -649,6 +669,8 @@
       permissionTargetDocumentId: null,
       permissionTargetDocumentName: '',
       permissionSelectedUserIds: new Set(),
+      mediaBulkDeleteMode: false,
+      mediaSelectedIds: new Set(),
     };
 
     const dom = {
@@ -663,6 +685,7 @@
       limitSelect: document.getElementById('limitSelect'),
       applyFilterBtn: document.getElementById('applyFilterBtn'),
       reloadBtn: document.getElementById('reloadBtn'),
+      toggleMediaBulkDeleteBtn: document.getElementById('toggleMediaBulkDeleteBtn'),
       mediaUploadMaxMbInput: document.getElementById('mediaUploadMaxMbInput'),
       saveMediaUploadLimitBtn: document.getElementById('saveMediaUploadLimitBtn'),
       mediaUploadLimitMeta: document.getElementById('mediaUploadLimitMeta'),
@@ -957,6 +980,29 @@
       dom.authState.className = hasToken ? 'pill ok' : 'pill';
     }
 
+    function updateMediaBulkDeleteButtonLabel() {
+      if (!state.mediaBulkDeleteMode) {
+        dom.toggleMediaBulkDeleteBtn.textContent = '一括削除';
+        return;
+      }
+      const selectedCount = state.mediaSelectedIds.size;
+      dom.toggleMediaBulkDeleteBtn.textContent = selectedCount > 0
+        ? ('選択削除を実行（' + selectedCount + '件）')
+        : '選択削除を実行';
+    }
+
+    function enterMediaBulkDeleteMode() {
+      state.mediaBulkDeleteMode = true;
+      state.mediaSelectedIds = new Set();
+      updateMediaBulkDeleteButtonLabel();
+    }
+
+    function exitMediaBulkDeleteMode() {
+      state.mediaBulkDeleteMode = false;
+      state.mediaSelectedIds = new Set();
+      updateMediaBulkDeleteButtonLabel();
+    }
+
     async function api(path, options) {
       const token = getToken();
       if (!token) throw new Error('先に管理トークンを保存してください。');
@@ -1135,6 +1181,16 @@
       const downloadAction = downloadUrl
         ? '<a class="button" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a>'
         : '';
+      const mediaId = Number(item && item.id || 0);
+      const mediaSelected = Number.isInteger(mediaId) && state.mediaSelectedIds.has(mediaId);
+      const selectBlock = state.mediaBulkDeleteMode
+        ? [
+          '<label class="media-select-row">',
+          '<input class="media-select-check" type="checkbox" data-media-id="' + escapeHtml(String(mediaId)) + '" ' + (mediaSelected ? 'checked' : '') + '>',
+          '<span>このファイルを削除対象にする</span>',
+          '</label>',
+        ].join('')
+        : '';
 
       return [
         '<article class="item">',
@@ -1147,6 +1203,7 @@
         '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(mime) + '">MIME: ' + escapeHtml(mime) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(String(item.line_message_tag || '')) + '">タグ: ' + escapeHtml(String(item.line_message_tag || '-')) + '</div>',
+        selectBlock,
         contextBlock,
         '<div class="item-actions">' + downloadAction + '<button class="button danger media-delete-btn" type="button" data-media-id="' + escapeHtml(String(item.id || '')) + '">削除</button></div>',
         '</div>',
@@ -1197,6 +1254,17 @@
       } else {
         dom.mediaList.innerHTML = items.map(renderMediaItem).join('');
       }
+      if (state.mediaBulkDeleteMode) {
+        const visibleIds = new Set(items
+          .map(function(item) { return Number(item && item.id || 0); })
+          .filter(function(id) { return Number.isInteger(id) && id > 0; }));
+        const keepIds = new Set();
+        for (const id of state.mediaSelectedIds) {
+          if (visibleIds.has(id)) keepIds.add(id);
+        }
+        state.mediaSelectedIds = keepIds;
+      }
+      updateMediaBulkDeleteButtonLabel();
 
       const from = state.total === 0 ? 0 : state.offset + 1;
       const to = Math.min(state.offset + items.length, state.total);
@@ -1402,6 +1470,40 @@
       }
     }
 
+    async function executeBulkDeleteSelectedMedia() {
+      const selectedIds = Array.from(state.mediaSelectedIds).filter(function(id) {
+        return Number.isInteger(id) && id > 0;
+      });
+      if (selectedIds.length === 0) {
+        throw new Error('削除対象を1件以上チェックしてください。');
+      }
+
+      const ok = window.confirm('選択した ' + selectedIds.length + ' 件を一括削除します。よろしいですか？');
+      if (!ok) return;
+
+      const failedIds = [];
+      for (const mediaId of selectedIds) {
+        try {
+          await api('/media/' + encodeURIComponent(String(mediaId)), { method: 'DELETE' });
+        } catch (_) {
+          failedIds.push(mediaId);
+        }
+      }
+
+      exitMediaBulkDeleteMode();
+      await loadMedia();
+      if (state.total > 0 && state.offset >= state.total && state.offset > 0) {
+        state.offset = Math.max(0, state.offset - state.limit);
+        await loadMedia();
+      }
+
+      if (failedIds.length > 0) {
+        alert((selectedIds.length - failedIds.length) + '件削除しました。' + failedIds.length + '件は削除に失敗しました。');
+      } else {
+        alert(selectedIds.length + '件を削除しました。');
+      }
+    }
+
     async function saveMediaUploadLimit() {
       const mb = Number(dom.mediaUploadMaxMbInput.value || 0);
       if (!Number.isInteger(mb) || mb < 1 || mb > 20) {
@@ -1436,6 +1538,7 @@
       state.docsHasMore = false;
       state.docsTotal = 0;
       state.documentDropDepth = 0;
+      exitMediaBulkDeleteMode();
       if (dom.documentDropZone) {
         dom.documentDropZone.classList.remove('dragover');
       }
@@ -1463,6 +1566,19 @@
     dom.reloadBtn.addEventListener('click', async function() {
       try {
         await loadMedia();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.toggleMediaBulkDeleteBtn.addEventListener('click', async function() {
+      try {
+        if (!state.mediaBulkDeleteMode) {
+          enterMediaBulkDeleteMode();
+          await loadMedia();
+          return;
+        }
+        await executeBulkDeleteSelectedMedia();
       } catch (error) {
         alert(error.message || String(error));
       }
@@ -1615,6 +1731,17 @@
       }
     });
 
+    dom.mediaList.addEventListener('change', function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      if (!target.classList.contains('media-select-check')) return;
+      const mediaId = Number(target.getAttribute('data-media-id') || 0);
+      if (!Number.isInteger(mediaId) || mediaId <= 0) return;
+      if (target.checked) state.mediaSelectedIds.add(mediaId);
+      else state.mediaSelectedIds.delete(mediaId);
+      updateMediaBulkDeleteButtonLabel();
+    });
+
     dom.documentList.addEventListener('click', async function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
@@ -1671,6 +1798,7 @@
     (function init() {
       dom.projectUrlInput.value = FIXED_PROJECT_URL;
       updateAuthState();
+      updateMediaBulkDeleteButtonLabel();
       updatePager();
       updateDocumentPager();
       setRoomFilterOptions([]);
