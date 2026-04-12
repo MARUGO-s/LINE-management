@@ -1039,6 +1039,25 @@ async function fetchLineChatMemberIdsPaginated(
     const errorText = await response.text()
     if (!response.ok) {
       const detail = errorText.trim().slice(0, 400)
+      if (response.status === 403) {
+        let lineApiMessage = ""
+        try {
+          const j = JSON.parse(errorText) as { message?: unknown }
+          if (typeof j?.message === "string") lineApiMessage = j.message.trim()
+        } catch {
+          // ignore
+        }
+        throw {
+          status: 403,
+          message: [
+            "LINE の「グループ／トークのメンバー ID 一覧（members/ids）」は、このチャネルでは利用できません（403）。",
+            "公式ドキュメント上、この API は認証済みアカウントまたはプレミアムアカウントの LINE 公式アカウントに限定されています。未認証の通常アカウントではメンバー同期は実行できません。",
+            "代替: メンバーがトークでメッセージを送るたびに Webhook で userId が取得できるため、従来どおり「既存ユーザー取込」や運用でユーザー権限に反映できます。",
+            "参考: https://developers.line.biz/en/docs/messaging-api/getting-user-ids/",
+            lineApiMessage ? `（LINE API: ${lineApiMessage}）` : (detail ? `（応答: ${detail.slice(0, 240)}）` : ""),
+          ].filter((s) => s.length > 0).join("\n"),
+        } satisfies AppError
+      }
       throw {
         status: response.status === 404 ? 404 : 502,
         message: `LINE members/ids failed (${response.status}): ${detail || response.statusText}`,
