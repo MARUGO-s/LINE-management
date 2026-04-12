@@ -1,4 +1,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
+import { isJobTitleLabel, JOB_TITLE_OPTIONS } from "../_shared/job_titles.ts"
+import {
+  isMarugoGroupStoreLabel,
+  MARUGO_GROUP_STORE_OPTIONS,
+} from "../_shared/marugo_group_stores.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0"
 import JSZip from "https://esm.sh/jszip@3.10.1"
 
@@ -84,7 +89,8 @@ type LineUserPermissionRow = {
   can_calendar_update: boolean
   can_media_access: boolean
   excluded_message_search_room_ids: string[]
-  note: string | null
+  assigned_store: string | null
+  assigned_job_title: string | null
   updated_at: string
 }
 
@@ -117,6 +123,23 @@ const ADMIN_RATE_LIMIT_UPLOAD_WINDOW_MS = 60 * 1000
 const ADMIN_RATE_LIMIT_UPLOAD_MAX_REQUESTS = 12
 const USER_PERMISSION_LIST_DEFAULT_LIMIT = 100
 const USER_PERMISSION_LIST_MAX_LIMIT = 300
+/** Max rows fetched before in-memory sort (pagination applied after sort). */
+const USER_PERMISSION_SORT_FETCH_CAP = 10000
+
+type LineUserPermissionSortable = {
+  display_name?: string | null
+  line_user_id?: string | null
+}
+
+function sortLineUserPermissionsForAdminDisplay<T extends LineUserPermissionSortable>(rows: T[]): T[] {
+  const collator = new Intl.Collator("ja", { sensitivity: "base" })
+  return [...rows].sort((a, b) => {
+    const sa = String(a.display_name ?? "").trim() || String(a.line_user_id ?? "")
+    const sb = String(b.display_name ?? "").trim() || String(b.line_user_id ?? "")
+    return collator.compare(sa, sb)
+  })
+}
+
 type MediaUsageStats = {
   total_files: number
   total_bytes: number
@@ -400,10 +423,11 @@ Deno.serve(async (req) => {
           can_calendar_update: payload.can_calendar_update,
           can_media_access: payload.can_media_access,
           excluded_message_search_room_ids: payload.excluded_message_search_room_ids,
-          note: payload.note,
+          assigned_store: payload.assigned_store,
+          assigned_job_title: payload.assigned_job_title,
           updated_at: new Date().toISOString(),
         }, { onConflict: "line_user_id" })
-        .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, note, updated_at")
+        .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
         .single()
       if (error) {
         throw { status: 500, message: `Failed to upsert line user permission: ${error.message}` } satisfies AppError
@@ -661,9 +685,8 @@ async function fetchState(
     fetchStorageUsageState(supabase),
     supabase
       .from("line_user_permissions")
-      .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, note, updated_at")
-      .order("updated_at", { ascending: false })
-      .limit(USER_PERMISSION_LIST_MAX_LIMIT),
+      .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
+      .limit(USER_PERMISSION_SORT_FETCH_CAP),
   ])
 
   if (roomSettingsRes.error) {
@@ -686,7 +709,12 @@ async function fetchState(
   return {
     global_settings: globalSettings,
     room_settings: roomSettingsRes.data ?? [],
-    user_permissions: userPermissionsRes.data ?? [],
+    user_permissions: sortLineUserPermissionsForAdminDisplay(userPermissionsRes.data ?? []).slice(
+      0,
+      USER_PERMISSION_LIST_MAX_LIMIT,
+    ),
+    marugo_group_store_options: [...MARUGO_GROUP_STORE_OPTIONS],
+    job_title_options: [...JOB_TITLE_OPTIONS],
     room_overview: roomOverviewRes.data ?? [],
     delivery_logs: filteredLogs,
     storage_usage: storageUsageState.stats,
@@ -705,9 +733,8 @@ async function fetchLineUserPermissions(
 
   let query = supabase
     .from("line_user_permissions")
-    .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, note, updated_at", { count: "exact" })
-    .order("updated_at", { ascending: false })
-    .range(offset, offset + limit - 1)
+    .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at", { count: "exact" })
+    .limit(USER_PERMISSION_SORT_FETCH_CAP)
 
   if (q) {
     const escaped = q.replaceAll("%", "\\%").replaceAll("_", "\\_")
@@ -720,10 +747,12 @@ async function fetchLineUserPermissions(
   }
 
   const rows = Array.isArray(data) ? data : []
-  const safeTotal = Number.isFinite(Number(count)) ? Number(count) : rows.length
-  const nextOffset = offset + rows.length
+  const sorted = sortLineUserPermissionsForAdminDisplay(rows)
+  const paged = sorted.slice(offset, offset + limit)
+  const safeTotal = Number.isFinite(Number(count)) ? Number(count) : sorted.length
+  const nextOffset = offset + paged.length
   return {
-    items: rows,
+    items: paged,
     total: safeTotal,
     limit,
     offset,
@@ -837,7 +866,8 @@ async function backfillLineUserPermissionsFromMessages(
       can_calendar_create: true,
       can_calendar_update: true,
       can_media_access: true,
-      note: null,
+      assigned_store: null,
+      assigned_job_title: null,
       updated_at: now,
     }))
 
@@ -3265,7 +3295,26 @@ function buildLineUserPermissionPayload(body: unknown): LineUserPermissionRow {
     return value
   }
   const displayNameRaw = typeof body.display_name === "string" ? body.display_name.trim() : ""
-  const noteRaw = typeof body.note === "string" ? body.note.trim() : ""
+  let assignedStore: string | null = null
+  if (body.assigned_store != null) {
+    const raw = typeof body.assigned_store === "string" ? body.assigned_store.trim() : ""
+    if (raw) {
+      if (!isMarugoGroupStoreLabel(raw)) {
+        throw { status: 400, message: "assigned_store must be one of the predefined store labels." } satisfies AppError
+      }
+      assignedStore = raw
+    }
+  }
+  let assignedJobTitle: string | null = null
+  if (body.assigned_job_title != null) {
+    const raw = typeof body.assigned_job_title === "string" ? body.assigned_job_title.trim() : ""
+    if (raw) {
+      if (!isJobTitleLabel(raw)) {
+        throw { status: 400, message: "assigned_job_title must be one of the predefined job titles." } satisfies AppError
+      }
+      assignedJobTitle = raw
+    }
+  }
   const excludedRoomIdsRaw = body.excluded_message_search_room_ids
   let excludedRoomIds: string[] = []
   if (excludedRoomIdsRaw != null) {
@@ -3286,7 +3335,8 @@ function buildLineUserPermissionPayload(body: unknown): LineUserPermissionRow {
     can_calendar_update: ensureBoolean(body.can_calendar_update, "can_calendar_update", true),
     can_media_access: ensureBoolean(body.can_media_access, "can_media_access", true),
     excluded_message_search_room_ids: excludedRoomIds,
-    note: noteRaw || null,
+    assigned_store: assignedStore,
+    assigned_job_title: assignedJobTitle,
     updated_at: new Date().toISOString(),
   }
 }

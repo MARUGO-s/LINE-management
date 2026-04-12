@@ -1784,7 +1784,8 @@ async function ensureLineUserPermissionSeed(
       can_calendar_create: false,
       can_calendar_update: false,
       can_media_access: false,
-      note: '承認待ち',
+      assigned_store: null,
+      assigned_job_title: null,
       updated_at: new Date().toISOString(),
     })
   if (insertError) {
