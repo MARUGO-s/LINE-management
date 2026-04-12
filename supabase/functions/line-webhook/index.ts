@@ -231,6 +231,7 @@ type SearchMessageRow = {
   user_id: string | null
 }
 type SearchDocumentRow = {
+  id: number
   room_id: string | null
   room_label?: string | null
   original_file_name: string
@@ -263,7 +264,6 @@ const CALENDAR_PENDING_CONFIRMATION_TTL_MIN = 5
 const CALENDAR_PENDING_TABLE = 'calendar_pending_confirmations'
 const CALENDAR_UPDATE_PENDING_TABLE = 'calendar_update_pending_targets'
 const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmations'
-const LINE_DOCUMENT_LIBRARY_FILENAME_MARKER = '[LINE]'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
 const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
 const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 365
@@ -2496,7 +2496,7 @@ async function buildMessageSearchReply(
     }
     if (pendingSaved) {
       lines.push('')
-      lines.push('資料ライブラリ（ファイル名に[LINE]を含む資料のみ）も検索しますか？')
+      lines.push('資料ライブラリも検索しますか？')
       lines.push('「はい」で検索 / 「いいえ」でキャンセル')
       lines.push(`※${PENDING_CONFIRMATION_TTL_MIN}分以内にご返信ください`)
     } else {
@@ -2600,7 +2600,7 @@ async function buildLibrarySearchPromptWhenMessageSearchDisabled(
   }
   lines.push('')
   if (pendingSaved) {
-    lines.push('資料ライブラリ（ファイル名に[LINE]を含む資料のみ）を検索しますか？')
+    lines.push('資料ライブラリを検索しますか？')
     lines.push('「はい」で検索 / 「いいえ」でキャンセル')
     lines.push(`※${PENDING_CONFIRMATION_TTL_MIN}分以内にご返信ください`)
   } else {
@@ -2670,10 +2670,11 @@ async function buildLineTaggedDocumentLibrarySearchReply(
   command: MessageSearchCommand,
   supabase: ReturnType<typeof createClient>,
   roomId: string,
+  userId: string | null,
 ): Promise<string[]> {
   let docQuery = supabase
     .from('line_search_documents')
-    .select('room_id, original_file_name, mime_type, extracted_text, created_at')
+    .select('id, room_id, original_file_name, mime_type, extracted_text, created_at')
     .order('created_at', { ascending: false })
     .limit(SEARCH_MAX_DOCUMENT_ROWS)
   if (command.scope !== 'all_rooms') {
@@ -2685,25 +2686,23 @@ async function buildLineTaggedDocumentLibrarySearchReply(
   }
   const docRows: SearchDocumentRow[] = Array.isArray(docData)
     ? docData.map((row: any) => ({
+        id: Number.isInteger(Number(row?.id)) ? Number(row?.id) : 0,
         room_id: row?.room_id == null ? null : String(row.room_id),
         original_file_name: String(row?.original_file_name ?? ''),
         mime_type: String(row?.mime_type ?? ''),
         extracted_text: String(row?.extracted_text ?? ''),
         created_at: String(row?.created_at ?? ''),
-      }))
+      })).filter((row) => row.id > 0)
     : []
-
-  const lineTaggedRows = docRows.filter((row) =>
-    row.original_file_name.includes(LINE_DOCUMENT_LIBRARY_FILENAME_MARKER),
-  )
-  const docHitsRaw = lineTaggedRows.filter((row) => {
+  const visibleRows = await filterVisibleDocumentRowsForUser(supabase, docRows, userId)
+  const docHitsRaw = visibleRows.filter((row) => {
     const searchable = `${row.original_file_name}\n${row.extracted_text}`
     return messageMatchesKeyword(searchable, command.keyword)
   })
 
-  const periodText = '登録済み[LINE]資料全体'
+  const periodText = '登録済み資料全体'
   if (docHitsRaw.length === 0) {
-    const lines = [`「${command.keyword}」に一致する[LINE]資料はありません（${periodText}）`]
+    const lines = [`「${command.keyword}」に一致する資料はありません（${periodText}）`]
     return splitTextForLineReply(lines.join('\n'))
   }
 
@@ -2719,15 +2718,16 @@ async function buildLineTaggedDocumentLibrarySearchReply(
 
   const scopeLabel = command.scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
   const lines: string[] = [
-    '資料ライブラリ検索結果（ファイル名に[LINE]を含む資料のみ）',
+    '資料ライブラリ検索結果',
     `対象: ${scopeLabel}`,
     `期間: ${periodText}`,
     `キーワード: ${command.keyword}`,
     `資料一致: ${docHits.length}件`,
     '※日時は会話発生時刻ではなく、資料の登録日時です。',
+    '※資料ごとの閲覧権限設定に基づき表示しています。',
   ]
   if (docRows.length >= SEARCH_MAX_DOCUMENT_ROWS) {
-    lines.push(`※資料件数が多いため、新しい順で先頭${SEARCH_MAX_DOCUMENT_ROWS}件を対象にしています（その中から[LINE]付きのみを表示）。`)
+    lines.push(`※資料件数が多いため、新しい順で先頭${SEARCH_MAX_DOCUMENT_ROWS}件を対象にしています。`)
   }
   lines.push('')
   lines.push('一致資料（新しい順）:')
@@ -2736,6 +2736,44 @@ async function buildLineTaggedDocumentLibrarySearchReply(
     lines.push(...formatDocumentSearchPreview(docHits[i], i + 1, command.keyword, command.scope === 'all_rooms'))
   }
   return splitTextForLineReply(lines.join('\n'))
+}
+
+async function filterVisibleDocumentRowsForUser(
+  supabase: ReturnType<typeof createClient>,
+  rows: SearchDocumentRow[],
+  userId: string | null,
+): Promise<SearchDocumentRow[]> {
+  if (rows.length === 0) return []
+  const documentIds = Array.from(new Set(rows.map((row) => row.id).filter((id) => Number.isInteger(id) && id > 0)))
+  if (documentIds.length === 0) return rows
+
+  const { data, error } = await supabase
+    .from('line_search_document_viewers')
+    .select('document_id, line_user_id')
+    .in('document_id', documentIds)
+  if (error) {
+    console.error('Failed to load document viewer permissions:', error.message)
+    return rows
+  }
+
+  const viewerByDocumentId = new Map<number, Set<string>>()
+  for (const row of Array.isArray(data) ? data : []) {
+    const documentId = Number((row as any)?.document_id)
+    if (!Number.isInteger(documentId) || documentId <= 0) continue
+    const viewerId = String((row as any)?.line_user_id ?? '').trim()
+    if (!viewerId) continue
+    if (!viewerByDocumentId.has(documentId)) {
+      viewerByDocumentId.set(documentId, new Set<string>())
+    }
+    viewerByDocumentId.get(documentId)?.add(viewerId)
+  }
+
+  return rows.filter((row) => {
+    const allowedViewers = viewerByDocumentId.get(row.id)
+    if (!allowedViewers || allowedViewers.size === 0) return true
+    if (!userId) return false
+    return allowedViewers.has(userId)
+  })
 }
 
 function buildDocumentSearchSnippet(text: string, keyword: string): string {
@@ -5243,6 +5281,7 @@ async function tryHandlePendingLibrarySearchConfirmation(
     command,
     supabase,
     roomId,
+    userId,
   )
   await resolvePendingLibrarySearchConfirmation(supabase, pending, 'confirmed')
   return reply

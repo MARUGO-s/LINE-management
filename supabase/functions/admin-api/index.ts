@@ -69,6 +69,11 @@ type DocumentListRow = {
   created_at: string
   updated_at: string
 }
+type DocumentViewerPermissionState = {
+  document_id: number
+  mode: "public" | "restricted"
+  allowed_user_ids: string[]
+}
 type LineUserPermissionRow = {
   line_user_id: string
   display_name: string | null
@@ -221,6 +226,22 @@ Deno.serve(async (req) => {
     if (req.method === "POST" && path === "/documents") {
       const created = await uploadDocumentFile(req, supabase)
       return json({ success: true, document: created }, 200)
+    }
+
+    const permissionPath = parseDocumentPermissionPath(path)
+    if (permissionPath != null) {
+      if (req.method === "GET") {
+        const permissionState = await fetchDocumentPermissionStateById(supabase, permissionPath)
+        return json({ success: true, permissions: permissionState }, 200)
+      }
+      if (req.method === "PUT") {
+        const body = await parseJson(req)
+        if (!isRecord(body)) {
+          throw { status: 400, message: "Invalid JSON body." } satisfies AppError
+        }
+        const permissionState = await updateDocumentPermissionStateById(supabase, permissionPath, body)
+        return json({ success: true, permissions: permissionState }, 200)
+      }
     }
 
     if (req.method === "PUT" && path === "/settings/media-upload-limit") {
@@ -1288,7 +1309,6 @@ async function fetchMediaState(
       line_message_tag: formatLineMediaTag(row.line_message_id),
     }
   }))
-
   const safeTotal = Number.isFinite(Number(count)) ? Number(count) : items.length
   const nextOffset = offset + items.length
   return {
@@ -1377,11 +1397,19 @@ async function fetchDocumentState(
       extracted_char_count: row.extracted_text.length,
     }
   }))
+  const permissionSummaries = await fetchDocumentPermissionSummaries(supabase, rows.map((row) => row.id))
 
   const safeTotal = Number.isFinite(Number(count)) ? Number(count) : items.length
   const nextOffset = offset + items.length
   return {
-    items,
+    items: items.map((item) => {
+      const summary = permissionSummaries.get(item.id)
+      return {
+        ...item,
+        permission_mode: summary?.mode ?? "public",
+        allowed_user_count: summary?.allowed_user_count ?? 0,
+      }
+    }),
     total: safeTotal,
     total_file_bytes: filteredUsageRes.stats.total_bytes,
     total_file_count: filteredUsageRes.stats.total_files,
@@ -1588,6 +1616,140 @@ function normalizeDocumentMimeType(rawMimeType: string, fileName: string): Docum
   if (ext === "docx") return DOCX_MIME_TYPE
   if (ext === "xlsx") return XLSX_MIME_TYPE
   return null
+}
+
+function parseDocumentPermissionPath(path: string): number | null {
+  const match = path.match(/^\/documents\/(\d+)\/permissions$/)
+  if (!match || !match[1]) return null
+  const documentId = Number(match[1])
+  if (!Number.isInteger(documentId) || documentId <= 0) return null
+  return documentId
+}
+
+async function ensureDocumentExists(
+  supabase: ReturnType<typeof createClient>,
+  documentId: number,
+): Promise<void> {
+  const { data, error } = await supabase
+    .from("line_search_documents")
+    .select("id")
+    .eq("id", documentId)
+    .maybeSingle()
+  if (error) {
+    throw { status: 500, message: `Failed to fetch document row: ${error.message}` } satisfies AppError
+  }
+  if (!data?.id) {
+    throw { status: 404, message: "Document not found." } satisfies AppError
+  }
+}
+
+async function fetchDocumentPermissionStateById(
+  supabase: ReturnType<typeof createClient>,
+  documentId: number,
+): Promise<DocumentViewerPermissionState> {
+  await ensureDocumentExists(supabase, documentId)
+  const { data, error } = await supabase
+    .from("line_search_document_viewers")
+    .select("line_user_id")
+    .eq("document_id", documentId)
+    .order("line_user_id", { ascending: true })
+  if (error) {
+    throw { status: 500, message: `Failed to fetch document permissions: ${error.message}` } satisfies AppError
+  }
+  const ids = Array.isArray(data)
+    ? data.map((row) => toSafeString(row?.line_user_id)).filter((value) => value.length > 0)
+    : []
+  return {
+    document_id: documentId,
+    mode: ids.length > 0 ? "restricted" : "public",
+    allowed_user_ids: ids,
+  }
+}
+
+function normalizeDocumentPermissionUserIds(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return []
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const value of raw) {
+    const normalized = String(value ?? "").trim()
+    if (!normalized || normalized.length > 191) continue
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    out.push(normalized)
+    if (out.length >= 300) break
+  }
+  return out
+}
+
+async function updateDocumentPermissionStateById(
+  supabase: ReturnType<typeof createClient>,
+  documentId: number,
+  body: Record<string, unknown>,
+): Promise<DocumentViewerPermissionState> {
+  await ensureDocumentExists(supabase, documentId)
+
+  const modeRaw = String(body.mode ?? "").trim().toLowerCase()
+  const requestedIds = normalizeDocumentPermissionUserIds(body.line_user_ids)
+  const shouldRestrict = modeRaw === "restricted" || (modeRaw !== "public" && requestedIds.length > 0)
+  if (shouldRestrict && requestedIds.length === 0) {
+    throw { status: 400, message: "restricted mode requires line_user_ids." } satisfies AppError
+  }
+
+  const { error: deleteError } = await supabase
+    .from("line_search_document_viewers")
+    .delete()
+    .eq("document_id", documentId)
+  if (deleteError) {
+    throw { status: 500, message: `Failed to clear existing document permissions: ${deleteError.message}` } satisfies AppError
+  }
+
+  if (shouldRestrict) {
+    const rows = requestedIds.map((lineUserId) => ({
+      document_id: documentId,
+      line_user_id: lineUserId,
+    }))
+    const { error: insertError } = await supabase
+      .from("line_search_document_viewers")
+      .insert(rows)
+    if (insertError) {
+      throw { status: 500, message: `Failed to save document permissions: ${insertError.message}` } satisfies AppError
+    }
+  }
+
+  return await fetchDocumentPermissionStateById(supabase, documentId)
+}
+
+async function fetchDocumentPermissionSummaries(
+  supabase: ReturnType<typeof createClient>,
+  documentIds: number[],
+): Promise<Map<number, { mode: "public" | "restricted"; allowed_user_count: number }>> {
+  const out = new Map<number, { mode: "public" | "restricted"; allowed_user_count: number }>()
+  const ids = Array.from(new Set(documentIds.filter((value) => Number.isInteger(value) && value > 0)))
+  if (ids.length === 0) return out
+
+  const { data, error } = await supabase
+    .from("line_search_document_viewers")
+    .select("document_id, line_user_id")
+    .in("document_id", ids)
+  if (error) {
+    console.error("Failed to fetch document permission summaries:", error.message)
+    return out
+  }
+
+  const counts = new Map<number, number>()
+  for (const row of Array.isArray(data) ? data : []) {
+    const documentId = Number((row as any)?.document_id)
+    if (!Number.isInteger(documentId) || documentId <= 0) continue
+    counts.set(documentId, (counts.get(documentId) || 0) + 1)
+  }
+  for (const documentId of ids) {
+    const count = counts.get(documentId) || 0
+    out.set(documentId, {
+      mode: count > 0 ? "restricted" : "public",
+      allowed_user_count: count,
+    })
+  }
+  return out
 }
 
 function sanitizeUploadFileName(value: string): string {

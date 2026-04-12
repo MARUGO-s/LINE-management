@@ -986,6 +986,12 @@
       const fileName = String(item && item.original_file_name || '(名称なし)');
       const roomName = String(item && item.room_name || '共通資料');
       const mimeType = String(item && item.mime_type || '-');
+      const permissionMode = String(item && item.permission_mode || 'public') === 'restricted' ? 'restricted' : 'public';
+      const allowedUserCountRaw = Number(item && item.allowed_user_count || 0);
+      const allowedUserCount = Number.isFinite(allowedUserCountRaw) && allowedUserCountRaw > 0 ? Math.floor(allowedUserCountRaw) : 0;
+      const permissionLabel = permissionMode === 'restricted'
+        ? ('指定ユーザーのみ（' + allowedUserCount + '人）')
+        : '全ユーザー';
       const snippet = String(item && item.snippet || '').trim();
       const excerpt = snippet ? snippet : '本文抽出なし（ファイル名一致または未抽出）';
       const downloadUrl = String(item && item.signed_url || '');
@@ -1005,8 +1011,13 @@
         '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item && item.created_at)) + '</div>',
         '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item && item.file_size_bytes)) + '</div>',
         '<div class="item-line sub">抽出: ' + escapeHtml(hasExtractedText ? (extractedCharCount + '文字') : 'なし') + '</div>',
+        '<div class="item-line sub">閲覧権限: ' + escapeHtml(permissionLabel) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(excerpt) + '">抜粋: ' + escapeHtml(excerpt) + '</div>',
-        '<div class="item-actions">' + downloadAction + '<button class="button danger document-delete-btn" type="button" data-document-id="' + escapeHtml(String(item && item.id || '')) + '">削除</button></div>',
+        '<div class="item-actions">'
+          + downloadAction
+          + '<button class="button document-permission-btn" type="button" data-document-id="' + escapeHtml(String(item && item.id || '')) + '">閲覧設定</button>'
+          + '<button class="button danger document-delete-btn" type="button" data-document-id="' + escapeHtml(String(item && item.id || '')) + '">削除</button>'
+          + '</div>',
         '</div>',
         '</article>',
       ].join('');
@@ -1055,6 +1066,48 @@
         state.docsOffset = Math.max(0, state.docsOffset - state.docsLimit);
         await loadDocuments();
       }
+    }
+
+    function normalizeLineUserIdsFromInput(raw) {
+      const source = String(raw || '').trim();
+      if (!source) return [];
+      const parts = source
+        .split(/[\s,\n\r\t、，]+/)
+        .map(function(value) { return String(value || '').trim(); })
+        .filter(function(value) { return value.length > 0; });
+      const unique = [];
+      const seen = new Set();
+      for (const value of parts) {
+        if (seen.has(value)) continue;
+        seen.add(value);
+        unique.push(value);
+      }
+      return unique;
+    }
+
+    async function configureDocumentPermissions(documentId) {
+      const id = Number(documentId);
+      if (!Number.isInteger(id) || id <= 0) throw new Error('権限設定対象の資料IDが不正です。');
+      const current = await api('/documents/' + encodeURIComponent(String(id)) + '/permissions');
+      const permissions = current && current.permissions ? current.permissions : {};
+      const currentIds = Array.isArray(permissions.allowed_user_ids)
+        ? permissions.allowed_user_ids.map(function(value) { return String(value || '').trim(); }).filter(function(value) { return value; })
+        : [];
+      const placeholder = currentIds.join(', ');
+      const rawInput = window.prompt(
+        '閲覧を許可するLINE userIdをカンマ区切りで入力してください。\n空欄で「全ユーザー閲覧」に戻します。',
+        placeholder,
+      );
+      if (rawInput === null) return;
+      const lineUserIds = normalizeLineUserIdsFromInput(rawInput);
+      await api('/documents/' + encodeURIComponent(String(id)) + '/permissions', {
+        method: 'PUT',
+        body: JSON.stringify({ line_user_ids: lineUserIds }),
+      });
+      await loadDocuments();
+      alert(lineUserIds.length > 0
+        ? ('閲覧権限を更新しました（' + lineUserIds.length + 'ユーザー）。')
+        : '閲覧権限を全ユーザーに戻しました。');
     }
 
     async function uploadDocument() {
@@ -1311,10 +1364,15 @@
     dom.documentList.addEventListener('click', async function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
-      if (!target.classList.contains('document-delete-btn')) return;
       const documentId = target.getAttribute('data-document-id') || '';
       try {
-        await deleteDocumentItem(documentId);
+        if (target.classList.contains('document-permission-btn')) {
+          await configureDocumentPermissions(documentId);
+          return;
+        }
+        if (target.classList.contains('document-delete-btn')) {
+          await deleteDocumentItem(documentId);
+        }
       } catch (error) {
         alert(error.message || String(error));
       }
