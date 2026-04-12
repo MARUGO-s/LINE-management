@@ -595,11 +595,17 @@
     }
 
     .user-permission-name {
-      font-weight: 700;
-      color: #d7edff;
+      flex: 1;
+      min-width: 0;
+      font-size: 1.12rem;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+      color: #f4fbff;
+      line-height: 1.25;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      text-shadow: 0 1px 14px rgba(108, 230, 255, 0.22);
     }
 
     .user-permission-controls {
@@ -1648,8 +1654,7 @@
           '<div class="user-permission-foot">' +
           '<div class="user-room-scope-cell"><button class="button user-room-scope" type="button">ルーム選択</button><div class="' + scopeBadgeClass + '">' + escapeHtml(scopeBadgeText) + '</div></div>' +
           '<input class="input user-note-input" type="text" value="' + escapeHtml(row.note || '') + '" placeholder="メモ">' +
-          '</div>' +
-          '<div><span class="tag ok">自動保存</span></div>';
+          '</div>';
         dom.userPermissionTableBody.appendChild(card);
       }
       isUserPermissionDirty = false;
