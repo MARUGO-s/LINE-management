@@ -268,7 +268,10 @@ const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmatio
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
 const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
 const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 365
-const SEARCH_MAX_FETCH_ROWS = 800
+/** 会話検索の DB 読み取りバッチ（PostgREST の 1 リクエストあたりの行数） */
+const SEARCH_FETCH_BATCH_SIZE = 2000
+/** 各検索段階で走査するメッセージの安全上限（件）。期間で絞るが暴走・OOM 防止のため */
+const MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS = 200_000
 const SEARCH_MAX_SUMMARY_ROWS = 120
 const SEARCH_AI_SUMMARY_MAX_HITS = 80
 const SEARCH_MAX_DOCUMENT_ROWS = 300
@@ -2431,6 +2434,75 @@ function isAcceptableAiMessageSearchIntent(intent: AiMessageSearchIntent): boole
   return true
 }
 
+/** 内部段階: 約3ヶ月 → 約6ヶ月 → 設定上の全期間（または無期限の最終段）。ヒットが出た段階で終了。 */
+function buildMessageSearchStageDayWindows(
+  effectiveDays: MessageRetentionDays,
+): Array<number | null> {
+  if (effectiveDays === 0) {
+    return [90, 180, null]
+  }
+  const cap = effectiveDays
+  const raw = [Math.min(90, cap), Math.min(180, cap), cap] as const
+  const out: Array<number | null> = []
+  for (const v of raw) {
+    if (out.length === 0 || out[out.length - 1] !== v) {
+      out.push(v)
+    }
+  }
+  return out
+}
+
+async function fetchLineMessagesForSearchBatched(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  scope: MessageSearchScope,
+  sinceIso: string | null,
+  maxRows: number,
+): Promise<{ rows: SearchMessageRow[]; truncated: boolean }> {
+  const all: SearchMessageRow[] = []
+  let offset = 0
+  let truncated = false
+  while (all.length < maxRows) {
+    const batchLimit = Math.min(SEARCH_FETCH_BATCH_SIZE, maxRows - all.length)
+    if (batchLimit <= 0) break
+    const end = offset + batchLimit - 1
+    let query = supabase
+      .from('line_messages')
+      .select('room_id, content, created_at, user_id')
+      .order('created_at', { ascending: false })
+      .range(offset, end)
+    if (sinceIso) {
+      query = query.gte('created_at', sinceIso)
+    }
+    if (scope !== 'all_rooms') {
+      query = query.eq('room_id', roomId)
+    }
+    const { data, error } = await query
+    if (error) {
+      throw new Error(error.message)
+    }
+    const chunk = Array.isArray(data) ? data : []
+    for (const row of chunk) {
+      all.push({
+        room_id: String((row as { room_id?: unknown })?.room_id ?? ''),
+        content: String((row as { content?: unknown })?.content ?? ''),
+        created_at: String((row as { created_at?: unknown })?.created_at ?? ''),
+        user_id: (row as { user_id?: unknown })?.user_id == null
+          ? null
+          : String((row as { user_id?: unknown }).user_id),
+      })
+    }
+    if (chunk.length === 0) break
+    if (chunk.length < batchLimit) break
+    offset += chunk.length
+    if (all.length >= maxRows) {
+      truncated = true
+      break
+    }
+  }
+  return { rows: all.slice(0, maxRows), truncated }
+}
+
 async function buildMessageSearchReply(
   command: MessageSearchCommand | null,
   parseError: string | null,
@@ -2461,50 +2533,51 @@ async function buildMessageSearchReply(
     command.days,
     configuredRetentionDays,
   )
-  const sinceIso = effectiveDays > 0
-    ? new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
-    : null
-
-  let query = supabase
-    .from('line_messages')
-    .select('room_id, content, created_at, user_id')
-    .order('created_at', { ascending: false })
-    .limit(SEARCH_MAX_FETCH_ROWS)
-  if (sinceIso) {
-    query = query.gte('created_at', sinceIso)
-  }
-
-  if (command.scope !== 'all_rooms') {
-    query = query.eq('room_id', roomId)
-  }
-
-  const { data, error } = await query
-
-  if (error) {
-    return [`会話検索に失敗しました。${error.message}`]
-  }
+  const stageDayWindows = buildMessageSearchStageDayWindows(effectiveDays)
+  const usedMultiStageSearch = stageDayWindows.length > 1
 
   const excludedSet = new Set((excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0))
-  const rowsRaw: SearchMessageRow[] = Array.isArray(data)
-    ? data.map((row: any) => ({
-        room_id: String(row?.room_id ?? ''),
-        content: String(row?.content ?? ''),
-        created_at: String(row?.created_at ?? ''),
-        user_id: row?.user_id == null ? null : String(row.user_id),
-      }))
-    : []
-  // Admin UI: チェックあり＝検索対象 → DB の excluded_message_search_room_ids には「チェックなし」ルームのみ入る。
-  // ここでは全ルーム横断検索時、除外 ID のルームのメッセージを落とす（＝チェックしたルームの履歴だけが残る）。
-  const rows = rowsRaw.filter((row) => {
-    if (command.scope !== 'all_rooms') return true
-    return !excludedSet.has(String(row.room_id ?? '').trim())
-  })
 
-  const hitsRaw = rows.filter((row) => {
-    if (!messageMatchesKeyword(row.content, command.keyword)) return false
-    if (isLikelyBotConversationText(row.content)) return false
-    return true
-  })
+  let hitsRaw: SearchMessageRow[] = []
+  let fetchTruncated = false
+
+  for (const boundDays of stageDayWindows) {
+    const sinceIsoStage = boundDays === null
+      ? null
+      : new Date(Date.now() - boundDays * 24 * 60 * 60 * 1000).toISOString()
+    let fetched: SearchMessageRow[] = []
+    try {
+      const batch = await fetchLineMessagesForSearchBatched(
+        supabase,
+        roomId,
+        command.scope,
+        sinceIsoStage,
+        MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS,
+      )
+      fetchTruncated ||= batch.truncated
+      fetched = batch.rows
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return [`会話検索に失敗しました。${msg}`]
+    }
+
+    // Admin UI: チェックあり＝検索対象 → excluded_message_search_room_ids は「チェックなし」ルームのみ。
+    const rows = fetched.filter((row) => {
+      if (command.scope !== 'all_rooms') return true
+      return !excludedSet.has(String(row.room_id ?? '').trim())
+    })
+
+    const hits = rows.filter((row) => {
+      if (!messageMatchesKeyword(row.content, command.keyword)) return false
+      if (isLikelyBotConversationText(row.content)) return false
+      return true
+    })
+
+    if (hits.length > 0) {
+      hitsRaw = hits
+      break
+    }
+  }
 
   if (hitsRaw.length === 0) {
     const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
@@ -2572,8 +2645,13 @@ async function buildMessageSearchReply(
   if (adjustedByRetention) {
     lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
   }
-  if (rows.length >= SEARCH_MAX_FETCH_ROWS) {
-    lines.push(`※検索対象が多いため、新しい順で先頭${SEARCH_MAX_FETCH_ROWS}件を対象にしています。`)
+  if (usedMultiStageSearch) {
+    lines.push('※会話履歴は、約3ヶ月→約6ヶ月→設定範囲の順に試し、ヒットが出た段階で終了しました。')
+  }
+  if (fetchTruncated) {
+    lines.push(
+      `※いずれかの段階でメッセージ件数が多いため、新しい順に最大${MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS}件までを走査しました。`,
+    )
   }
   if (summary) {
     lines.push('')
