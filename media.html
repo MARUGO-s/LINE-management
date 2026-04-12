@@ -873,12 +873,28 @@
       }).join('');
     }
 
-    function selectAllUsersInPermissionModal() {
+    function updateSelectAllButtonLabel() {
       const checks = Array.from(dom.documentPermissionUserList.querySelectorAll('.document-permission-check'));
+      if (checks.length === 0) {
+        dom.selectAllDocumentPermissionBtn.textContent = '全員一括選択';
+        return;
+      }
+      const allChecked = checks.every(function(input) {
+        return input instanceof HTMLInputElement && input.checked;
+      });
+      dom.selectAllDocumentPermissionBtn.textContent = allChecked ? '全選択を解除' : '全員一括選択';
+    }
+
+    function toggleSelectAllUsersInPermissionModal() {
+      const checks = Array.from(dom.documentPermissionUserList.querySelectorAll('.document-permission-check'));
+      const allChecked = checks.length > 0 && checks.every(function(input) {
+        return input instanceof HTMLInputElement && input.checked;
+      });
       for (const input of checks) {
         if (!(input instanceof HTMLInputElement)) continue;
-        input.checked = true;
+        input.checked = !allChecked;
       }
+      updateSelectAllButtonLabel();
     }
 
     function closeDocumentPermissionModal() {
@@ -1343,6 +1359,7 @@
         mergedUsers,
         state.permissionSelectedUserIds,
       );
+      updateSelectAllButtonLabel();
       dom.documentPermissionModal.classList.add('open');
       dom.documentPermissionModal.setAttribute('aria-hidden', 'false');
     }
@@ -1621,7 +1638,14 @@
     });
 
     dom.selectAllDocumentPermissionBtn.addEventListener('click', function() {
-      selectAllUsersInPermissionModal();
+      toggleSelectAllUsersInPermissionModal();
+    });
+
+    dom.documentPermissionUserList.addEventListener('change', function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLInputElement)) return;
+      if (!target.classList.contains('document-permission-check')) return;
+      updateSelectAllButtonLabel();
     });
 
     dom.saveDocumentPermissionBtn.addEventListener('click', async function() {
