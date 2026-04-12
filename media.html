@@ -389,9 +389,120 @@
       flex-wrap: wrap;
     }
 
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(1, 8, 15, 0.68);
+      backdrop-filter: blur(3px);
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .modal-card {
+      width: min(720px, calc(100vw - 28px));
+      max-height: calc(100vh - 36px);
+      overflow: hidden;
+      border-radius: 16px;
+      border: 1px solid rgba(155, 220, 255, 0.28);
+      background: rgba(8, 21, 35, 0.95);
+      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.4);
+      padding: 16px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .modal-title {
+      margin: 0;
+      font-size: 1.35rem;
+      color: #e6f6ff;
+      letter-spacing: 0.01em;
+    }
+
+    .modal-meta {
+      color: #a9ccdf;
+      font-size: 0.88rem;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    .permission-user-list {
+      border: 1px solid rgba(155, 220, 255, 0.24);
+      border-radius: 12px;
+      background: rgba(5, 17, 28, 0.55);
+      padding: 8px;
+      display: grid;
+      gap: 6px;
+      max-height: 52vh;
+      overflow-y: auto;
+    }
+
+    .permission-user-option {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: 10px;
+      padding: 8px 9px;
+      border-radius: 10px;
+      border: 1px solid rgba(155, 220, 255, 0.1);
+      background: rgba(14, 43, 63, 0.35);
+      cursor: pointer;
+    }
+
+    .permission-user-option:hover {
+      border-color: rgba(87, 216, 255, 0.35);
+      background: rgba(16, 53, 77, 0.35);
+    }
+
+    .permission-user-option input {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+      accent-color: #48d1ff;
+    }
+
+    .permission-user-name {
+      color: #e4f4ff;
+      font-size: 1rem;
+      font-weight: 700;
+      line-height: 1.22;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .permission-user-id {
+      color: #90bbd3;
+      font-size: 0.79rem;
+      line-height: 1.25;
+      word-break: break-all;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+
     @media (max-width: 760px) {
       body { padding: 12px; }
       .list { grid-template-columns: 1fr; }
+      .modal-card {
+        width: min(740px, calc(100vw - 14px));
+        max-height: calc(100vh - 18px);
+        padding: 12px;
+      }
+      .permission-user-list {
+        max-height: 58vh;
+      }
     }
   </style>
 </head>
@@ -502,6 +613,18 @@
     </section>
   </div>
 
+  <div id="documentPermissionModal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="documentPermissionModalTitle">
+      <h3 id="documentPermissionModalTitle" class="modal-title">資料の閲覧許可ユーザー選択</h3>
+      <div id="documentPermissionModalMeta" class="modal-meta">対象資料: -</div>
+      <div id="documentPermissionUserList" class="permission-user-list"></div>
+      <div class="modal-actions">
+        <button id="cancelDocumentPermissionBtn" class="button">キャンセル</button>
+        <button id="saveDocumentPermissionBtn" class="button primary">保存</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const STORE_TOKEN_KEY = 'line_summary_admin_token';
     const FIXED_PROJECT_URL = 'https://jhpmzqxqvapdkyvvhyra.supabase.co';
@@ -517,6 +640,11 @@
       docsHasMore: false,
       selectedDocumentFile: null,
       documentDropDepth: 0,
+      permissionUsers: [],
+      permissionUsersLoaded: false,
+      permissionTargetDocumentId: null,
+      permissionTargetDocumentName: '',
+      permissionSelectedUserIds: new Set(),
     };
 
     const dom = {
@@ -555,6 +683,11 @@
       documentList: document.getElementById('documentList'),
       documentPrevBtn: document.getElementById('documentPrevBtn'),
       documentNextBtn: document.getElementById('documentNextBtn'),
+      documentPermissionModal: document.getElementById('documentPermissionModal'),
+      documentPermissionModalMeta: document.getElementById('documentPermissionModalMeta'),
+      documentPermissionUserList: document.getElementById('documentPermissionUserList'),
+      cancelDocumentPermissionBtn: document.getElementById('cancelDocumentPermissionBtn'),
+      saveDocumentPermissionBtn: document.getElementById('saveDocumentPermissionBtn'),
     };
     const MEDIA_CAP_DEFAULT_BYTES = 500 * 1024 * 1024;
     const DOCUMENT_UPLOAD_ALLOWED_EXTENSIONS = new Set(['txt', 'pdf', 'docx', 'xlsx']);
@@ -680,6 +813,100 @@
         .trim();
       const src = normalized || String(fallback || 'line-media');
       return src.length <= 120 ? src : src.slice(0, 120).trimEnd();
+    }
+
+    function normalizeLineUserId(value) {
+      return String(value || '').trim();
+    }
+
+    function normalizeDisplayName(value) {
+      return String(value || '').trim();
+    }
+
+    function getLineUserDisplayLabel(user) {
+      const name = normalizeDisplayName(user && user.display_name);
+      const lineUserId = normalizeLineUserId(user && user.line_user_id);
+      return name || lineUserId || '不明ユーザー';
+    }
+
+    async function loadPermissionSelectableUsers(forceReload) {
+      if (!forceReload && state.permissionUsersLoaded) {
+        return state.permissionUsers;
+      }
+      const result = await api('/permissions/users?limit=300&offset=0');
+      const items = Array.isArray(result && result.items) ? result.items : [];
+      state.permissionUsers = items
+        .map(function(row) {
+          const lineUserId = normalizeLineUserId(row && row.line_user_id);
+          if (!lineUserId) return null;
+          return {
+            line_user_id: lineUserId,
+            display_name: normalizeDisplayName(row && row.display_name),
+            is_active: row && row.is_active !== false,
+          };
+        })
+        .filter(function(row) { return !!row; });
+      state.permissionUsersLoaded = true;
+      return state.permissionUsers;
+    }
+
+    function buildDocumentPermissionUserList(users, selectedUserIds) {
+      if (!Array.isArray(users) || users.length === 0) {
+        return '<div class="meta" style="margin:2px 4px;">選択可能なユーザーがありません。先に管理画面でユーザー権限を作成してください。</div>';
+      }
+      return users.map(function(user) {
+        const lineUserId = normalizeLineUserId(user && user.line_user_id);
+        const displayLabel = getLineUserDisplayLabel(user);
+        const isChecked = selectedUserIds.has(lineUserId);
+        return [
+          '<label class="permission-user-option">',
+          '<input class="document-permission-check" type="checkbox" data-line-user-id="' + escapeHtml(lineUserId) + '" ' + (isChecked ? 'checked' : '') + '>',
+          '<div>',
+          '<div class="permission-user-name">' + escapeHtml(displayLabel) + '</div>',
+          '<div class="permission-user-id">' + escapeHtml(lineUserId) + '</div>',
+          '</div>',
+          '</label>',
+        ].join('');
+      }).join('');
+    }
+
+    function closeDocumentPermissionModal() {
+      state.permissionTargetDocumentId = null;
+      state.permissionTargetDocumentName = '';
+      state.permissionSelectedUserIds = new Set();
+      dom.documentPermissionModal.classList.remove('open');
+      dom.documentPermissionModal.setAttribute('aria-hidden', 'true');
+      dom.documentPermissionUserList.innerHTML = '';
+    }
+
+    function getSelectedUserIdsFromPermissionModal() {
+      const checks = Array.from(dom.documentPermissionUserList.querySelectorAll('.document-permission-check'));
+      const selected = [];
+      for (const input of checks) {
+        if (!(input instanceof HTMLInputElement)) continue;
+        if (!input.checked) continue;
+        const lineUserId = normalizeLineUserId(input.getAttribute('data-line-user-id'));
+        if (!lineUserId) continue;
+        selected.push(lineUserId);
+      }
+      return Array.from(new Set(selected));
+    }
+
+    async function saveDocumentPermissionsFromModal() {
+      const documentId = Number(state.permissionTargetDocumentId || 0);
+      if (!Number.isInteger(documentId) || documentId <= 0) {
+        throw new Error('権限設定対象の資料IDが不正です。');
+      }
+      const selectedUserIds = getSelectedUserIdsFromPermissionModal();
+      await api('/documents/' + encodeURIComponent(String(documentId)) + '/permissions', {
+        method: 'PUT',
+        body: JSON.stringify({ line_user_ids: selectedUserIds }),
+      });
+      closeDocumentPermissionModal();
+      await loadDocuments();
+      alert(selectedUserIds.length > 0
+        ? ('閲覧権限を更新しました（' + selectedUserIds.length + 'ユーザー）。')
+        : '閲覧権限を全ユーザーに戻しました。');
     }
 
     function buildContextRowHtml(label, at, text) {
@@ -1015,7 +1242,7 @@
         '<div class="item-line sub" title="' + escapeHtml(excerpt) + '">抜粋: ' + escapeHtml(excerpt) + '</div>',
         '<div class="item-actions">'
           + downloadAction
-          + '<button class="button document-permission-btn" type="button" data-document-id="' + escapeHtml(String(item && item.id || '')) + '">閲覧設定</button>'
+          + '<button class="button document-permission-btn" type="button" data-document-id="' + escapeHtml(String(item && item.id || '')) + '" data-document-name="' + escapeHtml(fileName) + '">閲覧設定</button>'
           + '<button class="button danger document-delete-btn" type="button" data-document-id="' + escapeHtml(String(item && item.id || '')) + '">削除</button>'
           + '</div>',
         '</div>',
@@ -1068,46 +1295,45 @@
       }
     }
 
-    function normalizeLineUserIdsFromInput(raw) {
-      const source = String(raw || '').trim();
-      if (!source) return [];
-      const parts = source
-        .split(/[\s,\n\r\t、，]+/)
-        .map(function(value) { return String(value || '').trim(); })
-        .filter(function(value) { return value.length > 0; });
-      const unique = [];
-      const seen = new Set();
-      for (const value of parts) {
-        if (seen.has(value)) continue;
-        seen.add(value);
-        unique.push(value);
-      }
-      return unique;
-    }
-
-    async function configureDocumentPermissions(documentId) {
+    async function configureDocumentPermissions(documentId, documentName) {
       const id = Number(documentId);
       if (!Number.isInteger(id) || id <= 0) throw new Error('権限設定対象の資料IDが不正です。');
-      const current = await api('/documents/' + encodeURIComponent(String(id)) + '/permissions');
+      const [users, current] = await Promise.all([
+        loadPermissionSelectableUsers(false),
+        api('/documents/' + encodeURIComponent(String(id)) + '/permissions'),
+      ]);
       const permissions = current && current.permissions ? current.permissions : {};
       const currentIds = Array.isArray(permissions.allowed_user_ids)
-        ? permissions.allowed_user_ids.map(function(value) { return String(value || '').trim(); }).filter(function(value) { return value; })
+        ? permissions.allowed_user_ids
+          .map(function(value) { return normalizeLineUserId(value); })
+          .filter(function(value) { return value.length > 0; })
         : [];
-      const placeholder = currentIds.join(', ');
-      const rawInput = window.prompt(
-        '閲覧を許可するLINE userIdをカンマ区切りで入力してください。\n空欄で「全ユーザー閲覧」に戻します。',
-        placeholder,
-      );
-      if (rawInput === null) return;
-      const lineUserIds = normalizeLineUserIdsFromInput(rawInput);
-      await api('/documents/' + encodeURIComponent(String(id)) + '/permissions', {
-        method: 'PUT',
-        body: JSON.stringify({ line_user_ids: lineUserIds }),
+      const userMap = new Map();
+      for (const user of users) {
+        const lineUserId = normalizeLineUserId(user && user.line_user_id);
+        if (!lineUserId) continue;
+        if (!userMap.has(lineUserId)) userMap.set(lineUserId, user);
+      }
+      for (const lineUserId of currentIds) {
+        if (userMap.has(lineUserId)) continue;
+        userMap.set(lineUserId, { line_user_id: lineUserId, display_name: '', is_active: true });
+      }
+      const mergedUsers = Array.from(userMap.values()).sort(function(a, b) {
+        return getLineUserDisplayLabel(a).localeCompare(getLineUserDisplayLabel(b), 'ja');
       });
-      await loadDocuments();
-      alert(lineUserIds.length > 0
-        ? ('閲覧権限を更新しました（' + lineUserIds.length + 'ユーザー）。')
-        : '閲覧権限を全ユーザーに戻しました。');
+
+      state.permissionTargetDocumentId = id;
+      state.permissionTargetDocumentName = String(documentName || '(名称なし)');
+      state.permissionSelectedUserIds = new Set(currentIds);
+      dom.documentPermissionModalMeta.textContent =
+        '対象資料: ' + state.permissionTargetDocumentName
+        + ' | チェックしたユーザーのみ閲覧可能（未チェック=全ユーザー閲覧）';
+      dom.documentPermissionUserList.innerHTML = buildDocumentPermissionUserList(
+        mergedUsers,
+        state.permissionSelectedUserIds,
+      );
+      dom.documentPermissionModal.classList.add('open');
+      dom.documentPermissionModal.setAttribute('aria-hidden', 'false');
     }
 
     async function uploadDocument() {
@@ -1367,7 +1593,8 @@
       const documentId = target.getAttribute('data-document-id') || '';
       try {
         if (target.classList.contains('document-permission-btn')) {
-          await configureDocumentPermissions(documentId);
+          const documentName = target.getAttribute('data-document-name') || '';
+          await configureDocumentPermissions(documentId, documentName);
           return;
         }
         if (target.classList.contains('document-delete-btn')) {
@@ -1375,6 +1602,30 @@
         }
       } catch (error) {
         alert(error.message || String(error));
+      }
+    });
+
+    dom.cancelDocumentPermissionBtn.addEventListener('click', function() {
+      closeDocumentPermissionModal();
+    });
+
+    dom.saveDocumentPermissionBtn.addEventListener('click', async function() {
+      try {
+        await saveDocumentPermissionsFromModal();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.documentPermissionModal.addEventListener('click', function(event) {
+      if (event.target === dom.documentPermissionModal) {
+        closeDocumentPermissionModal();
+      }
+    });
+
+    window.addEventListener('keydown', function(event) {
+      if (event.key === 'Escape' && dom.documentPermissionModal.classList.contains('open')) {
+        closeDocumentPermissionModal();
       }
     });
 
