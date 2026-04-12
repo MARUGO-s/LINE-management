@@ -1380,8 +1380,8 @@
     async function deleteDocumentItem(documentId) {
       const id = Number(documentId);
       if (!Number.isInteger(id) || id <= 0) throw new Error('削除対象の資料IDが不正です。');
-      const ok = window.confirm('この資料を削除します。よろしいですか？');
-      if (!ok) return;
+      const confirmed = confirmDeletionByTyping('この資料');
+      if (!confirmed) return;
       await api('/documents/' + encodeURIComponent(String(id)), { method: 'DELETE' });
       await loadDocuments();
       if (state.docsTotal > 0 && state.docsOffset >= state.docsTotal && state.docsOffset > 0) {
@@ -1460,8 +1460,8 @@
     async function deleteMediaItem(mediaId) {
       const id = Number(mediaId);
       if (!Number.isInteger(id) || id <= 0) throw new Error('削除対象のIDが不正です。');
-      const ok = window.confirm('このメディアを削除します。よろしいですか？');
-      if (!ok) return;
+      const confirmed = confirmDeletionByTyping('このメディア');
+      if (!confirmed) return;
       await api('/media/' + encodeURIComponent(String(id)), { method: 'DELETE' });
       await loadMedia();
       if (state.total > 0 && state.offset >= state.total && state.offset > 0) {
@@ -1478,8 +1478,8 @@
         throw new Error('削除対象を1件以上チェックしてください。');
       }
 
-      const ok = window.confirm('選択した ' + selectedIds.length + ' 件を一括削除します。よろしいですか？');
-      if (!ok) return;
+      const confirmed = confirmDeletionByTyping('選択した ' + selectedIds.length + ' 件');
+      if (!confirmed) return;
 
       const failedIds = [];
       for (const mediaId of selectedIds) {
@@ -1502,6 +1502,19 @@
       } else {
         alert(selectedIds.length + '件を削除しました。');
       }
+    }
+
+    function confirmDeletionByTyping(targetLabel) {
+      const input = window.prompt(
+        String(targetLabel || '対象') + 'を削除するには「デリート」と入力して OK を押してください。',
+        '',
+      );
+      if (input === null) return false;
+      if (String(input).trim() !== 'デリート') {
+        alert('入力が一致しないため削除を中止しました。');
+        return false;
+      }
+      return true;
     }
 
     async function saveMediaUploadLimit() {
