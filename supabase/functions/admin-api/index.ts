@@ -1,5 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
-import { isJobTitleLabel, JOB_TITLE_OPTIONS } from "../_shared/job_titles.ts"
+import { isJobTitleLabel, JOB_TITLE_OPTIONS, jobTitleSortRank } from "../_shared/job_titles.ts"
 import {
   isMarugoGroupStoreLabel,
   MARUGO_GROUP_STORE_OPTIONS,
@@ -87,6 +87,7 @@ type LineUserPermissionRow = {
   can_library_search: boolean
   can_calendar_create: boolean
   can_calendar_update: boolean
+  can_calendar_view: boolean
   can_media_access: boolean
   excluded_message_search_room_ids: string[]
   assigned_store: string | null
@@ -129,14 +130,29 @@ const USER_PERMISSION_SORT_FETCH_CAP = 10000
 type LineUserPermissionSortable = {
   display_name?: string | null
   line_user_id?: string | null
+  assigned_job_title?: string | null
+}
+
+function userPermissionDisplaySortKey(row: LineUserPermissionSortable): string {
+  const name = String(row.display_name ?? "").trim()
+  if (name) return name.normalize("NFKC")
+  return String(row.line_user_id ?? "").trim().normalize("NFKC")
 }
 
 function sortLineUserPermissionsForAdminDisplay<T extends LineUserPermissionSortable>(rows: T[]): T[] {
-  const collator = new Intl.Collator("ja", { sensitivity: "base" })
+  const collator = new Intl.Collator("ja-JP", { sensitivity: "base", usage: "sort" })
   return [...rows].sort((a, b) => {
-    const sa = String(a.display_name ?? "").trim() || String(a.line_user_id ?? "")
-    const sb = String(b.display_name ?? "").trim() || String(b.line_user_id ?? "")
-    return collator.compare(sa, sb)
+    const ra = jobTitleSortRank(a.assigned_job_title)
+    const rb = jobTitleSortRank(b.assigned_job_title)
+    if (ra !== rb) return ra - rb
+    const sa = userPermissionDisplaySortKey(a)
+    const sb = userPermissionDisplaySortKey(b)
+    const c = collator.compare(sa, sb)
+    if (c !== 0) return c
+    return collator.compare(
+      String(a.line_user_id ?? "").trim(),
+      String(b.line_user_id ?? "").trim(),
+    )
   })
 }
 
@@ -421,13 +437,14 @@ Deno.serve(async (req) => {
           can_library_search: payload.can_library_search,
           can_calendar_create: payload.can_calendar_create,
           can_calendar_update: payload.can_calendar_update,
+          can_calendar_view: payload.can_calendar_view,
           can_media_access: payload.can_media_access,
           excluded_message_search_room_ids: payload.excluded_message_search_room_ids,
           assigned_store: payload.assigned_store,
           assigned_job_title: payload.assigned_job_title,
           updated_at: new Date().toISOString(),
         }, { onConflict: "line_user_id" })
-        .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
+        .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_calendar_view, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
         .single()
       if (error) {
         throw { status: 500, message: `Failed to upsert line user permission: ${error.message}` } satisfies AppError
@@ -685,7 +702,7 @@ async function fetchState(
     fetchStorageUsageState(supabase),
     supabase
       .from("line_user_permissions")
-      .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
+      .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_calendar_view, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
       .limit(USER_PERMISSION_SORT_FETCH_CAP),
   ])
 
@@ -733,7 +750,7 @@ async function fetchLineUserPermissions(
 
   let query = supabase
     .from("line_user_permissions")
-    .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at", { count: "exact" })
+    .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_calendar_view, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at", { count: "exact" })
     .limit(USER_PERMISSION_SORT_FETCH_CAP)
 
   if (q) {
@@ -865,6 +882,7 @@ async function backfillLineUserPermissionsFromMessages(
       can_library_search: true,
       can_calendar_create: true,
       can_calendar_update: true,
+      can_calendar_view: true,
       can_media_access: true,
       assigned_store: null,
       assigned_job_title: null,
@@ -3325,14 +3343,22 @@ function buildLineUserPermissionPayload(body: unknown): LineUserPermissionRow {
       .map((v) => String(v ?? "").trim())
       .filter((v) => v.length > 0)))
   }
+  const canCalendarView = ensureBoolean(body.can_calendar_view, "can_calendar_view", true)
+  let canCalendarCreate = ensureBoolean(body.can_calendar_create, "can_calendar_create", true)
+  let canCalendarUpdate = ensureBoolean(body.can_calendar_update, "can_calendar_update", true)
+  if (!canCalendarView) {
+    canCalendarCreate = false
+    canCalendarUpdate = false
+  }
   return {
     line_user_id: lineUserId,
     display_name: displayNameRaw || null,
     is_active: ensureBoolean(body.is_active, "is_active", true),
     can_message_search: ensureBoolean(body.can_message_search, "can_message_search", true),
     can_library_search: ensureBoolean(body.can_library_search, "can_library_search", true),
-    can_calendar_create: ensureBoolean(body.can_calendar_create, "can_calendar_create", true),
-    can_calendar_update: ensureBoolean(body.can_calendar_update, "can_calendar_update", true),
+    can_calendar_create: canCalendarCreate,
+    can_calendar_update: canCalendarUpdate,
+    can_calendar_view: canCalendarView,
     can_media_access: ensureBoolean(body.can_media_access, "can_media_access", true),
     excluded_message_search_room_ids: excludedRoomIds,
     assigned_store: assignedStore,

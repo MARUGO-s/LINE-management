@@ -640,7 +640,7 @@ const html = String.raw`<!doctype html>
 
     .user-permission-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
       gap: 12px;
     }
 
@@ -702,9 +702,19 @@ const html = String.raw`<!doctype html>
     }
 
     .user-permission-foot {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      width: 100%;
+      min-width: 0;
+    }
+
+    .user-perm-meta-row {
       display: grid;
-      grid-template-columns: 200px minmax(0, 1fr) minmax(0, 1fr);
-      gap: 10px;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px 16px;
+      width: 100%;
+      min-width: 0;
       align-items: start;
     }
 
@@ -733,14 +743,21 @@ const html = String.raw`<!doctype html>
       width: 100%;
       min-width: 0;
       max-width: 100%;
+      padding: 8px 10px;
+      font-size: 0.86rem;
+      line-height: 1.4;
+      min-height: 40px;
+      box-sizing: border-box;
     }
 
     .user-room-scope-cell {
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 6px;
+      gap: 10px;
       width: 100%;
+      min-width: 0;
     }
 
     .user-room-scope-cell .button {
@@ -773,7 +790,10 @@ const html = String.raw`<!doctype html>
       .user-permission-controls {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
-      .user-permission-foot {
+    }
+
+    @media (max-width: 560px) {
+      .user-perm-meta-row {
         grid-template-columns: 1fr;
       }
     }
@@ -1127,7 +1147,7 @@ const html = String.raw`<!doctype html>
 
   <div id="userRoomScopeModal" class="modal-backdrop" aria-hidden="true">
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="userRoomScopeModalTitle">
-      <h3 id="userRoomScopeModalTitle" class="modal-title">会話検索の対象外ルーム選択</h3>
+      <h3 id="userRoomScopeModalTitle" class="modal-title">会話検索の対象ルーム選択</h3>
       <div id="userRoomScopeModalMeta" class="modal-meta">対象ユーザー: -</div>
       <div id="userRoomScopeModalList" class="room-scope-modal-list"></div>
       <div class="modal-actions">
@@ -1874,14 +1894,17 @@ const html = String.raw`<!doctype html>
           '<label class="user-permission-control"><span>利用可</span><input class="user-permission-check user-is-active" type="checkbox" ' + (row.is_active !== false ? 'checked' : '') + '></label>' +
           '<label class="user-permission-control"><span>会話検索</span><input class="user-permission-check user-can-message-search" type="checkbox" ' + (row.can_message_search !== false ? 'checked' : '') + '></label>' +
           '<label class="user-permission-control"><span>資料検索</span><input class="user-permission-check user-can-library-search" type="checkbox" ' + (row.can_library_search !== false ? 'checked' : '') + '></label>' +
+          '<label class="user-permission-control"><span>予定閲覧</span><input class="user-permission-check user-can-calendar-view" type="checkbox" ' + (row.can_calendar_view !== false ? 'checked' : '') + '></label>' +
           '<label class="user-permission-control"><span>予定作成</span><input class="user-permission-check user-can-calendar-create" type="checkbox" ' + (row.can_calendar_create !== false ? 'checked' : '') + '></label>' +
           '<label class="user-permission-control"><span>予定更新</span><input class="user-permission-check user-can-calendar-update" type="checkbox" ' + (row.can_calendar_update !== false ? 'checked' : '') + '></label>' +
           '<label class="user-permission-control"><span>メディア</span><input class="user-permission-check user-can-media-access" type="checkbox" ' + (row.can_media_access !== false ? 'checked' : '') + '></label>' +
           '</div>' +
           '<div class="user-permission-foot">' +
           '<div class="user-room-scope-cell"><button class="button user-room-scope" type="button">ルーム選択</button><div class="' + scopeBadgeClass + '">' + escapeHtml(scopeBadgeText) + '</div></div>' +
+          '<div class="user-perm-meta-row">' +
           buildAssignedStoreSelectHtml(row.assigned_store) +
           buildJobTitleSelectHtml(row.assigned_job_title) +
+          '</div>' +
           '</div>';
         dom.userPermissionTableBody.appendChild(card);
       }
@@ -1932,7 +1955,7 @@ const html = String.raw`<!doctype html>
         dom.userRoomScopeModalList.innerHTML = '<div class="empty">ルームがまだありません。</div>';
       } else {
         dom.userRoomScopeModalList.innerHTML = options.map(function(room) {
-          const checked = excludedSet.has(room.room_id) ? 'checked' : '';
+          const checked = excludedSet.has(room.room_id) ? '' : 'checked';
           return (
             '<label class="room-scope-option">' +
             '<input class="room-scope-check" type="checkbox" data-room-id="' + escapeHtml(room.room_id) + '" ' + checked + '>' +
@@ -1955,12 +1978,12 @@ const html = String.raw`<!doctype html>
       if (!activeUserRoomScopeRow) return;
       const checks = Array.from(dom.userRoomScopeModalList.querySelectorAll('.room-scope-check'));
       const excludedRoomIds = checks
-        .filter(function(el) { return el instanceof HTMLInputElement && el.checked; })
+        .filter(function(el) { return el instanceof HTMLInputElement && !el.checked; })
         .map(function(el) { return String(el.getAttribute('data-room-id') || '').trim(); })
         .filter(function(v) { return !!v; });
       activeUserRoomScopeRow.dataset.excludedMessageSearchRoomIds = JSON.stringify(excludedRoomIds);
       await saveSingleUserPermissionRow(activeUserRoomScopeRow);
-      alert('検索対象ルームを保存しました。');
+      alert('会話検索の対象ルームを保存しました。');
       closeUserRoomScopeModal();
     }
 
@@ -2290,6 +2313,7 @@ const html = String.raw`<!doctype html>
       const isActiveInput = tr.querySelector('.user-is-active');
       const canMessageSearchInput = tr.querySelector('.user-can-message-search');
       const canLibrarySearchInput = tr.querySelector('.user-can-library-search');
+      const canCalendarViewInput = tr.querySelector('.user-can-calendar-view');
       const canCalendarCreateInput = tr.querySelector('.user-can-calendar-create');
       const canCalendarUpdateInput = tr.querySelector('.user-can-calendar-update');
       const canMediaAccessInput = tr.querySelector('.user-can-media-access');
@@ -2300,6 +2324,7 @@ const html = String.raw`<!doctype html>
         is_active: !!(isActiveInput && isActiveInput.checked),
         can_message_search: !!(canMessageSearchInput && canMessageSearchInput.checked),
         can_library_search: !!(canLibrarySearchInput && canLibrarySearchInput.checked),
+        can_calendar_view: !!(canCalendarViewInput && canCalendarViewInput.checked),
         can_calendar_create: !!(canCalendarCreateInput && canCalendarCreateInput.checked),
         can_calendar_update: !!(canCalendarUpdateInput && canCalendarUpdateInput.checked),
         can_media_access: !!(canMediaAccessInput && canMediaAccessInput.checked),
@@ -2713,6 +2738,12 @@ const html = String.raw`<!doctype html>
       const card = target.closest('.user-permission-card');
       if (!card) return;
       if (target.classList.contains('user-permission-check')) {
+        if (target.classList.contains('user-can-calendar-view') && target instanceof HTMLInputElement && !target.checked) {
+          const createEl = card.querySelector('.user-can-calendar-create');
+          const updateEl = card.querySelector('.user-can-calendar-update');
+          if (createEl instanceof HTMLInputElement) createEl.checked = false;
+          if (updateEl instanceof HTMLInputElement) updateEl.checked = false;
+        }
         markUserPermissionDirty();
         saveSingleUserPermissionRow(card, { reload: false }).catch(function(e) {
           alert(e.message || String(e));

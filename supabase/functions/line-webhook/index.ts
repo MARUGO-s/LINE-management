@@ -214,6 +214,7 @@ type LineUserPermissionPolicy = {
   canLibrarySearch: boolean
   canCalendarCreate: boolean
   canCalendarUpdate: boolean
+  canCalendarView: boolean
   canMediaAccess: boolean
   excludedMessageSearchRoomIds: string[]
 }
@@ -486,6 +487,8 @@ Deno.serve(async (req) => {
         const canLibrarySearch = userIsActive && roomReplyPolicy.messageSearchLibraryEnabled && lineUserPermission.canLibrarySearch
         const canCalendarCreate = userIsActive && roomReplyPolicy.calendarAiAutoCreateEnabled && lineUserPermission.canCalendarCreate
         const canCalendarUpdate = userIsActive && lineUserPermission.canCalendarUpdate
+        /** 予定の一覧・確認（list）。`can_calendar_view` で制御（作成・更新とは独立）。 */
+        const canListCalendarEvents = userIsActive && lineUserPermission.canCalendarView
         const text = String(event.message.text ?? '').trim()
         const quotedMessageId = extractQuotedLineMessageId(event.message)
         if (!userIsActive) {
@@ -617,6 +620,10 @@ Deno.serve(async (req) => {
             }
           }
 
+          if (calendarEnvState.ok && !canCalendarUpdate && looksLikeCalendarUpdateConversationText(text)) {
+            aiAutoCreateReply = buildCalendarPermissionDeniedReply()
+          }
+
           if (canLibrarySearch) {
             const librarySearchReply = await tryHandlePendingLibrarySearchConfirmation(
               text,
@@ -662,7 +669,7 @@ Deno.serve(async (req) => {
                 : AI_PRIMARY_INTENT_CONFIRM_MIN_CONFIDENCE
               if (primaryIntent.confidence >= primaryMinConfidence) {
                 forceAiMessageSearch = primaryIntent.intent === 'search_messages'
-                forceAiCalendarList = primaryIntent.intent === 'list_calendar' && canCalendarUpdate
+                forceAiCalendarList = primaryIntent.intent === 'list_calendar' && canListCalendarEvents
                 forceAiCalendarCreate = primaryIntent.intent === 'create_calendar' && !isOperationalCoordination
               } else if (primaryIntent.confidence >= primaryConfirmMinConfidence) {
                 if (isRoomInteractiveReplyEnabled(roomReplyPolicy)) {
@@ -749,7 +756,7 @@ Deno.serve(async (req) => {
                 continue
               }
               const permissionReply = currentRoomExcludedForCurrentScope
-                ? 'このルームはこのユーザーの会話検索対象外に設定されています。管理画面で対象ルームを変更してください。'
+                ? 'このルームは会話検索の対象に含まれていません。管理画面のユーザー権限で、このルームにチェックを入れて対象にしてください。'
                 : messageSearchCommand && canLibrarySearch
                 ? await buildLibrarySearchPromptWhenMessageSearchDisabled(
                   supabase,
@@ -799,7 +806,7 @@ Deno.serve(async (req) => {
             const calendarPermissionDenied =
               (command?.kind === 'create' && !canCalendarCreate) ||
               (command?.kind === 'update' && !canCalendarUpdate) ||
-              (command?.kind === 'list' && !canCalendarUpdate)
+              (command?.kind === 'list' && !canListCalendarEvents)
             if (calendarPermissionDenied) {
               if (!roomCanReply) continue
               if (!lineAccessToken) {
@@ -810,9 +817,12 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for calendar permission status.')
                 continue
               }
+              const deniedReply = command?.kind === 'list'
+                ? buildCalendarViewPermissionDeniedReply()
+                : buildCalendarPermissionDeniedReply()
               const deniedReplyResult = await replyLineMessage(
                 replyToken,
-                'この質問は、現在このルームで権限が付与されていないため実行できません。',
+                deniedReply,
                 lineAccessToken,
               )
               if (!deniedReplyResult.ok) {
@@ -855,7 +865,7 @@ Deno.serve(async (req) => {
             continue
           }
 
-          if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && forceAiCalendarList && canCalendarUpdate) {
+          if (!commandParse.matched && calendarEnvState.ok && !!groqApiKey && forceAiCalendarList && canListCalendarEvents) {
             const aiListIntent = await extractCalendarListIntentWithGroq(
               text,
               calendarEnvState.env.timezone,
@@ -1108,7 +1118,9 @@ Deno.serve(async (req) => {
       }
 
       if (!aiAutoCreateReply && isDirectUserChat) {
-        aiAutoCreateReply = buildDirectUserFallbackReply(event.message)
+        aiAutoCreateReply = buildDirectUserFallbackReply(event.message, {
+          canCalendarUpdate: lineUserPermission.canCalendarUpdate,
+        })
       }
 
       if (aiAutoCreateReply) {
@@ -1783,6 +1795,7 @@ async function ensureLineUserPermissionSeed(
       can_library_search: false,
       can_calendar_create: false,
       can_calendar_update: false,
+      can_calendar_view: false,
       can_media_access: false,
       assigned_store: null,
       assigned_job_title: null,
@@ -1848,10 +1861,28 @@ function buildDirectUserRoomPolicy(base: RoomReplyPolicy): RoomReplyPolicy {
   }
 }
 
-function buildDirectUserFallbackReply(message: any): string {
+function buildCalendarViewPermissionDeniedReply(): string {
+  return [
+    '予定の一覧・確認（閲覧）を行う権限が付与されていないため、実行できません。',
+    '管理者が管理画面の「ユーザー権限」で、このアカウントに「予定閲覧」を許可してください。',
+  ].join('\n')
+}
+
+function buildCalendarPermissionDeniedReply(): string {
+  return [
+    '予定の追加・変更を行う権限が付与されていないため、実行できません。',
+    '管理者が管理画面の「ユーザー権限」で、このアカウントに「予定作成」「予定更新」などを許可してください。',
+  ].join('\n')
+}
+
+function buildDirectUserFallbackReply(message: any, options: { canCalendarUpdate: boolean }): string {
   const type = String(message?.type ?? '').trim().toLowerCase()
   if (type !== 'text') {
     return 'メッセージありがとうございます。内容を正確に解釈するため、テキストで送ってください。'
+  }
+  const text = String(message?.text ?? '').trim()
+  if (looksLikeCalendarUpdateConversationText(text) && !options.canCalendarUpdate) {
+    return buildCalendarPermissionDeniedReply()
   }
   return [
     'うまく意図を解釈できませんでした。',
@@ -1975,6 +2006,7 @@ async function loadLineUserPermissionPolicy(
     canLibrarySearch: true,
     canCalendarCreate: true,
     canCalendarUpdate: true,
+    canCalendarView: true,
     canMediaAccess: true,
     excludedMessageSearchRoomIds: [],
   }
@@ -1985,7 +2017,7 @@ async function loadLineUserPermissionPolicy(
   try {
     const { data, error } = await supabase
       .from('line_user_permissions')
-      .select('is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_media_access, excluded_message_search_room_ids')
+      .select('is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_calendar_view, can_media_access, excluded_message_search_room_ids')
       .eq('line_user_id', normalizedUserId)
       .maybeSingle()
     if (error || !data) {
@@ -1998,6 +2030,7 @@ async function loadLineUserPermissionPolicy(
       canLibrarySearch: data?.can_library_search !== false,
       canCalendarCreate: data?.can_calendar_create !== false,
       canCalendarUpdate: data?.can_calendar_update !== false,
+      canCalendarView: data?.can_calendar_view !== false,
       canMediaAccess: data?.can_media_access !== false,
       excludedMessageSearchRoomIds: normalizeExcludedMessageSearchRoomIds(data?.excluded_message_search_room_ids),
     }
@@ -2460,6 +2493,8 @@ async function buildMessageSearchReply(
         user_id: row?.user_id == null ? null : String(row.user_id),
       }))
     : []
+  // Admin UI: チェックあり＝検索対象 → DB の excluded_message_search_room_ids には「チェックなし」ルームのみ入る。
+  // ここでは全ルーム横断検索時、除外 ID のルームのメッセージを落とす（＝チェックしたルームの履歴だけが残る）。
   const rows = rowsRaw.filter((row) => {
     if (command.scope !== 'all_rooms') return true
     return !excludedSet.has(String(row.room_id ?? '').trim())
