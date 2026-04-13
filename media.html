@@ -361,6 +361,16 @@
       overflow-y: auto;
     }
 
+    .extract-analysis {
+      margin-top: 7px;
+      border-top: 1px solid rgba(125, 211, 168, 0.28);
+      padding-top: 6px;
+      font-size: 0.76rem;
+      color: #bde9d2;
+      line-height: 1.4;
+      white-space: normal;
+    }
+
     .item-line a {
       color: #8de3ff;
       text-decoration: underline;
@@ -899,6 +909,24 @@
       return src.slice(0, max).trimEnd() + '…';
     }
 
+    function inferFilePurpose(fileName, mimeType, contentPreview) {
+      const text = (String(fileName || '') + ' ' + String(contentPreview || '')).toLowerCase();
+      if (!text.trim()) return '';
+
+      const hasAny = function(words) {
+        return words.some(function(word) { return text.includes(word); });
+      };
+
+      if (hasAny(['棚卸', '在庫', 'stock'])) return '在庫・棚卸管理ファイルの可能性が高いです。';
+      if (hasAny(['原価', '単価', '仕入', 'cost'])) return '原価・仕入管理ファイルの可能性が高いです。';
+      if (hasAny(['請求', 'invoice', '支払', '入金'])) return '請求・支払管理ファイルの可能性が高いです。';
+      if (hasAny(['勤怠', 'シフト', '出勤', '退勤'])) return '勤怠・シフト管理ファイルの可能性が高いです。';
+      if (hasAny(['売上', 'sales', '予算', '実績'])) return '売上・予実管理ファイルの可能性が高いです。';
+      if (hasAny(['顧客', '取引先', '連絡先', 'customer'])) return '顧客・取引先管理ファイルの可能性が高いです。';
+      if (String(mimeType || '').includes('spreadsheetml')) return 'Excel台帳系ファイルの可能性があります（項目ベースで管理する資料）。';
+      return '業務資料ファイルと推定されます。';
+    }
+
     function safeDownloadName(value, fallback) {
       const normalized = String(value || '')
         .replace(/[\\/:*?"<>|]+/g, '_')
@@ -1276,10 +1304,14 @@
                 ? String(item.content_preview).trim()
                 : '';
               if (cp) {
+                const analysis = inferFilePurpose(name, mime, cp);
                 return [
                   '<div class="extract-block">',
                   '<div class="extract-label">抽出テキストあり（サーバーがファイルを解析して取得・先頭付近）</div>',
                   '<div class="extract-text">', escapeHtml(cp), '</div>',
+                  (analysis
+                    ? '<div class="extract-analysis">解析結果（推定）: ' + escapeHtml(analysis) + '</div>'
+                    : ''),
                   '</div>',
                 ].join('');
               }

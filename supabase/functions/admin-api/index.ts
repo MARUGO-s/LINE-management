@@ -113,6 +113,17 @@ const DOCUMENT_TEXT_BINARY_RATIO_MAX = 0.08
 const PDFJS_MODULE_URL = "https://esm.sh/pdfjs-dist@4.10.38/build/pdf.mjs"
 const DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 const XLSX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+/** OOXML SpreadsheetML — explicit NS first; fall back when DOM omits default NS or `*` behaves oddly. */
+const OFFICE_SPREADSHEETML_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+function getSheetElementsLive(root: Document | Element, localName: string): HTMLCollectionOf<Element> {
+  const byNs = root.getElementsByTagNameNS(OFFICE_SPREADSHEETML_NS, localName)
+  if (byNs.length > 0) return byNs
+  const byStar = root.getElementsByTagNameNS("*", localName)
+  if (byStar.length > 0) return byStar
+  return root.getElementsByTagName(localName) as HTMLCollectionOf<Element>
+}
 const DOCUMENT_ARCHIVE_MAX_XML_ENTRIES = 120
 const DOCUMENT_ARCHIVE_MAX_ENTRIES = 400
 const DOCUMENT_ARCHIVE_TOTAL_UNCOMPRESSED_MAX_BYTES = 80 * 1024 * 1024
@@ -2239,9 +2250,11 @@ async function inspectOfficeArchiveSafety(
     }
   }
 
-  const compressionRatio = totalUncompressed / Math.max(totalCompressed, 1)
-  if (compressionRatio > DOCUMENT_ARCHIVE_MAX_COMPRESSION_RATIO) {
-    return { ok: false, message: "Office archive compression ratio is too high." }
+  if (totalCompressed > 0) {
+    const compressionRatio = totalUncompressed / totalCompressed
+    if (compressionRatio > DOCUMENT_ARCHIVE_MAX_COMPRESSION_RATIO) {
+      return { ok: false, message: "Office archive compression ratio is too high." }
+    }
   }
 
   const hasContentTypes = !!zip.file("[Content_Types].xml")
@@ -2445,7 +2458,7 @@ async function extractDocxText(bytes: Uint8Array): Promise<string> {
 }
 
 function collectTextNodes(root: Element, localName: string): string[] {
-  const nodes = root.getElementsByTagNameNS("*", localName)
+  const nodes = getSheetElementsLive(root, localName)
   const out: string[] = []
   for (let i = 0; i < nodes.length; i += 1) {
     const value = nodes.item(i)?.textContent ?? ""
@@ -2457,7 +2470,7 @@ function collectTextNodes(root: Element, localName: string): string[] {
 function parseXlsxSharedStrings(xml: string): string[] {
   const doc = parseXmlDocument(xml)
   if (!doc || !doc.documentElement) return []
-  const siNodes = doc.getElementsByTagNameNS("*", "si")
+  const siNodes = getSheetElementsLive(doc, "si")
   const out: string[] = []
   for (let i = 0; i < siNodes.length; i += 1) {
     const si = siNodes.item(i)
@@ -2473,19 +2486,26 @@ function parseXlsxSharedStrings(xml: string): string[] {
 
 function getDirectChildElementsByLocalName(root: Element, localName: string): Element[] {
   const out: Element[] = []
-  for (let i = 0; i < root.children.length; i += 1) {
-    const child = root.children.item(i)
+  const nodes = root.childNodes
+  for (let i = 0; i < nodes.length; i += 1) {
+    const child = nodes.item(i)
     if (!child) continue
-    if ((child.localName || "").toLowerCase() === localName) {
-      out.push(child)
+    if (child.nodeType !== Node.ELEMENT_NODE) continue
+    const el = child as Element
+    if ((el.localName || "").toLowerCase() === localName) {
+      out.push(el)
     }
   }
   return out
 }
 
-function getFirstDescendantElementByLocalName(root: Element, localName: string): Element | null {
-  const nodes = root.getElementsByTagNameNS("*", localName)
-  return nodes.length > 0 ? nodes.item(0) : null
+function getFirstSpreadsheetDescendant(root: Element, localName: string): Element | null {
+  const byNs = root.getElementsByTagNameNS(OFFICE_SPREADSHEETML_NS, localName)
+  if (byNs.length > 0) return byNs.item(0)
+  const byStar = root.getElementsByTagNameNS("*", localName)
+  if (byStar.length > 0) return byStar.item(0)
+  const byTag = root.getElementsByTagName(localName)
+  return byTag.length > 0 ? byTag.item(0) : null
 }
 
 function columnNameToIndex(columnName: string): number | null {
@@ -2506,7 +2526,7 @@ function getColumnIndexFromCellRef(cellRef: string): number | null {
 
 function extractXlsxCellText(cell: Element, sharedStrings: string[]): string {
   const cellType = String(cell.getAttribute("t") || "").trim().toLowerCase()
-  const valueEl = getFirstDescendantElementByLocalName(cell, "v")
+  const valueEl = getFirstSpreadsheetDescendant(cell, "v")
   const rawValue = String(valueEl?.textContent ?? "").trim()
 
   if (cellType === "s") {
@@ -2517,7 +2537,7 @@ function extractXlsxCellText(cell: Element, sharedStrings: string[]): string {
     return ""
   }
   if (cellType === "inlineStr") {
-    const inlineEl = getFirstDescendantElementByLocalName(cell, "is")
+    const inlineEl = getFirstSpreadsheetDescendant(cell, "is")
     if (!inlineEl) return ""
     return collectTextNodes(inlineEl, "t").join("")
   }
@@ -2526,7 +2546,7 @@ function extractXlsxCellText(cell: Element, sharedStrings: string[]): string {
     if (rawValue === "0") return "FALSE"
   }
   if (rawValue) return rawValue
-  const formulaEl = getFirstDescendantElementByLocalName(cell, "f")
+  const formulaEl = getFirstSpreadsheetDescendant(cell, "f")
   const formula = String(formulaEl?.textContent ?? "").trim()
   return formula ? `=${formula}` : ""
 }
@@ -2535,7 +2555,7 @@ function extractXlsxSheetText(xml: string, sharedStrings: string[]): string {
   const doc = parseXmlDocument(xml)
   if (!doc || !doc.documentElement) return ""
 
-  const rowNodes = doc.getElementsByTagNameNS("*", "row")
+  const rowNodes = getSheetElementsLive(doc, "row")
   const lines: string[] = []
   for (let i = 0; i < rowNodes.length; i += 1) {
     const row = rowNodes.item(i)
@@ -2577,6 +2597,97 @@ function compareXlsxWorksheetEntry(a: string, b: string): number {
   return Number.isFinite(diff) && diff !== 0 ? diff : a.localeCompare(b)
 }
 
+function decodeXmlEntities(value: string): string {
+  return String(value ?? "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+}
+
+function stripXmlTags(value: string): string {
+  return decodeXmlEntities(String(value ?? "").replace(/<[^>]+>/g, ""))
+}
+
+function parseXlsxSharedStringsByRegex(xml: string): string[] {
+  const out: string[] = []
+  const siRe = /<si\b[^>]*>([\s\S]*?)<\/si>/gi
+  let siMatch: RegExpExecArray | null
+  while ((siMatch = siRe.exec(xml)) !== null) {
+    const siBody = String(siMatch[1] ?? "")
+    const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/gi
+    let tMatch: RegExpExecArray | null
+    const pieces: string[] = []
+    while ((tMatch = tRe.exec(siBody)) !== null) {
+      pieces.push(stripXmlTags(String(tMatch[1] ?? "")))
+    }
+    out.push(pieces.join(""))
+  }
+  return out
+}
+
+function parseXlsxSheetTextByRegex(xml: string, sharedStrings: string[]): string {
+  const lines: string[] = []
+  const rowRe = /<row\b[^>]*>([\s\S]*?)<\/row>/gi
+  let rowMatch: RegExpExecArray | null
+
+  while ((rowMatch = rowRe.exec(xml)) !== null) {
+    const rowBody = String(rowMatch[1] ?? "")
+    const cols: string[] = []
+    let nextCol = 0
+    const cellRe = /<c\b([^>]*)>([\s\S]*?)<\/c>/gi
+    let cellMatch: RegExpExecArray | null
+
+    while ((cellMatch = cellRe.exec(rowBody)) !== null) {
+      const attr = String(cellMatch[1] ?? "")
+      const body = String(cellMatch[2] ?? "")
+      const refMatch = /\br="([A-Z]+\d+)"/i.exec(attr)
+      const idx = refMatch ? getColumnIndexFromCellRef(refMatch[1]) : null
+      const col = idx == null ? nextCol : idx
+      while (nextCol < col) {
+        cols.push("")
+        nextCol += 1
+      }
+
+      const typeMatch = /\bt="([^"]+)"/i.exec(attr)
+      const cellType = String(typeMatch?.[1] ?? "").trim().toLowerCase()
+      let text = ""
+      if (cellType === "s") {
+        const vMatch = /<v\b[^>]*>([\s\S]*?)<\/v>/i.exec(body)
+        const sharedIdx = Number(String(vMatch?.[1] ?? "").trim())
+        if (Number.isInteger(sharedIdx) && sharedIdx >= 0 && sharedIdx < sharedStrings.length) {
+          text = String(sharedStrings[sharedIdx] ?? "")
+        }
+      } else if (cellType === "inlineStr") {
+        const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/gi
+        let tMatch: RegExpExecArray | null
+        const pieces: string[] = []
+        while ((tMatch = tRe.exec(body)) !== null) {
+          pieces.push(stripXmlTags(String(tMatch[1] ?? "")))
+        }
+        text = pieces.join("")
+      } else {
+        const vMatch = /<v\b[^>]*>([\s\S]*?)<\/v>/i.exec(body)
+        const rawValue = stripXmlTags(String(vMatch?.[1] ?? "")).trim()
+        if (rawValue) {
+          text = rawValue
+        } else {
+          const fMatch = /<f\b[^>]*>([\s\S]*?)<\/f>/i.exec(body)
+          const formula = stripXmlTags(String(fMatch?.[1] ?? "")).trim()
+          if (formula) text = `=${formula}`
+        }
+      }
+      cols.push(text)
+      nextCol = col + 1
+    }
+
+    while (cols.length > 0 && !String(cols[cols.length - 1] ?? "").trim()) cols.pop()
+    if (cols.length > 0) lines.push(cols.join("\t"))
+  }
+  return lines.join("\n")
+}
+
 async function extractXlsxText(bytes: Uint8Array): Promise<string> {
   const zip = await loadOfficeZip(bytes)
   if (!zip) return ""
@@ -2602,7 +2713,22 @@ async function extractXlsxText(bytes: Uint8Array): Promise<string> {
     if (!text) continue
     remainingChars = appendChunkWithinLimit(chunks, text, remainingChars)
   }
-  return normalizeExtractedText(chunks.join("\n"))
+  const domText = normalizeExtractedText(chunks.join("\n"))
+  if (domText) return domText
+
+  const sharedXml = sharedEntry ? await readOfficeXmlEntry(sharedEntry) : ""
+  const sharedByRegex = sharedXml ? parseXlsxSharedStringsByRegex(sharedXml) : []
+  const regexChunks: string[] = []
+  let remainingRegexChars = DOCUMENT_EXTRACT_MAX_CHARS
+  for (const entry of worksheetEntries) {
+    if (remainingRegexChars <= 0) break
+    const xml = await readOfficeXmlEntry(entry)
+    if (!xml) continue
+    const text = parseXlsxSheetTextByRegex(xml, sharedByRegex)
+    if (!text) continue
+    remainingRegexChars = appendChunkWithinLimit(regexChunks, text, remainingRegexChars)
+  }
+  return normalizeExtractedText(regexChunks.join("\n"))
 }
 
 function tryDecodeText(bytes: Uint8Array): string {
