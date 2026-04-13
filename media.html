@@ -1202,6 +1202,9 @@
         '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item.created_at)) + '</div>',
         '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(mime) + '">MIME: ' + escapeHtml(mime) + '</div>',
+        (item.content_preview
+          ? '<div class="item-line sub" title="' + escapeHtml(String(item.content_preview)) + '">内容抜粋: ' + escapeHtml(String(item.content_preview)) + '</div>'
+          : ''),
         '<div class="item-line sub" title="' + escapeHtml(String(item.line_message_tag || '')) + '">タグ: ' + escapeHtml(String(item.line_message_tag || '-')) + '</div>',
         selectBlock,
         contextBlock,

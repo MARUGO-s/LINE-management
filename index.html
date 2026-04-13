@@ -1247,12 +1247,12 @@
     }
 
     function applyNewRoomDefaultCheckboxes() {
-      dom.newRoomBotReplyEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, true);
+      dom.newRoomBotReplyEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, false);
       dom.newRoomSendSummary.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_SEND_SUMMARY_KEY, false);
       dom.newRoomTomorrowReminder.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY, false);
       dom.newRoomMediaFileAccessEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY, true);
       dom.newRoomCalendarAutoCreate.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY, true);
-      dom.newRoomSilentAutoRegister.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_SILENT_AUTO_REGISTER_KEY, false);
+      dom.newRoomSilentAutoRegister.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_SILENT_AUTO_REGISTER_KEY, true);
       dom.newRoomGmailAlertEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, false);
       refreshNewRoomConfigSummary();
     }
@@ -1958,12 +1958,12 @@
       const silentAutoRegisterInput = tr.querySelector('.room-silent-auto-register');
       const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
       const featureConfig = {
-        bot_reply_enabled: botReplyEnabledInput ? !!botReplyEnabledInput.checked : parseDatasetBoolean(tr.dataset.botReplyEnabled, true),
+        bot_reply_enabled: botReplyEnabledInput ? !!botReplyEnabledInput.checked : parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
         send_room_summary: sendSummaryInput ? !!sendSummaryInput.checked : parseDatasetBoolean(tr.dataset.roomSendSummary, false),
         calendar_tomorrow_reminder_enabled: tomorrowReminderInput ? !!tomorrowReminderInput.checked : parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
         media_file_access_enabled: mediaFileAccessEnabledInput ? !!mediaFileAccessEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
         calendar_ai_auto_create_enabled: calendarAutoCreateInput ? !!calendarAutoCreateInput.checked : parseDatasetBoolean(tr.dataset.roomCalendarAutoCreate, true),
-        calendar_silent_auto_register_enabled: silentAutoRegisterInput ? !!silentAutoRegisterInput.checked : parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, false),
+        calendar_silent_auto_register_enabled: silentAutoRegisterInput ? !!silentAutoRegisterInput.checked : parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, true),
         gmail_reservation_alert_enabled: gmailAlertEnabledInput ? !!gmailAlertEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
       };
       return {
@@ -2045,12 +2045,12 @@
         const room = entry.room;
         const setting = entry.setting;
         const roomFeatureConfig = {
-          bot_reply_enabled: (setting && setting.bot_reply_enabled) !== false,
+          bot_reply_enabled: !!(setting && setting.bot_reply_enabled === true),
           send_room_summary: setting && setting.send_room_summary === true,
           calendar_tomorrow_reminder_enabled: setting && setting.calendar_tomorrow_reminder_enabled === true,
           media_file_access_enabled: (setting && setting.media_file_access_enabled) !== false,
           calendar_ai_auto_create_enabled: (setting && setting.calendar_ai_auto_create_enabled) !== false,
-          calendar_silent_auto_register_enabled: setting && setting.calendar_silent_auto_register_enabled === true,
+          calendar_silent_auto_register_enabled: (setting && setting.calendar_silent_auto_register_enabled) !== false,
           gmail_reservation_alert_enabled: setting && setting.gmail_reservation_alert_enabled === true,
         };
         const tr = document.createElement('tr');
@@ -2071,22 +2071,22 @@
         tr.dataset.messageCleanupTiming = String((setting && setting.message_cleanup_timing) || '');
         const configSummary = buildRoomConfigSummary({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
-          bot_reply_enabled: parseDatasetBoolean(tr.dataset.botReplyEnabled, true),
+          bot_reply_enabled: parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
           send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
           calendar_tomorrow_reminder_enabled: parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
           media_file_access_enabled: parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
           calendar_ai_auto_create_enabled: parseDatasetBoolean(tr.dataset.roomCalendarAutoCreate, true),
-          calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, false),
+          calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, true),
           gmail_reservation_alert_enabled: parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
         });
         const configToneClass = roomConfigToneClass(getRoomConfigEnabledCount({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
-          bot_reply_enabled: parseDatasetBoolean(tr.dataset.botReplyEnabled, true),
+          bot_reply_enabled: parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
           send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
           calendar_tomorrow_reminder_enabled: parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
           media_file_access_enabled: parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
           calendar_ai_auto_create_enabled: parseDatasetBoolean(tr.dataset.roomCalendarAutoCreate, true),
-          calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, false),
+          calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, true),
           gmail_reservation_alert_enabled: parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
         }));
         const roomIdRaw = String(room.room_id || '');

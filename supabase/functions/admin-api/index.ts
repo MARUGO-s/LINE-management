@@ -47,6 +47,7 @@ type MediaListRow = {
   original_file_name: string | null
   mime_type: string | null
   file_size_bytes: number
+  content_preview: string | null
   created_at: string
 }
 type MediaMessageContext = {
@@ -1491,7 +1492,7 @@ async function fetchMediaState(
   let query = supabase
     .from("line_message_media")
     .select(
-      "id, message_id, line_message_id, room_id, user_id, media_type, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, created_at",
+      "id, message_id, line_message_id, room_id, user_id, media_type, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, content_preview, created_at",
       { count: "exact" },
     )
     .order("created_at", { ascending: false })
@@ -2711,6 +2712,9 @@ function normalizeMediaListRow(value: unknown): MediaListRow | null {
     original_file_name: value.original_file_name == null ? null : String(value.original_file_name),
     mime_type: value.mime_type == null ? null : String(value.mime_type),
     file_size_bytes: toNonNegativeInteger(value.file_size_bytes),
+    content_preview: value.content_preview == null || value.content_preview === ""
+      ? null
+      : String(value.content_preview),
     created_at: String(value.created_at ?? ""),
   }
 }
@@ -3393,7 +3397,7 @@ function buildRoomSettingsPayload(body: unknown): {
   if (botReplyEnabledRaw != null && typeof botReplyEnabledRaw !== "boolean") {
     throw { status: 400, message: "bot_reply_enabled must be boolean when provided." } satisfies AppError
   }
-  const botReplyEnabled = botReplyEnabledRaw !== false
+  const botReplyEnabled = botReplyEnabledRaw === true
 
   const sendRoomSummary = body.send_room_summary
   if (typeof sendRoomSummary !== "boolean") {
@@ -3416,7 +3420,7 @@ function buildRoomSettingsPayload(body: unknown): {
   if (roomSilentAutoRegisterEnabledRaw != null && typeof roomSilentAutoRegisterEnabledRaw !== "boolean") {
     throw { status: 400, message: "calendar_silent_auto_register_enabled must be boolean when provided." } satisfies AppError
   }
-  const roomSilentAutoRegisterEnabled = roomSilentAutoRegisterEnabledRaw === true
+  const roomSilentAutoRegisterEnabled = roomSilentAutoRegisterEnabledRaw !== false
 
   const messageSearchEnabledRaw = body.message_search_enabled
   if (messageSearchEnabledRaw != null && typeof messageSearchEnabledRaw !== "boolean") {
