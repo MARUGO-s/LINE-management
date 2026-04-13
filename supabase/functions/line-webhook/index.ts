@@ -1,6 +1,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
-import { extractLineMediaFileContentPreview } from '../_shared/line_media_content_preview.ts'
+import { extractLineMediaFileContentPreview, extractLineMediaFileRawText } from '../_shared/line_media_content_preview.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
+import { MARUGO_GROUP_STORE_OPTIONS } from '../_shared/marugo_group_stores.ts'
 
 type CalendarListScope =
   | 'today'
@@ -257,6 +258,49 @@ type SearchDocumentRow = {
 }
 
 type StorableLineMediaType = 'image' | 'video' | 'audio' | 'file'
+type MediaSearchStage = 'select_period' | 'select_category' | 'select_item'
+type MediaSearchPeriodMonths = 3 | 6 | 12 | 0
+type MediaSearchCategoryKey =
+  | 'all'
+  | 'labor'
+  | 'shift'
+  | 'cost_inventory'
+  | 'recipe'
+  | 'billing'
+  | 'sales'
+  | 'procurement'
+  | 'haccp'
+  | 'manual'
+type MediaSearchCandidate = {
+  idx: number
+  line_message_id: string
+  room_id: string
+  room_label: string
+  sender_id: string
+  sender_name: string
+  original_file_name: string
+  storage_bucket: string
+  storage_path: string
+  created_at: string
+  category_key: MediaSearchCategoryKey
+  category_label: string
+  preview_short: string
+}
+type PendingMediaSearch = {
+  id: string
+  conversation_key: string
+  stage: MediaSearchStage
+  period_months: MediaSearchPeriodMonths
+  category_key: MediaSearchCategoryKey
+  sender_query: string
+  item_cursor: number
+  items: MediaSearchCandidate[]
+  expires_at: string
+}
+type HaccpScheduleEntry = {
+  storeName: string
+  date: string
+}
 
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 const DEFAULT_DURATION_MIN = 60
@@ -282,6 +326,8 @@ const CALENDAR_UPDATE_PENDING_TABLE = 'calendar_update_pending_targets'
 const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmations'
 const MESSAGE_SEARCH_EXPAND_PENDING_TABLE = 'message_search_expand_pending_confirmations'
 const MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE = 'message_search_followup_pending_confirmations'
+const MEDIA_SEARCH_PENDING_TABLE = 'media_search_pending_confirmations'
+const HACCP_SCHEDULE_REGISTRATION_TABLE = 'haccp_schedule_calendar_registrations'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
 const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
 const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 365
@@ -299,6 +345,9 @@ const LINE_MEDIA_BUCKET = 'line-media'
 const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
 /** 「メディアURL [件数]」で返す最大件数（トーク文字数・メッセージ数の上限を考慮） */
 const SAVED_MEDIA_URL_COMMAND_MAX = 3
+const MEDIA_SEARCH_CANDIDATE_MAX = 10
+const MEDIA_SEARCH_FETCH_LIMIT = 80
+const MEDIA_SEARCH_PENDING_TTL_MIN = 20
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
@@ -494,16 +543,20 @@ Deno.serve(async (req) => {
       /** 友だち 1:1 は既定で履歴全文は保存しないが、メディア保存が有効なら画像等は DB + Storage に残す（メディアURL 用） */
       const shouldPersistMessage = shouldPersistLineMessage(source, event.message) ||
         (isDirectUserChat && !!storableMediaType && canUseMedia)
+      const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
+      let calendarSourceMeta: CalendarSourceMeta = {
+        roomName: roomReplyPolicy.roomName,
+        userName: senderDisplayName,
+      }
 
       if (event.message?.type === 'text') {
         if (lineAccessToken && !senderDisplayName) {
           senderDisplayName = await fetchLineMessageSenderDisplayName(source, lineAccessToken)
         }
-        const calendarSourceMeta: CalendarSourceMeta = {
+        calendarSourceMeta = {
           roomName: roomReplyPolicy.roomName,
           userName: senderDisplayName,
         }
-        const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
         const userIsActive = lineUserPermission.isActive
         const isCurrentRoomExcludedForMessageSearch = isRoomExcludedForMessageSearch(
           lineUserPermission.excludedMessageSearchRoomIds,
@@ -596,6 +649,67 @@ Deno.serve(async (req) => {
           const replyResultEarly = await replyLineMessage(replyToken, urlReplyEarly, lineAccessToken)
           if (!replyResultEarly.ok) {
             console.error('Failed to reply saved media URL command:', replyResultEarly.error)
+          }
+          continue
+        }
+
+        const mediaSearchStartCmd = parseMediaSearchStartCommand(text)
+        if (mediaSearchStartCmd) {
+          if (!lineAccessToken || !replyToken) {
+            if (!lineAccessToken) {
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply media search command.')
+            }
+            if (!replyToken) {
+              console.error('Missing replyToken for media search command.')
+            }
+            continue
+          }
+          if (!roomCanReply) {
+            continue
+          }
+          if (!canUseMedia) {
+            const denyReply = await replyLineMessage(
+              replyToken,
+              'メディア検索を使うには、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
+              lineAccessToken,
+            )
+            if (!denyReply.ok) {
+              console.error('Failed to reply media search permission status:', denyReply.error)
+            }
+            continue
+          }
+          await savePendingMediaSearch(supabase, roomId, userId, {
+            stage: 'select_period',
+            periodMonths: 3,
+            categoryKey: 'all',
+            senderQuery: '',
+            itemCursor: 0,
+            items: [],
+          })
+          const startReply = await replyLineMessage(replyToken, buildMediaSearchPeriodPrompt(), lineAccessToken)
+          if (!startReply.ok) {
+            console.error('Failed to reply media search period prompt:', startReply.error)
+          }
+          continue
+        }
+
+        const mediaSearchPendingReply = await tryHandlePendingMediaSearch(
+          text,
+          supabase,
+          roomId,
+          userId,
+          canUseMedia,
+        )
+        if (mediaSearchPendingReply) {
+          if (!lineAccessToken || !replyToken) {
+            if (!lineAccessToken) console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply media search pending.')
+            if (!replyToken) console.error('Missing replyToken for media search pending.')
+            continue
+          }
+          if (!roomCanReply) continue
+          const pendingReply = await replyLineMessage(replyToken, mediaSearchPendingReply, lineAccessToken)
+          if (!pendingReply.ok) {
+            console.error('Failed to reply media search pending:', pendingReply.error)
           }
           continue
         }
@@ -1196,15 +1310,26 @@ Deno.serve(async (req) => {
           console.log(`Saved message from ${roomId}: ${content.substring(0, 30)}...`)
           const savedMessageId = String(savedMessage?.id ?? '').trim()
           if (savedMessageId && shouldStoreMediaFile) {
-            await trySaveLineMediaContent(
+            const mediaSaveReply = await trySaveLineMediaContent(
               supabase,
               lineAccessToken,
               event.message,
               savedMessageId,
               roomId,
               userId,
+              senderDisplayName,
               mediaUploadMaxBytes,
+              (lineUserPermission.canCalendarCreate && roomReplyPolicy.calendarAiAutoCreateEnabled && calendarEnvState.ok)
+                ? calendarEnvState.env
+                : null,
+              calendarSourceMeta,
             )
+            if (mediaSaveReply && roomCanReply && lineAccessToken && replyToken) {
+              const mediaReplyResult = await replyLineMessage(replyToken, mediaSaveReply, lineAccessToken)
+              if (!mediaReplyResult.ok) {
+                console.error('Failed to reply media save result:', mediaReplyResult.error)
+              }
+            }
           }
         }
       }
@@ -1302,19 +1427,22 @@ async function trySaveLineMediaContent(
   lineMessageRowId: string,
   roomId: string,
   userId: string | null,
+  senderDisplayName: string | null,
   mediaUploadMaxBytes: number,
-): Promise<void> {
+  calendarEnv: CalendarEnv | null,
+  sourceMeta: CalendarSourceMeta,
+): Promise<string | null> {
   const mediaType = normalizeStorableLineMediaType(message?.type)
-  if (!mediaType) return
+  if (!mediaType) return null
 
   const lineMessageId = String(message?.id ?? '').trim()
   if (!lineMessageId) {
     console.warn('Skip media save: LINE message ID is missing.')
-    return
+    return null
   }
   if (!lineAccessToken) {
     console.warn(`Skip media save: LINE_CHANNEL_ACCESS_TOKEN is missing (type=${mediaType}, lineMessageId=${lineMessageId}).`)
-    return
+    return null
   }
 
   const { data: existing, error: existingError } = await supabase
@@ -1325,40 +1453,40 @@ async function trySaveLineMediaContent(
 
   if (existingError) {
     console.error('Failed to inspect existing media metadata:', existingError)
-    return
+    return null
   }
   if (existing?.id != null) {
-    return
+    return null
   }
 
   const contentFetch = await fetchLineMessageBinary(lineMessageId, lineAccessToken, mediaUploadMaxBytes)
   if (!contentFetch.ok) {
     console.error(`Failed to fetch media content from LINE (lineMessageId=${lineMessageId}):`, contentFetch.error)
-    return
+    return null
   }
 
   const fileSizeBytes = contentFetch.bytes.byteLength
   if (fileSizeBytes <= 0) {
     console.warn(`Skip media save: empty payload (lineMessageId=${lineMessageId}).`)
-    return
+    return null
   }
   if (fileSizeBytes >= mediaUploadMaxBytes) {
     console.warn(
       `Skip media save: payload too large (${fileSizeBytes} bytes, limit(<)=${mediaUploadMaxBytes}, lineMessageId=${lineMessageId}).`,
     )
-    return
+    return null
   }
 
   const usageBefore = await loadLineMediaUsageTotals(supabase)
   if (!usageBefore.ok) {
     console.error(`Skip media save: failed to inspect total media usage (lineMessageId=${lineMessageId}): ${usageBefore.error}`)
-    return
+    return null
   }
   if (usageBefore.totalBytes + fileSizeBytes > LINE_MEDIA_TOTAL_CAP_BYTES) {
     console.warn(
       `Skip media save: total media cap exceeded (${usageBefore.totalBytes} + ${fileSizeBytes} > ${LINE_MEDIA_TOTAL_CAP_BYTES}, lineMessageId=${lineMessageId}).`,
     )
-    return
+    return null
   }
 
   const extension = resolveMediaExtension(mediaType, contentFetch.contentType, String(message?.fileName ?? ''))
@@ -1379,7 +1507,7 @@ async function trySaveLineMediaContent(
 
   if (uploadResult.error) {
     console.error(`Failed to upload media to storage (lineMessageId=${lineMessageId}):`, uploadResult.error)
-    return
+    return null
   }
 
   let contentPreview: string | null = null
@@ -1400,6 +1528,7 @@ async function trySaveLineMediaContent(
     line_message_id: lineMessageId,
     room_id: roomId,
     user_id: userId,
+    sender_display_name: senderDisplayName ? String(senderDisplayName).trim() : null,
     media_type: mediaType,
     storage_bucket: LINE_MEDIA_BUCKET,
     storage_path: storagePath,
@@ -1413,7 +1542,25 @@ async function trySaveLineMediaContent(
     const code = String((insertError as any)?.code ?? '')
     if (code === '23505') return
     console.error(`Failed to insert media metadata (lineMessageId=${lineMessageId}):`, insertError)
-    return
+    return null
+  }
+
+  let haccpReply: string | null = null
+  if (mediaType === 'file' && calendarEnv) {
+    haccpReply = await tryRegisterHaccpScheduleFromMediaFile(
+      supabase,
+      {
+        bytes: contentFetch.bytes,
+        contentType: contentFetch.contentType,
+        fileName: originalFileName,
+        lineMessageId,
+        roomId,
+        userId,
+        senderDisplayName: senderDisplayName ?? null,
+      },
+      calendarEnv,
+      sourceMeta,
+    )
   }
 
   const usageAfter = await loadLineMediaUsageTotals(supabase)
@@ -1432,10 +1579,11 @@ async function trySaveLineMediaContent(
     if (rollbackMetaRes.error) {
       console.error(`Failed to rollback media metadata for lineMessageId=${lineMessageId}:`, rollbackMetaRes.error)
     }
-    return
+    return haccpReply
   }
 
   console.log(`Saved media content (${mediaType}) for room=${roomId}, lineMessageId=${lineMessageId}`)
+  return haccpReply
 }
 
 function sanitizeDownloadFileNameForWebhook(value: string): string {
@@ -1553,6 +1701,873 @@ async function buildSavedMediaUrlReply(
     return body
   }
   return [header, ...chunks]
+}
+
+function looksLikeHaccpScheduleFile(fileName: string, preview: string): boolean {
+  const text = `${String(fileName || '')} ${String(preview || '')}`.toLowerCase()
+  if (!text.trim()) return false
+  const hasTopic = /haccp|ハサップ|衛生|点検/.test(text)
+  const hasSchedule = /スケジュール|実施日|予定|計画|schedule/.test(text)
+  return hasTopic && hasSchedule
+}
+
+function normalizeYmd(year: number, month: number, day: number): string | null {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function inferDefaultYearFromHints(fileName: string, text: string): number {
+  const hint = `${String(fileName || '')} ${String(text || '')}`
+  const y4 = hint.match(/(20\d{2})[\/\-.年]?\d{0,2}/)
+  if (y4) return Number(y4[1])
+  const y2m2 = hint.match(/(?:^|[^\d])(\d{2})(0[1-9]|1[0-2])(?:[^\d]|$)/)
+  if (y2m2) {
+    const yy = Number(y2m2[1])
+    if (yy >= 0 && yy <= 99) return 2000 + yy
+  }
+  return new Date().getFullYear()
+}
+
+function extractDatesFromText(value: string, defaultYear?: number): string[] {
+  const text = String(value || '')
+  const out: string[] = []
+  const fullRe = /(\d{4})[\/\-.年](\d{1,2})[\/\-.月](\d{1,2})日?/g
+  let m: RegExpExecArray | null
+  while ((m = fullRe.exec(text)) !== null) {
+    const ymd = normalizeYmd(Number(m[1]), Number(m[2]), Number(m[3]))
+    if (ymd) out.push(ymd)
+  }
+  const year = Number.isInteger(defaultYear) ? Number(defaultYear) : new Date().getFullYear()
+  const mdRe = /(^|[^\d])(\d{1,2})[\/\-.月](\d{1,2})日?/g
+  while ((m = mdRe.exec(text)) !== null) {
+    const ymd = normalizeYmd(year, Number(m[2]), Number(m[3]))
+    if (ymd) out.push(ymd)
+  }
+  return Array.from(new Set(out))
+}
+
+function normalizeStoreToken(value: string): string {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[・･ー\-＿_]/g, '')
+    .replace(/[（）()【】\[\]]/g, '')
+    .replace(/株式会社ワルツ/g, '')
+    .trim()
+}
+
+const STORE_ALIAS_MAP: Record<string, string> = {
+  'cavacava': 'Cava Cava',
+  'cava': 'Cava Cava',
+  'marugod': 'マルゴ D',
+  'marugo d': 'マルゴ D',
+  'sobaju': 'ソバージュ',
+  'soba-ju': 'ソバージュ',
+  '371bar': 'サンナナイチ バル',
+  'バルペロタ': 'バルぺロタ',
+  'どないや新宿三丁目店': '元祖どないや 新宿三丁目店',
+  'マルゴオット': 'マルゴ オット',
+  'マルゴグランデ': 'マルゴ グランデ',
+  'マルゴセカンド': 'マルゴ セカンド',
+  'マルゴ四谷': 'マルゴ 四谷',
+  'マルゴ新橋': 'マルゴ 新橋',
+}
+
+function resolveBestStoreName(rawName: string): string | null {
+  const normalized = normalizeStoreToken(rawName)
+  if (!normalized) return null
+  const aliasHit = STORE_ALIAS_MAP[normalized]
+  if (aliasHit) return aliasHit
+  const candidates = [...MARUGO_GROUP_STORE_OPTIONS]
+    .map((store) => ({ store, norm: normalizeStoreToken(store) }))
+    .filter((row) => row.norm.length > 0)
+    .sort((a, b) => b.norm.length - a.norm.length)
+
+  for (const candidate of candidates) {
+    if (normalized.includes(candidate.norm) || candidate.norm.includes(normalized)) {
+      return candidate.store
+    }
+  }
+  return String(rawName || '').trim() || null
+}
+
+function parseDateCellToYmd(value: string): string | null {
+  const raw = String(value || '').trim()
+  if (!raw) return null
+  const full = raw.match(/(\d{4})[\/\-.年](\d{1,2})[\/\-.月](\d{1,2})/)
+  if (full) return normalizeYmd(Number(full[1]), Number(full[2]), Number(full[3]))
+  const serial = Number(raw)
+  if (Number.isFinite(serial) && serial > 30000 && serial < 70000) {
+    const ms = Math.round((serial - 25569) * 86400 * 1000)
+    const d = new Date(ms)
+    return normalizeYmd(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate())
+  }
+  return null
+}
+
+function parseTimeCellToHm(value: string): string {
+  const raw = String(value || '').trim()
+  if (!raw) return '10:00'
+  const hm = raw.match(/(\d{1,2}):(\d{2})/)
+  if (hm) {
+    return `${String(Number(hm[1])).padStart(2, '0')}:${String(Number(hm[2])).padStart(2, '0')}`
+  }
+  const num = Number(raw)
+  if (Number.isFinite(num)) {
+    if (num > 0 && num < 1) {
+      const totalMinutes = Math.round(num * 24 * 60)
+      const hh = Math.floor(totalMinutes / 60) % 24
+      const mm = totalMinutes % 60
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+    }
+    if (num > 30000 && num < 70000) {
+      const fraction = num - Math.floor(num)
+      if (fraction > 0) {
+        const totalMinutes = Math.round(fraction * 24 * 60)
+        const hh = Math.floor(totalMinutes / 60) % 24
+        const mm = totalMinutes % 60
+        return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+      }
+    }
+  }
+  return '10:00'
+}
+
+type HaccpScheduleResolvedEntry = HaccpScheduleEntry & { time: string }
+
+function findBestStoreNameInText(text: string): string | null {
+  const normalized = normalizeStoreToken(text)
+  if (!normalized) return null
+  const aliasKeys = Object.keys(STORE_ALIAS_MAP).sort((a, b) => b.length - a.length)
+  for (const key of aliasKeys) {
+    if (normalized.includes(key)) return STORE_ALIAS_MAP[key]
+  }
+  const candidates = [...MARUGO_GROUP_STORE_OPTIONS]
+    .map((store) => ({ store, norm: normalizeStoreToken(store) }))
+    .filter((row) => row.norm.length > 0)
+    .sort((a, b) => b.norm.length - a.norm.length)
+  for (const candidate of candidates) {
+    if (normalized.includes(candidate.norm) || candidate.norm.includes(normalized)) {
+      return candidate.store
+    }
+  }
+  return null
+}
+
+function parseTimeFromLooseText(text: string): string {
+  const match = /(^|[^\d])([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)/.exec(String(text || ''))
+  if (match) {
+    const hh = Number(match[2])
+    const mm = Number(match[3])
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+  }
+  return '10:00'
+}
+
+function extractHaccpScheduleEntriesFromLooseLines(rawText: string, fileName?: string): HaccpScheduleResolvedEntry[] {
+  const lines = String(rawText || '').replace(/\r/g, '\n').split('\n').map((line) => line.trim()).filter(Boolean)
+  if (lines.length === 0) return []
+  const defaultYear = inferDefaultYearFromHints(String(fileName || ''), rawText)
+  const entries: HaccpScheduleResolvedEntry[] = []
+  for (let i = 0; i < lines.length; i += 1) {
+    const current = lines[i]
+    const storeName = findBestStoreNameInText(current)
+    if (!storeName) continue
+    const combined = [lines[i - 1], lines[i], lines[i + 1], lines[i + 2]].filter(Boolean).join(' ')
+    const dates = extractDatesFromText(combined, defaultYear)
+    if (dates.length === 0) continue
+    const time = parseTimeFromLooseText(combined)
+    for (const date of dates) {
+      entries.push({ storeName, date, time })
+    }
+  }
+  const dedup = new Map<string, HaccpScheduleResolvedEntry>()
+  for (const entry of entries) {
+    dedup.set(`${entry.storeName}::${entry.date}::${entry.time}`, entry)
+  }
+  return Array.from(dedup.values())
+}
+
+function extractHaccpScheduleEntries(rawText: string, fileName?: string): HaccpScheduleResolvedEntry[] {
+  const text = String(rawText || '').replace(/\r/g, '\n')
+  if (!text.trim()) return []
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean)
+
+  let headerStoreIdx = -1
+  let headerDateIdx = -1
+  let headerTimeIdx = -1
+  let headerRow = -1
+  for (let i = 0; i < lines.length; i += 1) {
+    const cells = lines[i].split('\t').map((cell) => cell.trim())
+    for (let c = 0; c < cells.length; c += 1) {
+      const cell = cells[c]
+      if (headerStoreIdx < 0 && /店舗名/.test(cell)) headerStoreIdx = c
+      if (headerDateIdx < 0 && /(店舗実施日|点検実施日|実施日)/.test(cell)) headerDateIdx = c
+      if (headerTimeIdx < 0 && /(点検時間|実施時間|時間)/.test(cell)) headerTimeIdx = c
+    }
+    if (headerStoreIdx >= 0 && headerDateIdx >= 0 && headerTimeIdx >= 0) {
+      headerRow = i
+      break
+    }
+  }
+  if (headerRow < 0) return []
+
+  const entries: HaccpScheduleResolvedEntry[] = []
+  for (let i = headerRow + 1; i < lines.length; i += 1) {
+    const cells = lines[i].split('\t').map((cell) => cell.trim())
+    const storeCell = String(cells[headerStoreIdx] ?? '')
+    const dateCell = String(cells[headerDateIdx] ?? '')
+    const timeCell = String(cells[headerTimeIdx] ?? '')
+    if (!storeCell && !dateCell && !timeCell) continue
+    const storeName = resolveBestStoreName(storeCell)
+    const date = parseDateCellToYmd(dateCell)
+    if (!storeName || !date) continue
+    const time = parseTimeCellToHm(timeCell)
+    entries.push({ storeName, date, time })
+  }
+
+  const dedup = new Map<string, HaccpScheduleResolvedEntry>()
+  for (const entry of entries) {
+    dedup.set(`${entry.storeName}::${entry.date}::${entry.time}`, entry)
+  }
+  const tableEntries = Array.from(dedup.values())
+  if (tableEntries.length > 0) return tableEntries
+  return extractHaccpScheduleEntriesFromLooseLines(text, fileName)
+}
+
+async function tryRegisterHaccpScheduleFromMediaFile(
+  supabase: ReturnType<typeof createClient>,
+  file: {
+    bytes: Uint8Array
+    contentType: string
+    fileName: string
+    lineMessageId: string
+    roomId: string
+    userId: string | null
+    senderDisplayName: string | null
+  },
+  calendarEnv: CalendarEnv,
+  sourceMeta: CalendarSourceMeta,
+): Promise<string | null> {
+  const quickPreview = await extractLineMediaFileContentPreview(file.bytes, file.contentType, file.fileName) ?? ''
+  if (!looksLikeHaccpScheduleFile(file.fileName, quickPreview)) return null
+
+  const rawText = await extractLineMediaFileRawText(file.bytes, file.contentType, file.fileName)
+  if (!rawText) {
+    return 'HACCP資料を検出しましたが、本文抽出に失敗したため予定登録は行いませんでした。'
+  }
+  const scheduleEntries = extractHaccpScheduleEntries(rawText, file.fileName).slice(0, 60)
+  if (scheduleEntries.length === 0) {
+    return 'HACCP資料を検出しましたが、店舗名と実施日の組み合わせを抽出できませんでした。'
+  }
+
+  const { data: existingRows, error: existingError } = await supabase
+    .from(HACCP_SCHEDULE_REGISTRATION_TABLE)
+    .select('store_name, event_date')
+    .eq('line_message_id', file.lineMessageId)
+  if (existingError) {
+    console.error('Failed to inspect HACCP schedule registrations:', existingError.message)
+    return 'HACCP予定の重複確認に失敗したため、登録を中断しました。'
+  }
+  const existing = new Set(
+    (Array.isArray(existingRows) ? existingRows : []).map((row: any) => `${String(row.store_name || '')}::${String(row.event_date || '')}`),
+  )
+
+  let createdCount = 0
+  let failedCount = 0
+  const createdDetails: string[] = []
+  for (const entry of scheduleEntries) {
+    const dedupeKey = `${entry.storeName}::${entry.date}`
+    if (existing.has(dedupeKey)) continue
+    const command: CalendarCreateCommand = {
+      kind: 'create',
+      date: entry.date,
+      time: entry.time,
+      durationMin: 60,
+      title: `${entry.storeName} HACCP衛生点検`,
+      location: entry.storeName,
+    }
+    const result = await createCalendarEvent(command, calendarEnv, file.roomId, file.userId, undefined, sourceMeta)
+    if (!result.ok) {
+      console.error(`Failed to create HACCP schedule event (${entry.storeName} ${entry.date}):`, result.error)
+      failedCount += 1
+      continue
+    }
+    const { error: saveError } = await supabase
+      .from(HACCP_SCHEDULE_REGISTRATION_TABLE)
+      .upsert({
+        line_message_id: file.lineMessageId,
+        room_id: file.roomId,
+        user_id: file.userId,
+        sender_display_name: file.senderDisplayName,
+        original_file_name: file.fileName,
+        store_name: entry.storeName,
+        event_date: entry.date,
+        calendar_event_id: result.eventId ?? null,
+        created_at: new Date().toISOString(),
+      }, { onConflict: 'line_message_id,store_name,event_date' })
+    if (saveError) {
+      console.error('Failed to save HACCP registration log:', saveError.message)
+      failedCount += 1
+      continue
+    }
+    createdCount += 1
+    createdDetails.push(`- ${entry.storeName} / ${entry.date} ${entry.time}`)
+  }
+  if (createdCount > 0) {
+    const detailBody = createdDetails.slice(0, 20).join('\n')
+    const header = failedCount > 0
+      ? `HACCP衛生点検の予定を ${createdCount} 件登録しました（${failedCount} 件は登録失敗）。`
+      : `HACCP衛生点検の予定を ${createdCount} 件カレンダー登録しました。`
+    return [header, '登録明細（店舗 / 日付 時間）', detailBody].join('\n')
+  }
+  return 'HACCP予定はすべて既登録のため、新規登録はありませんでした。'
+}
+
+const MEDIA_CATEGORY_DEFINITIONS: Array<{ key: MediaSearchCategoryKey; label: string; keywords: string[] }> = [
+  { key: 'labor', label: '労務', keywords: ['労働', '労務', '雇用', '就業', '労働条件', '労働相談', 'アルバイト', 'パート', '求人', '採用', '時給', '賃金', '労働基準', '労基', 'labor', 'labour'] },
+  { key: 'shift', label: 'シフト', keywords: ['シフト', '勤怠', '出勤', '退勤', '勤務', '勤務表', 'シフト表', '打刻', '勤怠表', 'タイムカード'] },
+  { key: 'cost_inventory', label: '原価棚卸', keywords: ['原価', '棚卸', '在庫', 'stock', '仕入', '単価', 'ロス率', '原価率', '在庫数', '棚卸表'] },
+  { key: 'recipe', label: 'レシピ', keywords: ['レシピ', '配合', '仕込み', '分量', '歩留', '手順', '材料', '調理'] },
+  { key: 'billing', label: '請求支払', keywords: ['請求', 'invoice', '支払', '入金', '振込', '締日', '請求先', '支払期日', '買掛', '売掛'] },
+  { key: 'sales', label: '売上予実', keywords: ['売上', 'sales', '予算', '実績', '前年差', '目標', '客単価', '来客数', '月次売上'] },
+  { key: 'procurement', label: '発注納品', keywords: ['発注', '納品', '納品書', '発注書', '納入', '納品業者', '仕入先', 'リードタイム'] },
+  {
+    key: 'haccp',
+    label: '衛生HACCP',
+    keywords: [
+      'haccp',
+      'ハサップ',
+      '衛生',
+      '衛生管理',
+      '衛生点検',
+      '衛生記録',
+      '温度管理',
+      '中心温度',
+      '冷蔵温度',
+      '冷凍温度',
+      '消毒',
+      '清掃',
+      '点検表',
+      '点検記録',
+      '実施日',
+      '実施記録',
+      'チェックシート',
+      '記録表',
+      '賞味期限',
+      '消費期限',
+      '食中毒',
+      '手洗い',
+    ],
+  },
+  { key: 'manual', label: 'マニュアル', keywords: ['マニュアル', '手順書', '運用手順', '業務フロー', 'オペレーション', '研修', '教育'] },
+]
+
+function computeMediaCategory(text: string): { key: MediaSearchCategoryKey; label: string } {
+  const lower = String(text ?? '').toLowerCase()
+  if (!lower.trim()) return { key: 'all', label: '未分類' }
+  let best: { key: MediaSearchCategoryKey; label: string; score: number } | null = null
+  for (const category of MEDIA_CATEGORY_DEFINITIONS) {
+    const score = category.keywords.reduce((sum, keyword) => sum + (lower.includes(keyword) ? 1 : 0), 0)
+    if (score <= 0) continue
+    if (!best || score > best.score) best = { key: category.key, label: category.label, score }
+  }
+  if (!best) return { key: 'all', label: '業務資料' }
+  return { key: best.key, label: best.label }
+}
+
+function clipMediaPreview(text: string, max = 42): string {
+  const normalized = String(text ?? '').replace(/\s+/g, ' ').trim()
+  if (!normalized) return ''
+  if (normalized.length <= max) return normalized
+  return `${normalized.slice(0, max - 1).trimEnd()}…`
+}
+
+function buildMediaSearchPeriodPrompt(): string {
+  return [
+    '保存メディア検索を開始します。まず期間を選んで返信してください。',
+    '1) 3ヶ月  2) 6ヶ月  3) 1年  4) 全期間',
+    '例: 3ヶ月',
+    '※ このあと候補一覧（番号付き）を返します。番号を送るとURLを返します。',
+  ].join('\n')
+}
+
+function buildMediaSearchCategoryPrompt(periodMonths: MediaSearchPeriodMonths): string {
+  const periodLabel = periodMonths === 0 ? '全期間' : `${periodMonths}ヶ月`
+  return [
+    `期間は ${periodLabel} です。次に関連カテゴリを選んでください。`,
+    '1) すべて  2) 労務  3) シフト  4) 原価棚卸  5) レシピ',
+    '6) 請求支払  7) 売上予実  8) 発注納品  9) 衛生HACCP  10) マニュアル',
+    '例: 3  または  シフト',
+    '※ 番号でもキーワードでもOKです。',
+  ].join('\n')
+}
+
+function parseMediaSearchStartCommand(rawText: string): boolean {
+  const compact = normalizeForRuleParsing(String(rawText ?? '')).replace(/\s+/g, '')
+  if (!compact) return false
+  return compact === 'メディア検索' || compact === '保存メディア検索'
+}
+
+function parseMediaSearchPeriodChoice(rawText: string): MediaSearchPeriodMonths | null {
+  const compact = normalizeForRuleParsing(String(rawText ?? '')).replace(/\s+/g, '')
+  if (!compact) return null
+  if (/^(1|３ヶ月|3ヶ月|3か月|三ヶ月)$/.test(compact)) return 3
+  if (/^(2|６ヶ月|6ヶ月|6か月|六ヶ月|半年)$/.test(compact)) return 6
+  if (/^(3|1年|一年|12ヶ月|12か月|十二ヶ月)$/.test(compact)) return 12
+  if (/^(4|全期間|すべて|全部|全件)$/.test(compact)) return 0
+  return null
+}
+
+function normalizeMediaCategoryKey(raw: string): MediaSearchCategoryKey | null {
+  const compact = normalizeForRuleParsing(raw).replace(/\s+/g, '').toLowerCase()
+  if (!compact) return null
+  if (['all', 'すべて', '全部', '全カテゴリ', '全体'].includes(compact)) return 'all'
+  if (['労務', '労働', '雇用', 'アルバイト'].includes(compact)) return 'labor'
+  if (['シフト', '勤怠', '勤務'].includes(compact)) return 'shift'
+  if (['原価', '棚卸', '在庫', '原価棚卸'].includes(compact)) return 'cost_inventory'
+  if (['レシピ', '仕込み', '配合'].includes(compact)) return 'recipe'
+  if (['請求', '支払', '請求支払'].includes(compact)) return 'billing'
+  if (['売上', '予実'].includes(compact)) return 'sales'
+  if (['発注', '納品', '発注納品'].includes(compact)) return 'procurement'
+  if (['衛生', 'haccp'].includes(compact)) return 'haccp'
+  if (['マニュアル', '手順書'].includes(compact)) return 'manual'
+  return null
+}
+
+function parseMediaSearchCategoryChoice(rawText: string): MediaSearchCategoryKey | null {
+  const compact = normalizeForRuleParsing(String(rawText ?? '')).replace(/\s+/g, '')
+  if (!compact) return null
+  const numberMap: Record<string, MediaSearchCategoryKey> = {
+    '1': 'all',
+    '2': 'labor',
+    '3': 'shift',
+    '4': 'cost_inventory',
+    '5': 'recipe',
+    '6': 'billing',
+    '7': 'sales',
+    '8': 'procurement',
+    '9': 'haccp',
+    '10': 'manual',
+  }
+  if (numberMap[compact]) return numberMap[compact]
+  return normalizeMediaCategoryKey(compact)
+}
+
+function parseMediaSearchFilterText(rawText: string): { senderQuery?: string; categoryKey?: MediaSearchCategoryKey } | null {
+  const text = String(rawText ?? '').trim()
+  if (!text) return null
+  const senderMatch = text.match(/^(?:送信者|sender)\s*[:：]\s*(.+)$/i)
+  if (senderMatch) {
+    const senderQuery = String(senderMatch[1] ?? '').trim()
+    return senderQuery ? { senderQuery } : null
+  }
+  const categoryMatch = text.match(/^(?:カテゴリ|category)\s*[:：]\s*(.+)$/i)
+  if (categoryMatch) {
+    const categoryKey = normalizeMediaCategoryKey(String(categoryMatch[1] ?? ''))
+    if (!categoryKey) return null
+    return { categoryKey }
+  }
+  return null
+}
+
+function resolveMediaSearchConversationKey(roomId: string, userId: string | null): string {
+  return `${roomId || '__unknown_room__'}::${userId || '__anonymous__'}`
+}
+
+async function savePendingMediaSearch(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  state: {
+    stage: MediaSearchStage
+    periodMonths: MediaSearchPeriodMonths
+    categoryKey: MediaSearchCategoryKey
+    senderQuery: string
+    itemCursor: number
+    items: MediaSearchCandidate[]
+  },
+): Promise<void> {
+  const conversationKey = resolveMediaSearchConversationKey(roomId, userId)
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + MEDIA_SEARCH_PENDING_TTL_MIN * 60 * 1000).toISOString()
+  const payload = {
+    conversation_key: conversationKey,
+    room_id: roomId,
+    user_id: userId,
+    stage: state.stage,
+    period_months: state.periodMonths,
+    category_key: state.categoryKey,
+    sender_query: state.senderQuery || '',
+    item_cursor: state.itemCursor,
+    items_json: state.items,
+    expires_at: expiresAt,
+    updated_at: nowIso,
+  }
+  const { error } = await supabase
+    .from(MEDIA_SEARCH_PENDING_TABLE)
+    .upsert(payload, { onConflict: 'conversation_key' })
+  if (error) {
+    console.error('Failed to save media search pending state:', error.message)
+  }
+}
+
+async function loadPendingMediaSearch(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingMediaSearch | null> {
+  const conversationKey = resolveMediaSearchConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(MEDIA_SEARCH_PENDING_TABLE)
+    .select('id, conversation_key, stage, period_months, category_key, sender_query, item_cursor, items_json, expires_at')
+    .eq('conversation_key', conversationKey)
+    .maybeSingle()
+  if (error) {
+    console.error('Failed to load media search pending state:', error.message)
+    return null
+  }
+  if (!data) return null
+  const expiresAt = String((data as any).expires_at ?? '')
+  if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+    await clearPendingMediaSearch(supabase, roomId, userId)
+    return null
+  }
+  const stageRaw = String((data as any).stage ?? '')
+  const stage: MediaSearchStage = stageRaw === 'select_item'
+    ? 'select_item'
+    : stageRaw === 'select_category'
+      ? 'select_category'
+      : 'select_period'
+  const periodRaw = Number((data as any).period_months ?? 3)
+  const periodMonths: MediaSearchPeriodMonths = (periodRaw === 0 || periodRaw === 6 || periodRaw === 12) ? periodRaw : 3
+  const categoryKey = normalizeMediaCategoryKey(String((data as any).category_key ?? 'all')) ?? 'all'
+  const senderQuery = String((data as any).sender_query ?? '').trim()
+  const itemCursor = Number((data as any).item_cursor ?? 0)
+  const items = Array.isArray((data as any).items_json) ? (data as any).items_json as MediaSearchCandidate[] : []
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    stage,
+    period_months: periodMonths,
+    category_key: categoryKey,
+    sender_query: senderQuery,
+    item_cursor: Number.isFinite(itemCursor) ? itemCursor : 0,
+    items,
+    expires_at: expiresAt,
+  }
+}
+
+async function clearPendingMediaSearch(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<void> {
+  const conversationKey = resolveMediaSearchConversationKey(roomId, userId)
+  const { error } = await supabase.from(MEDIA_SEARCH_PENDING_TABLE).delete().eq('conversation_key', conversationKey)
+  if (error) {
+    console.error('Failed to clear media search pending state:', error.message)
+  }
+}
+
+async function loadLineUserDisplayNameMap(
+  supabase: ReturnType<typeof createClient>,
+  userIds: string[],
+): Promise<Map<string, string>> {
+  const uniqueIds = Array.from(new Set(userIds.map((id) => String(id || '').trim()).filter(Boolean)))
+  if (uniqueIds.length === 0) return new Map()
+  const { data, error } = await supabase
+    .from('line_user_permissions')
+    .select('line_user_id, display_name')
+    .in('line_user_id', uniqueIds)
+  if (error) {
+    console.error('Failed to load sender display names for media search:', error.message)
+    return new Map()
+  }
+  const map = new Map<string, string>()
+  for (const row of Array.isArray(data) ? data : []) {
+    const id = String((row as any)?.line_user_id ?? '').trim()
+    if (!id) continue
+    const name = String((row as any)?.display_name ?? '').trim()
+    if (name) map.set(id, name)
+  }
+  return map
+}
+
+async function resolveMediaSearchSenderIds(
+  supabase: ReturnType<typeof createClient>,
+  senderQuery: string,
+): Promise<string[]> {
+  const q = String(senderQuery ?? '').trim()
+  if (!q) return []
+  const direct = q.startsWith('U') ? [q] : []
+  const { data, error } = await supabase
+    .from('line_user_permissions')
+    .select('line_user_id')
+    .ilike('display_name', `%${q}%`)
+    .limit(100)
+  if (error) {
+    console.error('Failed to search sender by display_name:', error.message)
+    return direct
+  }
+  const ids = (Array.isArray(data) ? data : [])
+    .map((row) => String((row as any)?.line_user_id ?? '').trim())
+    .filter(Boolean)
+  return Array.from(new Set([...direct, ...ids]))
+}
+
+async function buildMediaSearchCandidates(
+  supabase: ReturnType<typeof createClient>,
+  options: {
+    periodMonths: MediaSearchPeriodMonths
+    categoryKey: MediaSearchCategoryKey
+    senderQuery: string
+  },
+): Promise<MediaSearchCandidate[]> {
+  let query = supabase
+    .from('line_message_media')
+    .select('room_id, user_id, sender_display_name, line_message_id, storage_bucket, storage_path, original_file_name, content_preview, created_at')
+    .order('created_at', { ascending: false })
+    .limit(MEDIA_SEARCH_FETCH_LIMIT)
+
+  if (options.periodMonths > 0) {
+    const cutoff = new Date()
+    cutoff.setMonth(cutoff.getMonth() - options.periodMonths)
+    query = query.gte('created_at', cutoff.toISOString())
+  }
+
+  const senderIds = options.senderQuery ? await resolveMediaSearchSenderIds(supabase, options.senderQuery) : []
+  if (options.senderQuery) {
+    if (senderIds.length === 0) return []
+    query = query.in('user_id', senderIds)
+  }
+
+  const { data, error } = await query
+  if (error) {
+    console.error('Failed to fetch media search candidates:', error.message)
+    return []
+  }
+  const rows = Array.isArray(data) ? (data as Record<string, unknown>[]) : []
+  const roomLabelMap = await loadRoomLabelsForHits(
+    supabase,
+    rows.map((row) => ({ room_id: String(row.room_id ?? '') })),
+  )
+  const senderMap = await loadLineUserDisplayNameMap(
+    supabase,
+    rows.map((row) => String(row.user_id ?? '')).filter(Boolean),
+  )
+
+  const candidates: MediaSearchCandidate[] = []
+  for (const row of rows) {
+    const lineMessageId = String(row.line_message_id ?? '').trim()
+    const storagePath = String(row.storage_path ?? '').trim()
+    if (!lineMessageId || !storagePath) continue
+    const fileName = String(row.original_file_name ?? '').trim() || `media-${lineMessageId}`
+    const senderId = String(row.user_id ?? '').trim()
+    const senderNameStored = String(row.sender_display_name ?? '').trim()
+    const senderName = senderNameStored || senderMap.get(senderId) || (senderId ? `${senderId.slice(0, 8)}…` : '不明')
+    if (options.senderQuery) {
+      const q = options.senderQuery.toLowerCase()
+      if (!senderName.toLowerCase().includes(q) && !senderId.toLowerCase().includes(q)) continue
+    }
+    const preview = String(row.content_preview ?? '').trim()
+    const category = computeMediaCategory(`${fileName}\n${preview}`)
+    if (options.categoryKey !== 'all' && category.key !== options.categoryKey) continue
+    candidates.push({
+      idx: candidates.length + 1,
+      line_message_id: lineMessageId,
+      room_id: String(row.room_id ?? '').trim(),
+      room_label: roomLabelMap.get(String(row.room_id ?? '').trim()) ?? String(row.room_id ?? '').trim().slice(0, 12),
+      sender_id: senderId,
+      sender_name: senderName,
+      original_file_name: fileName,
+      storage_bucket: String(row.storage_bucket ?? LINE_MEDIA_BUCKET).trim() || LINE_MEDIA_BUCKET,
+      storage_path: storagePath,
+      created_at: String(row.created_at ?? ''),
+      category_key: category.key,
+      category_label: category.label,
+      preview_short: clipMediaPreview(preview, 80),
+    })
+    if (candidates.length >= MEDIA_SEARCH_CANDIDATE_MAX) break
+  }
+  return candidates
+}
+
+function buildMediaSearchCandidateListReply(
+  pending: PendingMediaSearch,
+  items: MediaSearchCandidate[],
+): string {
+  const periodLabel = pending.period_months === 0 ? '全期間' : `${pending.period_months}ヶ月`
+  const categoryLabel = pending.category_key === 'all'
+    ? 'すべて'
+    : (MEDIA_CATEGORY_DEFINITIONS.find((row) => row.key === pending.category_key)?.label ?? pending.category_key)
+  const senderLabel = pending.sender_query || '指定なし'
+  const lines = [
+    `メディア候補（期間:${periodLabel} / カテゴリ:${categoryLabel} / 送信者:${senderLabel}）`,
+  ]
+  if (items.length === 0) {
+    lines.push('候補が見つかりませんでした。')
+    lines.push('条件を変える場合: 送信者:山田 / カテゴリ:シフト / 期間変更')
+    return lines.join('\n')
+  }
+  for (const item of items) {
+    const dateLabel = formatSearchDateTime(item.created_at)
+    lines.push(`${item.idx}) ${item.original_file_name} [${dateLabel}]`)
+    lines.push(`   ${item.room_label} | ${item.sender_name} | ${item.category_label}`)
+    lines.push('')
+  }
+  lines.push('番号返信でURL送信（例: 2）')
+  lines.push('条件変更: 送信者:名前 / カテゴリ:シフト / 期間変更')
+  return lines.join('\n')
+}
+
+async function tryHandlePendingMediaSearch(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  canUseMedia: boolean,
+): Promise<string | null> {
+  const pending = await loadPendingMediaSearch(supabase, roomId, userId)
+  if (!pending) return null
+  const normalizedText = String(text ?? '').trim()
+  if (!normalizedText) return null
+  if (!canUseMedia) {
+    await clearPendingMediaSearch(supabase, roomId, userId)
+    return 'メディア検索権限がないため、処理を終了しました。'
+  }
+
+  if (pending.stage === 'select_period') {
+    const period = parseMediaSearchPeriodChoice(normalizedText)
+    if (period == null) {
+      return buildMediaSearchPeriodPrompt()
+    }
+    await savePendingMediaSearch(supabase, roomId, userId, {
+      stage: 'select_category',
+      periodMonths: period,
+      categoryKey: pending.category_key,
+      senderQuery: pending.sender_query,
+      itemCursor: 0,
+      items: [],
+    })
+    return buildMediaSearchCategoryPrompt(period)
+  }
+
+  if (pending.stage === 'select_category') {
+    const categoryKey = parseMediaSearchCategoryChoice(normalizedText)
+    if (!categoryKey) {
+      return buildMediaSearchCategoryPrompt(pending.period_months)
+    }
+    const items = await buildMediaSearchCandidates(supabase, {
+      periodMonths: pending.period_months,
+      categoryKey,
+      senderQuery: pending.sender_query,
+    })
+    await savePendingMediaSearch(supabase, roomId, userId, {
+      stage: 'select_item',
+      periodMonths: pending.period_months,
+      categoryKey,
+      senderQuery: pending.sender_query,
+      itemCursor: 0,
+      items,
+    })
+    return buildMediaSearchCandidateListReply({
+      ...pending,
+      stage: 'select_item',
+      category_key: categoryKey,
+      items,
+    }, items)
+  }
+
+  if (/^(期間変更|期間を変更|期間)$/i.test(normalizedText)) {
+    await savePendingMediaSearch(supabase, roomId, userId, {
+      stage: 'select_period',
+      periodMonths: pending.period_months,
+      categoryKey: pending.category_key,
+      senderQuery: pending.sender_query,
+      itemCursor: pending.item_cursor,
+      items: pending.items,
+    })
+    return buildMediaSearchPeriodPrompt()
+  }
+
+  const filter = parseMediaSearchFilterText(normalizedText)
+  if (filter) {
+    const nextCategory = filter.categoryKey ?? pending.category_key
+    const nextSender = filter.senderQuery != null ? filter.senderQuery : pending.sender_query
+    const items = await buildMediaSearchCandidates(supabase, {
+      periodMonths: pending.period_months,
+      categoryKey: nextCategory,
+      senderQuery: nextSender,
+    })
+    await savePendingMediaSearch(supabase, roomId, userId, {
+      stage: 'select_item',
+      periodMonths: pending.period_months,
+      categoryKey: nextCategory,
+      senderQuery: nextSender,
+      itemCursor: 0,
+      items,
+    })
+    return buildMediaSearchCandidateListReply({
+      ...pending,
+      category_key: nextCategory,
+      sender_query: nextSender,
+      items,
+    }, items)
+  }
+
+  const numberMatch = normalizedText.match(/^#?(\d{1,2})$/)
+  if (numberMatch && pending.items.length > 0) {
+    const picked = Number(numberMatch[1])
+    if (!Number.isInteger(picked) || picked <= 0 || picked > pending.items.length) {
+      return 'その番号の候補はありません。候補一覧の番号を入力してください。'
+    }
+    const selected = pending.items[picked - 1]
+    const url = await createSignedMediaDownloadUrlForWebhook(
+      supabase,
+      selected.storage_bucket,
+      selected.storage_path,
+      selected.original_file_name,
+    )
+    if (!url) {
+      return 'URL の作成に失敗しました。もう一度番号を選択してください。'
+    }
+    await clearPendingMediaSearch(supabase, roomId, userId)
+    const detailLines = [
+      `選択: ${selected.original_file_name}`,
+      `日時: ${formatSearchDateTime(selected.created_at)}`,
+      `ルーム: ${selected.room_label}`,
+      `送信者: ${selected.sender_name}`,
+      `分類: ${selected.category_label}`,
+      url,
+    ]
+    return detailLines.join('\n')
+  }
+
+  const quickCategory = parseMediaSearchCategoryChoice(normalizedText)
+  if (quickCategory) {
+    const items = await buildMediaSearchCandidates(supabase, {
+      periodMonths: pending.period_months,
+      categoryKey: quickCategory,
+      senderQuery: pending.sender_query,
+    })
+    await savePendingMediaSearch(supabase, roomId, userId, {
+      stage: 'select_item',
+      periodMonths: pending.period_months,
+      categoryKey: quickCategory,
+      senderQuery: pending.sender_query,
+      itemCursor: 0,
+      items,
+    })
+    return buildMediaSearchCandidateListReply({
+      ...pending,
+      category_key: quickCategory,
+      items,
+    }, items)
+  }
+
+  return '候補番号（例: 1）を返信してください。条件変更は「送信者:山田」「カテゴリ:シフト」「期間変更」です。'
 }
 
 async function loadLineMediaUsageTotals(

@@ -148,3 +148,44 @@ From latest `supabase secrets list`, OCR secrets are now present:
 - `LINE_MEDIA_OCR_PDF_MAX_BYTES`
 
 Current production behavior: OCR fallback is enabled when the trigger conditions are met.
+
+## 7. Hybrid OCR routing (current production policy)
+
+Current production mode is `LINE_MEDIA_OCR_MODE=hybrid_size`.
+
+Routing rule:
+
+- PDF size <= `LINE_MEDIA_OCR_SPACE_MAX_BYTES` (currently 1MB): use OCR.Space
+- PDF size > `LINE_MEDIA_OCR_SPACE_MAX_BYTES`: use Azure Document Intelligence
+
+Additional notes:
+
+- Azure endpoint path uses `documentintelligence/.../prebuilt-read:analyze`
+- OCR is still invoked only when normal PDF text extraction is insufficient
+- If OCR provider call fails, processing falls back safely without breaking media save
+
+## 8. Restaurant-oriented category analysis
+
+Display-side analysis classifies extracted text into practical restaurant categories by rule-based scoring.
+
+Current categories include:
+
+- Labor / employment
+- Shift / attendance
+- Cost / inventory
+- Recipe / prep
+- Billing / payment
+- Sales / budget-vs-actual
+- Ordering / delivery
+- Hygiene / HACCP
+- Manual / operation procedures
+
+This classification is deterministic and cost-aware (no AI inference needed for this step).
+
+## 9. Deployment record (latest)
+
+Latest rollout completed with both GitHub and Supabase deployment.
+
+- GitHub: `main` pushed with OCR/categorization/docs changes
+- Supabase DB: up to date
+- Supabase Functions: deployed (`line-webhook`, `admin-api`, `admin-ui`, `summary-cron`, `gmail-alert-cron`, `calendar-pending-cron`, `check-cron`)

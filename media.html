@@ -913,6 +913,16 @@
       const text = (String(fileName || '') + ' ' + String(contentPreview || '')).toLowerCase();
       if (!text.trim()) return '';
 
+      // HACCP-related files should be labeled explicitly, not as generic operations docs.
+      const hasHaccpTopic = /haccp|hasap|ハサップ|衛生|点検/.test(text);
+      const hasHaccpSchedule = /スケジュール|予定表|予定|実施日|点検実施日|日程|schedule/.test(text);
+      if (hasHaccpTopic && hasHaccpSchedule) {
+        return 'HACCP日程表（衛生点検スケジュール）資料の可能性が高いです。';
+      }
+      if (hasHaccpTopic) {
+        return 'HACCP関連資料（衛生点検・衛生管理）の可能性が高いです。';
+      }
+
       const categories = [
         {
           key: 'labor',

@@ -693,8 +693,19 @@ async function extractDocxText(bytes: Uint8Array): Promise<string> {
 function collectTextNodes(root: Element, localName: string): string[] {
   const nodes = getSheetElementsLive(root, localName)
   const out: string[] = []
+  const isUnderPhonetic = (el: Element | null): boolean => {
+    let cur: Node | null = el
+    while (cur) {
+      const maybeEl = cur as Element
+      if (String(maybeEl.localName || "").toLowerCase() === "rph") return true
+      cur = cur.parentNode
+    }
+    return false
+  }
   for (let i = 0; i < nodes.length; i += 1) {
-    const value = nodes.item(i)?.textContent ?? ""
+    const node = nodes.item(i)
+    if (node && isUnderPhonetic(node)) continue
+    const value = node?.textContent ?? ""
     if (value) out.push(value)
   }
   return out
@@ -837,6 +848,8 @@ function parseXlsxSharedStringsByRegex(xml: string): string[] {
   let siMatch: RegExpExecArray | null
   while ((siMatch = siRe.exec(xml)) !== null) {
     const siBody = String(siMatch[1] ?? "")
+      .replace(/<rPh\b[\s\S]*?<\/rPh>/gi, "")
+      .replace(/<phoneticPr\b[^>]*\/?>/gi, "")
     const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/gi
     let tMatch: RegExpExecArray | null
     const pieces: string[] = []
@@ -881,10 +894,13 @@ function parseXlsxSheetTextByRegex(xml: string, sharedStrings: string[]): string
           text = String(sharedStrings[sharedIdx] ?? "")
         }
       } else if (cellType === "inlineStr") {
+        const cleanBody = body
+          .replace(/<rPh\b[\s\S]*?<\/rPh>/gi, "")
+          .replace(/<phoneticPr\b[^>]*\/?>/gi, "")
         const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/gi
         let tMatch: RegExpExecArray | null
         const pieces: string[] = []
-        while ((tMatch = tRe.exec(body)) !== null) {
+        while ((tMatch = tRe.exec(cleanBody)) !== null) {
           pieces.push(stripXmlTags(String(tMatch[1] ?? "")))
         }
         text = pieces.join("")
@@ -987,6 +1003,34 @@ export async function extractLineMediaFileContentPreview(
     return clipped || null
   } catch (e) {
     console.error("line_media_content_preview: extract failed", e)
+    return null
+  }
+}
+
+/** Returns normalized extracted raw text (multiline) for advanced server-side workflows. */
+export async function extractLineMediaFileRawText(
+  bytes: Uint8Array,
+  contentType: string,
+  originalFileName: string,
+): Promise<string | null> {
+  let mime = resolveLineFileExtractMime(contentType, originalFileName, bytes)
+  if (!mime) {
+    mime = await sniffOpenXmlOfficeKind(bytes)
+  }
+  if (!mime) return null
+
+  const err = await validatePayload(bytes, mime)
+  if (err) {
+    console.warn(`line_media_content_preview: raw skip (${originalFileName}): ${err}`)
+    return null
+  }
+
+  try {
+    const raw = await extractByMime(bytes, mime, originalFileName)
+    const normalized = normalizeExtractedText(raw)
+    return normalized || null
+  } catch (e) {
+    console.error("line_media_content_preview: raw extract failed", e)
     return null
   }
 }
