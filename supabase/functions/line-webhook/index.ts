@@ -487,10 +487,12 @@ Deno.serve(async (req) => {
         userId,
         lineUserPermissionCache,
       )
-      const shouldPersistMessage = shouldPersistLineMessage(source, event.message)
       const storableMediaType = normalizeStorableLineMediaType(event.message?.type)
       const canUseMedia = roomReplyPolicy.mediaFileAccessEnabled && lineUserPermission.canMediaAccess && lineUserPermission.isActive
       const shouldStoreMediaFile = !!storableMediaType && canUseMedia
+      /** 友だち 1:1 は既定で履歴全文は保存しないが、メディア保存が有効なら画像等は DB + Storage に残す（メディアURL 用） */
+      const shouldPersistMessage = shouldPersistLineMessage(source, event.message) ||
+        (isDirectUserChat && !!storableMediaType && canUseMedia)
 
       if (event.message?.type === 'text') {
         if (lineAccessToken && !senderDisplayName) {
@@ -576,21 +578,6 @@ Deno.serve(async (req) => {
             continue
           }
           if (!roomCanReply) {
-            continue
-          }
-          if (isDirectUserChat) {
-            const replyResult = await replyLineMessage(
-              replyToken,
-              [
-                'このBotでは、友だち（1:1）トークに送られた画像・ファイルは自動保存していません。',
-                '保存されるのは、メディア保存が有効なグループ／複数人トークなどです。',
-                '保存済みメディアのURLを受け取るには、そのトークを開いて「メディアURL」と送ってください。',
-              ].join('\n'),
-              lineAccessToken,
-            )
-            if (!replyResult.ok) {
-              console.error('Failed to reply saved media URL (1:1 guidance):', replyResult.error)
-            }
             continue
           }
           if (!canUseMedia) {
@@ -2037,7 +2024,7 @@ function shouldPersistLineMessage(source: any, message: any): boolean {
   const sourceType = String(source?.type ?? '').trim().toLowerCase()
   const senderUserId = String(source?.userId ?? '').trim()
   const botUserId = String(Deno.env.get('LINE_BOT_USER_ID') ?? '').trim()
-  // 1:1 chat (source.type=user) is excluded from history storage.
+  // 1:1 chat (source.type=user): テキスト履歴は DB に残さない（メディアは別ロジックで保存可）。
   if (sourceType === 'user') return false
   // Messages without sender user id are treated as non-user-origin and are not persisted.
   if (!senderUserId) return false
@@ -2054,7 +2041,8 @@ function buildDirectUserRoomPolicy(base: RoomReplyPolicy): RoomReplyPolicy {
     botReplyEnabled: true,
     messageSearchEnabled: true,
     messageSearchLibraryEnabled: true,
-    mediaFileAccessEnabled: false,
+    /** グループと同様、権限があれば 1:1 でも添付メディアを保存し「メディアURL」で再取得可能にする */
+    mediaFileAccessEnabled: true,
     calendarAiAutoCreateEnabled: true,
     calendarSilentAutoRegisterEnabled: false,
   }
