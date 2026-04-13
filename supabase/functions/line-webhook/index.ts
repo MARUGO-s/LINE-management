@@ -1369,11 +1369,8 @@ Deno.serve(async (req) => {
                 : null,
               calendarSourceMeta,
             )
-            if (mediaSaveReply && roomCanReply && lineAccessToken && replyToken) {
-              const mediaReplyResult = await replyLineMessage(replyToken, mediaSaveReply, lineAccessToken)
-              if (!mediaReplyResult.ok) {
-                console.error('Failed to reply media save result:', mediaReplyResult.error)
-              }
+            if (mediaSaveReply && !aiAutoCreateReply && roomCanReply) {
+              aiAutoCreateReply = mediaSaveReply
             }
           }
         }
@@ -1644,7 +1641,12 @@ async function trySaveLineMediaContent(
   }
 
   console.log(`Saved media content (${mediaType}) for room=${roomId}, lineMessageId=${lineMessageId}`)
-  return haccpReply
+  if (haccpReply) return haccpReply
+  if (mediaType === 'image') {
+    const cap = String(contentPreview ?? '').trim()
+    if (cap) return buildLineImageAnalysisReply(cap)
+  }
+  return null
 }
 
 function sanitizeDownloadFileNameForWebhook(value: string): string {
@@ -3510,6 +3512,12 @@ function buildCalendarPermissionDeniedReply(): string {
     '予定の追加・変更を行う権限が付与されていないため、実行できません。',
     '管理者が管理画面の「ユーザー権限」で、このアカウントに「予定作成」「予定更新」などを許可してください。',
   ].join('\n')
+}
+
+function buildLineImageAnalysisReply(preview: string): string {
+  const body = String(preview ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
+  const capped = body.length > 400 ? `${body.slice(0, 400)}…` : body
+  return ['画像を受け取りました。解析結果は次のとおりです。', capped].join('\n')
 }
 
 function buildDirectUserFallbackReply(message: any, options: { canCalendarUpdate: boolean }): string {
