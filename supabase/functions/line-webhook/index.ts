@@ -114,6 +114,18 @@ type PendingLibrarySearchConfirmation = {
   expires_at: string
 }
 
+type PendingMessageSearchExpand = {
+  id: string
+  conversation_key: string
+  keyword: string
+  search_days: MessageRetentionDays
+  search_scope: MessageSearchScope
+  retention_adjusted: boolean
+  stage_windows: Array<number | null>
+  next_ring_k: number
+  expires_at: string
+}
+
 type AiListIntent = {
   scope: CalendarListScope
   date?: string
@@ -172,6 +184,8 @@ type MessageSearchCommand = {
   keyword: string
   days: MessageRetentionDays
   scope: MessageSearchScope
+  /** true のとき保持期間いっぱいまで段階検索。false/未指定は通常どおり過去180日までに制限 */
+  fullRetentionSearch?: boolean
 }
 
 type MessageSearchParseResult = {
@@ -265,6 +279,8 @@ const CALENDAR_PENDING_CONFIRMATION_TTL_MIN = 5
 const CALENDAR_PENDING_TABLE = 'calendar_pending_confirmations'
 const CALENDAR_UPDATE_PENDING_TABLE = 'calendar_update_pending_targets'
 const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmations'
+const MESSAGE_SEARCH_EXPAND_PENDING_TABLE = 'message_search_expand_pending_confirmations'
+const MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE = 'message_search_followup_pending_confirmations'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
 const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
 const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 365
@@ -272,6 +288,8 @@ const DEFAULT_MESSAGE_RETENTION_DAYS: MessageRetentionDays = 365
 const SEARCH_FETCH_BATCH_SIZE = 2000
 /** 各検索段階で走査するメッセージの安全上限（件）。期間で絞るが暴走・OOM 防止のため */
 const MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS = 200_000
+/** 通常の会話検索で対象にする最大日数（保持がそれ以上でも段階検索の上限）。フルモードでは無効 */
+const MESSAGE_SEARCH_NORMAL_MAX_DAYS = 180
 const SEARCH_MAX_SUMMARY_ROWS = 120
 const SEARCH_AI_SUMMARY_MAX_HITS = 80
 const SEARCH_MAX_DOCUMENT_ROWS = 300
@@ -627,6 +645,35 @@ Deno.serve(async (req) => {
             aiAutoCreateReply = buildCalendarPermissionDeniedReply()
           }
 
+          if (canMessageSearch) {
+            const expandSearchReply = await tryHandlePendingMessageSearchExpand(
+              text,
+              supabase,
+              roomId,
+              userId,
+              lineUserPermission.excludedMessageSearchRoomIds,
+              groqApiKey,
+            )
+            if (expandSearchReply) {
+              if (!roomCanReply) {
+                continue
+              }
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search expand confirmation.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for message search expand confirmation.')
+                continue
+              }
+              const expandReplyResult = await replyLineMessage(replyToken, expandSearchReply, lineAccessToken)
+              if (!expandReplyResult.ok) {
+                console.error('Failed to reply message search expand confirmation:', expandReplyResult.error)
+              }
+              continue
+            }
+          }
+
           if (canLibrarySearch) {
             const librarySearchReply = await tryHandlePendingLibrarySearchConfirmation(
               text,
@@ -737,6 +784,7 @@ Deno.serve(async (req) => {
                 keyword: aiSearchIntent.keyword,
                 days: aiSearchIntent.days,
                 scope: aiSearchIntent.scope,
+                fullRetentionSearch: false,
               }
             }
           }
@@ -2119,6 +2167,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
     return { matched: false, command: null, error: null }
   }
 
+  const fullRetentionSearch = detectFullRetentionSearchRequest(compact)
   const requestedDays = detectMessageSearchDays(compact) ?? defaultDays
   const scope = detectMessageSearchScope(compact)
   const keyword = extractMessageSearchKeyword(text)
@@ -2130,6 +2179,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
         '会話検索のキーワードを指定してください。',
         '例: 会話検索 試飲会',
         '例: 会話検索 120日 発注',
+        '（保持期間いっぱいまで対象にする例: 会話検索フル 試飲会）',
       ].join('\n'),
     }
   }
@@ -2141,6 +2191,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
       keyword,
       days: requestedDays,
       scope,
+      fullRetentionSearch,
     },
     error: null,
   }
@@ -2177,6 +2228,8 @@ function detectMessageSearchScope(compactText: string): MessageSearchScope {
 
 function extractMessageSearchKeyword(rawText: string): string {
   const stripped = normalizeForRuleParsing(rawText)
+    .replace(/(会話|トーク|履歴|チャット)検索(フルスキャン|全履歴|裏モード|フル|裏)/g, ' ')
+    .replace(/(フルスキャン|全履歴)(会話|トーク|履歴|チャット)検索/g, ' ')
     .replace(/(1095日|730日|365日|180日|120日|60日|3年|2年|1年|三年|二年|一年|半年|12ヶ月|12か月|十二ヶ月|6ヶ月|6か月|六ヶ月|4ヶ月|4か月|四ヶ月|2ヶ月|2か月|二ヶ月|全期間|無制限)/g, ' ')
     .replace(/(過去|最近|直近|以内|分|間)/g, ' ')
     .replace(/(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|全ルーム|他ルーム|他のルーム|別ルーム|別のルーム)/g, ' ')
@@ -2434,7 +2487,7 @@ function isAcceptableAiMessageSearchIntent(intent: AiMessageSearchIntent): boole
   return true
 }
 
-/** 内部段階: 約3ヶ月 → 約6ヶ月 → 設定上の全期間（または無期限の最終段）。ヒットが出た段階で終了。 */
+/** 内部段階: 約3ヶ月 → 約6ヶ月 →（フル時のみ）設定上の全期間。effectiveDays は呼び出し側で通常は180日にキャップ済み。ヒットが出た段階で終了。 */
 function buildMessageSearchStageDayWindows(
   effectiveDays: MessageRetentionDays,
 ): Array<number | null> {
@@ -2452,13 +2505,56 @@ function buildMessageSearchStageDayWindows(
   return out
 }
 
+/** 通常モードの第1段: 期間全体を1回で走査（例: 180日なら 90日→180日 の二段ではなく 180 日ぶん一度だけ） */
+function buildMessageSearchPhase1WizardWindows(
+  effectiveDays: MessageRetentionDays,
+): Array<number | null> {
+  const days = effectiveDays === 0
+    ? MESSAGE_SEARCH_NORMAL_MAX_DAYS
+    : Math.min(effectiveDays, MESSAGE_SEARCH_NORMAL_MAX_DAYS)
+  return [days as number]
+}
+
 async function fetchLineMessagesForSearchBatched(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
   scope: MessageSearchScope,
   sinceIso: string | null,
   maxRows: number,
+  keyword: string,
+  excludedRoomIds: string[],
 ): Promise<{ rows: SearchMessageRow[]; truncated: boolean }> {
+  const groups = buildMessageSearchSqlTokenGroups(keyword)
+  if (groups && groups.length > 0) {
+    const exclude = scope === 'all_rooms'
+      ? excludedRoomIds.map((v) => String(v ?? '').trim()).filter((v) => v.length > 0)
+      : []
+    const { data, error } = await supabase.rpc('search_line_messages_keyword_window', {
+      p_since: sinceIso,
+      p_before: null,
+      p_room_id: roomId,
+      p_all_rooms: scope === 'all_rooms',
+      p_exclude_room_ids: exclude,
+      p_token_or_groups: groups,
+      p_max_rows: maxRows,
+    })
+    if (!error && Array.isArray(data)) {
+      const rows: SearchMessageRow[] = data.map((row: unknown) => ({
+        room_id: String((row as { room_id?: unknown })?.room_id ?? ''),
+        content: String((row as { content?: unknown })?.content ?? ''),
+        created_at: String((row as { created_at?: unknown })?.created_at ?? ''),
+        user_id: (row as { user_id?: unknown })?.user_id == null
+          ? null
+          : String((row as { user_id?: unknown }).user_id),
+      }))
+      const truncated = rows.length >= maxRows
+      return { rows: rows.slice(0, maxRows), truncated }
+    }
+    if (error && !isMissingSearchLineMessagesRpcError(error)) {
+      console.error('search_line_messages_keyword_window failed, using legacy fetch:', (error as Error).message)
+    }
+  }
+
   const all: SearchMessageRow[] = []
   let offset = 0
   let truncated = false
@@ -2503,6 +2599,137 @@ async function fetchLineMessagesForSearchBatched(
   return { rows: all.slice(0, maxRows), truncated }
 }
 
+const MESSAGE_SEARCH_DAY_MS = 24 * 60 * 60 * 1000
+
+async function fetchLineMessagesForSearchRingBatched(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  scope: MessageSearchScope,
+  sinceIso: string | null,
+  beforeIso: string,
+  maxRows: number,
+  keyword: string,
+  excludedRoomIds: string[],
+): Promise<{ rows: SearchMessageRow[]; truncated: boolean }> {
+  const groups = buildMessageSearchSqlTokenGroups(keyword)
+  if (groups && groups.length > 0) {
+    const exclude = scope === 'all_rooms'
+      ? excludedRoomIds.map((v) => String(v ?? '').trim()).filter((v) => v.length > 0)
+      : []
+    const { data, error } = await supabase.rpc('search_line_messages_keyword_window', {
+      p_since: sinceIso,
+      p_before: beforeIso,
+      p_room_id: roomId,
+      p_all_rooms: scope === 'all_rooms',
+      p_exclude_room_ids: exclude,
+      p_token_or_groups: groups,
+      p_max_rows: maxRows,
+    })
+    if (!error && Array.isArray(data)) {
+      const rows: SearchMessageRow[] = data.map((row: unknown) => ({
+        room_id: String((row as { room_id?: unknown })?.room_id ?? ''),
+        content: String((row as { content?: unknown })?.content ?? ''),
+        created_at: String((row as { created_at?: unknown })?.created_at ?? ''),
+        user_id: (row as { user_id?: unknown })?.user_id == null
+          ? null
+          : String((row as { user_id?: unknown }).user_id),
+      }))
+      const truncated = rows.length >= maxRows
+      return { rows: rows.slice(0, maxRows), truncated }
+    }
+    if (error && !isMissingSearchLineMessagesRpcError(error)) {
+      console.error('search_line_messages_keyword_window (ring) failed, using legacy fetch:', (error as Error).message)
+    }
+  }
+
+  const all: SearchMessageRow[] = []
+  let offset = 0
+  let truncated = false
+  while (all.length < maxRows) {
+    const batchLimit = Math.min(SEARCH_FETCH_BATCH_SIZE, maxRows - all.length)
+    if (batchLimit <= 0) break
+    const end = offset + batchLimit - 1
+    let query = supabase
+      .from('line_messages')
+      .select('room_id, content, created_at, user_id')
+      .order('created_at', { ascending: false })
+      .range(offset, end)
+      .lt('created_at', beforeIso)
+    if (sinceIso) {
+      query = query.gte('created_at', sinceIso)
+    }
+    if (scope !== 'all_rooms') {
+      query = query.eq('room_id', roomId)
+    }
+    const { data, error } = await query
+    if (error) {
+      throw new Error(error.message)
+    }
+    const chunk = Array.isArray(data) ? data : []
+    for (const row of chunk) {
+      all.push({
+        room_id: String((row as { room_id?: unknown })?.room_id ?? ''),
+        content: String((row as { content?: unknown })?.content ?? ''),
+        created_at: String((row as { created_at?: unknown })?.created_at ?? ''),
+        user_id: (row as { user_id?: unknown })?.user_id == null
+          ? null
+          : String((row as { user_id?: unknown }).user_id),
+      })
+    }
+    if (chunk.length === 0) break
+    if (chunk.length < batchLimit) break
+    offset += chunk.length
+    if (all.length >= maxRows) {
+      truncated = true
+      break
+    }
+  }
+  return { rows: all.slice(0, maxRows), truncated }
+}
+
+function parsePendingStageWindowsJson(raw: unknown): Array<number | null> | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null
+  const out: Array<number | null> = []
+  for (const v of raw) {
+    if (v === null) {
+      out.push(null)
+      continue
+    }
+    if (typeof v === 'number' && Number.isFinite(v)) {
+      out.push(v)
+      continue
+    }
+    return null
+  }
+  return out
+}
+
+function messageSearchRingTimeBounds(
+  ringIndex: number,
+  windows: Array<number | null>,
+): { sinceIso: string | null; beforeIso: string } | null {
+  if (ringIndex < 0 || ringIndex > windows.length - 2) return null
+  const upperDays = windows[ringIndex]
+  if (upperDays == null) return null
+  const lowerDays = windows[ringIndex + 1]
+  const now = Date.now()
+  const beforeIso = new Date(now - upperDays * MESSAGE_SEARCH_DAY_MS).toISOString()
+  const sinceIso = lowerDays === null
+    ? null
+    : new Date(now - lowerDays * MESSAGE_SEARCH_DAY_MS).toISOString()
+  return { sinceIso, beforeIso }
+}
+
+function formatMessageSearchRingCaption(ringIndex: number, windows: Array<number | null>): string {
+  const upper = windows[ringIndex]
+  const lower = windows[ringIndex + 1]
+  if (upper == null) return '（帯の定義が不正です）'
+  if (lower == null) {
+    return `約${upper}日より古い期間（未検索の残り）`
+  }
+  return `約${upper}日より古く、約${lower}日より新しい期間`
+}
+
 async function buildMessageSearchReply(
   command: MessageSearchCommand | null,
   parseError: string | null,
@@ -2529,58 +2756,133 @@ async function buildMessageSearchReply(
     console.error('Failed to supersede stale library search pending:', supersedeStaleLibraryPendingError)
   }
 
-  const { effectiveDays, adjustedByRetention } = resolveEffectiveMessageSearchDays(
+  const { error: supersedeStaleExpandPendingError } = await supabase
+    .from(MESSAGE_SEARCH_EXPAND_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('conversation_key', buildConversationKey(roomId, userId))
+    .eq('status', 'pending')
+  if (supersedeStaleExpandPendingError && !isMissingMessageSearchExpandPendingTableError(supersedeStaleExpandPendingError)) {
+    console.error('Failed to supersede stale message search expand pending:', supersedeStaleExpandPendingError)
+  }
+
+  const { error: supersedeStaleFollowupPendingError } = await supabase
+    .from(MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('conversation_key', buildConversationKey(roomId, userId))
+    .eq('status', 'pending')
+  if (supersedeStaleFollowupPendingError && !isMissingMessageSearchFollowupTableError(supersedeStaleFollowupPendingError)) {
+    console.error('Failed to supersede stale message search followup pending:', supersedeStaleFollowupPendingError)
+  }
+
+  const explicitFullSearch = command.fullRetentionSearch === true
+  const rangePolicy = applyMessageSearchRangePolicy(
     command.days,
     configuredRetentionDays,
+    explicitFullSearch,
   )
-  const stageDayWindows = buildMessageSearchStageDayWindows(effectiveDays)
-  const usedMultiStageSearch = stageDayWindows.length > 1
+  let effectiveDays = rangePolicy.effectiveDays
+  let adjustedByRetention = rangePolicy.adjustedByRetention
+  let normalMaxCapped = rangePolicy.normalMaxCapped
+  const initialNormalMaxCapped = normalMaxCapped
+  const phase1Wizard = !explicitFullSearch
+  let stageDayWindows = phase1Wizard
+    ? buildMessageSearchPhase1WizardWindows(effectiveDays)
+    : buildMessageSearchStageDayWindows(effectiveDays)
+  let usedMultiStageSearch = stageDayWindows.length > 1
+  const phase1WindowDays = Number(stageDayWindows[0] ?? MESSAGE_SEARCH_NORMAL_MAX_DAYS)
+  let didChainedFullFromWizard = false
 
   const excludedSet = new Set((excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0))
 
   let hitsRaw: SearchMessageRow[] = []
   let fetchTruncated = false
+  let stopStageIndex = 0
 
-  for (const boundDays of stageDayWindows) {
-    const sinceIsoStage = boundDays === null
-      ? null
-      : new Date(Date.now() - boundDays * 24 * 60 * 60 * 1000).toISOString()
-    let fetched: SearchMessageRow[] = []
-    try {
-      const batch = await fetchLineMessagesForSearchBatched(
-        supabase,
-        roomId,
-        command.scope,
-        sinceIsoStage,
-        MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS,
-      )
-      fetchTruncated ||= batch.truncated
-      fetched = batch.rows
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return [`会話検索に失敗しました。${msg}`]
+  const runStageLoop = async (): Promise<void> => {
+    for (let si = 0; si < stageDayWindows.length; si += 1) {
+      const boundDays = stageDayWindows[si]
+      const sinceIsoStage = boundDays === null
+        ? null
+        : new Date(Date.now() - boundDays * 24 * 60 * 60 * 1000).toISOString()
+      let fetched: SearchMessageRow[] = []
+      try {
+        const batch = await fetchLineMessagesForSearchBatched(
+          supabase,
+          roomId,
+          command.scope,
+          sinceIsoStage,
+          MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS,
+          command.keyword,
+          excludedRoomIds,
+        )
+        fetchTruncated ||= batch.truncated
+        fetched = batch.rows
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        throw new Error(`会話検索に失敗しました。${msg}`)
+      }
+
+      const rows = fetched.filter((row) => {
+        if (command.scope !== 'all_rooms') return true
+        return !excludedSet.has(String(row.room_id ?? '').trim())
+      })
+
+      const hits = rows.filter((row) => {
+        if (!messageMatchesKeyword(row.content, command.keyword)) return false
+        if (isLikelyBotConversationText(row.content)) return false
+        return true
+      })
+
+      if (hits.length > 0) {
+        hitsRaw = hits
+        stopStageIndex = si
+        break
+      }
     }
+  }
 
-    // Admin UI: チェックあり＝検索対象 → excluded_message_search_room_ids は「チェックなし」ルームのみ。
-    const rows = fetched.filter((row) => {
-      if (command.scope !== 'all_rooms') return true
-      return !excludedSet.has(String(row.room_id ?? '').trim())
-    })
+  try {
+    await runStageLoop()
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return [msg.startsWith('会話検索に失敗') ? msg : `会話検索に失敗しました。${msg}`]
+  }
 
-    const hits = rows.filter((row) => {
-      if (!messageMatchesKeyword(row.content, command.keyword)) return false
-      if (isLikelyBotConversationText(row.content)) return false
-      return true
-    })
-
-    if (hits.length > 0) {
-      hitsRaw = hits
-      break
+  if (hitsRaw.length === 0 && phase1Wizard) {
+    const fullRangePolicy = applyMessageSearchRangePolicy(
+      command.days,
+      configuredRetentionDays,
+      true,
+    )
+    const fullEff = fullRangePolicy.effectiveDays
+    const shouldChainFull = fullEff === 0 || fullEff > phase1WindowDays
+    if (shouldChainFull) {
+      effectiveDays = fullEff
+      adjustedByRetention = fullRangePolicy.adjustedByRetention
+      normalMaxCapped = false
+      stageDayWindows = buildMessageSearchStageDayWindows(fullEff)
+      usedMultiStageSearch = stageDayWindows.length > 1
+      didChainedFullFromWizard = true
+      hitsRaw = []
+      stopStageIndex = 0
+      try {
+        await runStageLoop()
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return [msg.startsWith('会話検索に失敗') ? msg : `会話検索に失敗しました。${msg}`]
+      }
     }
   }
 
   if (hitsRaw.length === 0) {
     const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+
     if (!librarySearchEnabled) {
       const lines: string[] = [`「${command.keyword}」に一致する会話はありません（${periodText}）`]
       if (adjustedByRetention) {
@@ -2600,6 +2902,17 @@ async function buildMessageSearchReply(
     const lines: string[] = [
       `「${command.keyword}」に一致する会話はありません（${periodText}）`,
     ]
+    if (phase1Wizard) {
+      if (didChainedFullFromWizard) {
+        lines.push(
+          `※まず過去${phase1WindowDays}日を検索し、続いて保持期間いっぱいまで会話を検索しましたが一致しませんでした。`,
+        )
+      } else {
+        lines.push(
+          `※過去${phase1WindowDays}日の会話に加え、保持期間内はすでにすべて検索済みです（追加で広げる範囲はありません）。`,
+        )
+      }
+    }
     if (adjustedByRetention) {
       lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
     }
@@ -2645,8 +2958,33 @@ async function buildMessageSearchReply(
   if (adjustedByRetention) {
     lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
   }
+  if (initialNormalMaxCapped) {
+    lines.push(
+      `※通常の会話検索は過去${MESSAGE_SEARCH_NORMAL_MAX_DAYS}日までに制限しています。保持期間いっぱい（例: 2年分）まで対象にするには「会話検索フル」「会話検索全履歴」「会話検索裏」などを付けてください。`,
+    )
+  }
+  if (didChainedFullFromWizard && hits.length > 0) {
+    lines.push(
+      `※まず過去${phase1WindowDays}日を検索し一致がなかったため、保持期間の範囲で追加検索した結果です。`,
+    )
+  } else if (phase1Wizard && hits.length > 0) {
+    const d = Math.min(
+      rangePolicy.effectiveDays,
+      MESSAGE_SEARCH_NORMAL_MAX_DAYS,
+    )
+    lines.push(`※今回はまず過去${d}日の範囲を一度に検索しました。`)
+  }
+  if (
+    (explicitFullSearch || didChainedFullFromWizard) && effectiveDays > MESSAGE_SEARCH_NORMAL_MAX_DAYS
+  ) {
+    lines.push('※フル検索: 保持期間の範囲で段階的に走査しています。')
+  }
   if (usedMultiStageSearch) {
-    lines.push('※会話履歴は、約3ヶ月→約6ヶ月→設定範囲の順に試し、ヒットが出た段階で終了しました。')
+    lines.push(
+      explicitFullSearch || didChainedFullFromWizard
+        ? '※会話履歴は、約3ヶ月→約6ヶ月→設定上の全期間の順に試し、ヒットが出た段階で終了しました。'
+        : `※会話履歴は、約3ヶ月→約6ヶ月（通常は過去${MESSAGE_SEARCH_NORMAL_MAX_DAYS}日まで）の順に試し、ヒットが出た段階で終了しました。`,
+    )
   }
   if (fetchTruncated) {
     lines.push(
@@ -2668,6 +3006,28 @@ async function buildMessageSearchReply(
       lines.push(...formatMessageSearchPreview(hits[i], i + 1, command.scope === 'all_rooms'))
     }
   }
+
+  const canOfferOlderExpand = usedMultiStageSearch && stopStageIndex < stageDayWindows.length - 1
+  if (canOfferOlderExpand) {
+    const expandSaved = await saveMessageSearchExpandPending(
+      supabase,
+      roomId,
+      userId,
+      command,
+      effectiveDays,
+      adjustedByRetention,
+      stageDayWindows,
+      stopStageIndex,
+    )
+    lines.push('')
+    lines.push('※ヒットが出た段階で検索を終えたため、まだ古い会話帯は走査していません。')
+    if (expandSaved) {
+      lines.push(`※さらに古い帯も探す場合は「はい」または「さらに検索」と返信してください（${PENDING_CONFIRMATION_TTL_MIN}分以内）。`)
+    } else {
+      lines.push('※追加の古い帯への確認を保存できませんでした。しばらくしてからもう一度お試しください。')
+    }
+  }
+
   return splitTextForLineReply(lines.join('\n'))
 }
 
@@ -2684,6 +3044,32 @@ function resolveEffectiveMessageSearchDays(
   return { effectiveDays, adjustedByRetention }
 }
 
+/** 保持期間いっぱいまで検索する明示モード（通常は過去180日にキャップ） */
+function detectFullRetentionSearchRequest(compact: string): boolean {
+  if (/(会話|トーク|履歴|チャット)検索(フルスキャン|全履歴|裏モード|フル|裏)/.test(compact)) return true
+  if (/(フルスキャン|全履歴)(会話|トーク|履歴|チャット)検索/.test(compact)) return true
+  return false
+}
+
+function applyMessageSearchRangePolicy(
+  requestedDays: MessageRetentionDays,
+  configuredRetentionDays: MessageRetentionDays,
+  fullRetentionSearch: boolean,
+): { effectiveDays: MessageRetentionDays; adjustedByRetention: boolean; normalMaxCapped: boolean } {
+  const resolved = resolveEffectiveMessageSearchDays(requestedDays, configuredRetentionDays)
+  if (fullRetentionSearch) {
+    return { effectiveDays: resolved.effectiveDays, adjustedByRetention: resolved.adjustedByRetention, normalMaxCapped: false }
+  }
+  if (resolved.effectiveDays <= MESSAGE_SEARCH_NORMAL_MAX_DAYS) {
+    return { effectiveDays: resolved.effectiveDays, adjustedByRetention: resolved.adjustedByRetention, normalMaxCapped: false }
+  }
+  return {
+    effectiveDays: MESSAGE_SEARCH_NORMAL_MAX_DAYS as MessageRetentionDays,
+    adjustedByRetention: resolved.adjustedByRetention,
+    normalMaxCapped: true,
+  }
+}
+
 async function buildLibrarySearchPromptWhenMessageSearchDisabled(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
@@ -2691,10 +3077,13 @@ async function buildLibrarySearchPromptWhenMessageSearchDisabled(
   command: MessageSearchCommand,
   configuredRetentionDays: MessageRetentionDays,
 ): Promise<string> {
-  const { effectiveDays, adjustedByRetention } = resolveEffectiveMessageSearchDays(
+  const rangePolicy = applyMessageSearchRangePolicy(
     command.days,
     configuredRetentionDays,
+    command.fullRetentionSearch === true,
   )
+  const effectiveDays = rangePolicy.effectiveDays
+  const adjustedByRetention = rangePolicy.adjustedByRetention
   const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
   const pendingSaved = await savePendingLibrarySearchConfirmation(
     supabase,
@@ -3946,6 +4335,21 @@ function normalizeConfirmationDecision(rawText: string): 'yes' | 'no' | null {
   return null
 }
 
+/** 会話検索「古い帯の追加」確認: 通常のはい/いいえに加え、さらに検索系の短文も肯定扱い */
+function normalizeMessageSearchExpandConfirmation(rawText: string): 'yes' | 'no' | null {
+  const generic = normalizeConfirmationDecision(rawText)
+  if (generic === 'yes' || generic === 'no') return generic
+  const compact = normalizeForRuleParsing(rawText)
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[。．.!！?？、,]/g, '')
+  if (!compact) return null
+  if (/^(さらに検索|追加検索|続けて(検索|探|さが)|もっと古い|もっと(探|さが)(して|す)?|古い(の|方)?(も|まで)?(探|さが)(して|す)?|過去も(探|さが))/.test(compact)) {
+    return 'yes'
+  }
+  return null
+}
+
 function isMissingPendingTableError(error: any): boolean {
   const code = String(error?.code ?? '')
   if (code === '42P01') return true
@@ -4190,6 +4594,22 @@ function isMissingLibraryPendingTableError(error: any): boolean {
     && (text.includes('does not exist') || text.includes('relation'))
 }
 
+function isMissingMessageSearchExpandPendingTableError(error: any): boolean {
+  const code = String(error?.code ?? '')
+  if (code === '42P01') return true
+  const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
+  return text.includes('message_search_expand_pending_confirmations')
+    && (text.includes('does not exist') || text.includes('relation'))
+}
+
+function isMissingMessageSearchFollowupTableError(error: any): boolean {
+  const code = String(error?.code ?? '')
+  if (code === '42P01') return true
+  const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
+  return text.includes('message_search_followup_pending_confirmations')
+    && (text.includes('does not exist') || text.includes('relation'))
+}
+
 async function fetchPendingLibrarySearchConfirmation(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
@@ -4269,6 +4689,18 @@ async function savePendingLibrarySearchConfirmation(
     console.error('Failed to supersede library search pending:', supersedeError)
   }
 
+  const { error: supersedeFollowupError } = await supabase
+    .from(MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: nowIso,
+    })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeFollowupError && !isMissingMessageSearchFollowupTableError(supersedeFollowupError)) {
+    console.error('Failed to supersede followup pending when saving library pending:', supersedeFollowupError)
+  }
+
   const { error: insertError } = await supabase
     .from(LIBRARY_SEARCH_PENDING_TABLE)
     .insert({
@@ -4290,6 +4722,290 @@ async function savePendingLibrarySearchConfirmation(
     return false
   }
   return true
+}
+
+async function fetchPendingMessageSearchExpand(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingMessageSearchExpand | null> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(MESSAGE_SEARCH_EXPAND_PENDING_TABLE)
+    .select('id, conversation_key, keyword, search_days, search_scope, retention_adjusted, stage_windows, next_ring_k, expires_at')
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    if (!isMissingMessageSearchExpandPendingTableError(error)) {
+      console.error('Failed to fetch message search expand pending:', error)
+    }
+    return null
+  }
+  if (!data) return null
+  const windows = parsePendingStageWindowsJson((data as any).stage_windows)
+  if (!windows) return null
+  const daysRaw = Number((data as any).search_days)
+  const days = isSupportedMessageRetentionDays(daysRaw) ? daysRaw : DEFAULT_MESSAGE_RETENTION_DAYS
+  const scopeRaw = String((data as any).search_scope ?? '').trim()
+  const scope: MessageSearchScope = scopeRaw === 'current_room' ? 'current_room' : 'all_rooms'
+  const nextRing = Number((data as any).next_ring_k)
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    keyword: String((data as any).keyword ?? ''),
+    search_days: days,
+    search_scope: scope,
+    retention_adjusted: Boolean((data as any).retention_adjusted),
+    stage_windows: windows,
+    next_ring_k: Number.isFinite(nextRing) ? Math.max(0, Math.floor(nextRing)) : 0,
+    expires_at: String((data as any).expires_at ?? ''),
+  }
+}
+
+async function resolvePendingMessageSearchExpand(
+  supabase: ReturnType<typeof createClient>,
+  pending: PendingMessageSearchExpand,
+  status: 'confirmed' | 'cancelled' | 'expired' | 'superseded',
+): Promise<void> {
+  const { error } = await supabase
+    .from(MESSAGE_SEARCH_EXPAND_PENDING_TABLE)
+    .update({
+      status,
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('id', Number(pending.id))
+    .eq('status', 'pending')
+  if (error && !isMissingMessageSearchExpandPendingTableError(error)) {
+    console.error('Failed to resolve message search expand pending:', error)
+  }
+}
+
+async function saveMessageSearchExpandPending(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  command: MessageSearchCommand,
+  effectiveSearchDays: MessageRetentionDays,
+  retentionAdjusted: boolean,
+  stageWindows: Array<number | null>,
+  stopStageIndex: number,
+): Promise<boolean> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + PENDING_CONFIRMATION_TTL_MIN * 60 * 1000).toISOString()
+  const maxRingIdx = stageWindows.length - 2
+  if (maxRingIdx < 0 || stopStageIndex > maxRingIdx) return false
+
+  const { error: supersedeError } = await supabase
+    .from(MESSAGE_SEARCH_EXPAND_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: nowIso,
+    })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeError && !isMissingMessageSearchExpandPendingTableError(supersedeError)) {
+    console.error('Failed to supersede message search expand pending:', supersedeError)
+  }
+
+  const { error: supersedeFollowupError } = await supabase
+    .from(MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: nowIso,
+    })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeFollowupError && !isMissingMessageSearchFollowupTableError(supersedeFollowupError)) {
+    console.error('Failed to supersede followup pending when saving expand pending:', supersedeFollowupError)
+  }
+
+  const { error: insertError } = await supabase
+    .from(MESSAGE_SEARCH_EXPAND_PENDING_TABLE)
+    .insert({
+      conversation_key: conversationKey,
+      room_id: roomId,
+      user_id: userId,
+      keyword: command.keyword,
+      search_days: effectiveSearchDays,
+      search_scope: command.scope,
+      retention_adjusted: retentionAdjusted,
+      stage_windows: stageWindows,
+      next_ring_k: stopStageIndex,
+      status: 'pending',
+      expires_at: expiresAt,
+    })
+
+  if (insertError) {
+    if (!isMissingMessageSearchExpandPendingTableError(insertError)) {
+      console.error('Failed to save message search expand pending:', insertError)
+    }
+    return false
+  }
+  return true
+}
+
+async function tryHandlePendingMessageSearchExpand(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  excludedRoomIds: string[],
+  groqApiKey: string,
+): Promise<string[] | null> {
+  const pending = await fetchPendingMessageSearchExpand(supabase, roomId, userId)
+  if (!pending) return null
+
+  const expireAtMs = new Date(pending.expires_at).getTime()
+  if (!Number.isFinite(expireAtMs) || Date.now() >= expireAtMs) {
+    await resolvePendingMessageSearchExpand(supabase, pending, 'expired')
+    return ['さらに古い会話を検索する確認が期限切れです。もう一度会話検索からやり直してください。']
+  }
+
+  const decision = normalizeMessageSearchExpandConfirmation(text)
+  if (decision === 'no') {
+    await resolvePendingMessageSearchExpand(supabase, pending, 'cancelled')
+    return ['追加の古い帯への会話検索をキャンセルしました。']
+  }
+  if (decision !== 'yes') {
+    return null
+  }
+
+  const currentRoomExcluded = pending.search_scope !== 'all_rooms'
+    && isRoomExcludedForMessageSearch(excludedRoomIds, roomId)
+  if (currentRoomExcluded) {
+    await resolvePendingMessageSearchExpand(supabase, pending, 'cancelled')
+    return ['このルームは会話検索の対象に含まれていません。管理画面のユーザー権限で、このルームにチェックを入れて対象にしてください。']
+  }
+
+  const windows = pending.stage_windows
+  const ringIndex = pending.next_ring_k
+  const maxRingIdx = windows.length - 2
+  if (ringIndex < 0 || ringIndex > maxRingIdx) {
+    await resolvePendingMessageSearchExpand(supabase, pending, 'expired')
+    return ['追加検索の状態が不正です。もう一度会話検索からやり直してください。']
+  }
+
+  const bounds = messageSearchRingTimeBounds(ringIndex, windows)
+  if (!bounds) {
+    await resolvePendingMessageSearchExpand(supabase, pending, 'expired')
+    return ['追加検索の帯の計算に失敗しました。もう一度会話検索からやり直してください。']
+  }
+
+  const excludedSet = new Set((excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0))
+
+  let fetched: SearchMessageRow[] = []
+  let fetchTruncated = false
+  try {
+    const batch = await fetchLineMessagesForSearchRingBatched(
+      supabase,
+      roomId,
+      pending.search_scope,
+      bounds.sinceIso,
+      bounds.beforeIso,
+      MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS,
+      pending.keyword,
+      excludedRoomIds,
+    )
+    fetchTruncated = batch.truncated
+    fetched = batch.rows
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return [`会話検索（追加の古い帯）に失敗しました。${msg}`]
+  }
+
+  const rows = fetched.filter((row) => {
+    if (pending.search_scope !== 'all_rooms') return true
+    return !excludedSet.has(String(row.room_id ?? '').trim())
+  })
+
+  const hitsRaw = rows.filter((row) => {
+    if (!messageMatchesKeyword(row.content, pending.keyword)) return false
+    if (isLikelyBotConversationText(row.content)) return false
+    return true
+  })
+
+  const roomLabels = pending.search_scope === 'all_rooms'
+    ? await loadRoomLabelsForHits(supabase, hitsRaw.map((row) => ({ room_id: row.room_id })))
+    : new Map<string, string>()
+  const hits = hitsRaw.map((row) => ({
+    ...row,
+    room_label: pending.search_scope === 'all_rooms'
+      ? (roomLabels.get(row.room_id) ?? row.room_id)
+      : null,
+  }))
+
+  const effectiveDays = pending.search_days
+  const shouldSummarize = !!groqApiKey && hits.length > 0 && hits.length <= SEARCH_AI_SUMMARY_MAX_HITS
+  const summary = await summarizeMessageSearchHitsWithGroq(
+    shouldSummarize ? hits.slice(0, SEARCH_MAX_SUMMARY_ROWS) : [],
+    pending.keyword,
+    effectiveDays,
+    groqApiKey,
+  )
+
+  const scopeLabel = pending.search_scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
+  const periodLabel = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+  const ringCaption = formatMessageSearchRingCaption(ringIndex, windows)
+
+  const lines: string[] = [
+    '会話検索結果（追加：より古い帯）',
+    `対象: ${scopeLabel}`,
+    `全体の期間設定: ${periodLabel}`,
+    `検索した帯: ${ringCaption}`,
+    `キーワード: ${pending.keyword}`,
+    `会話一致: ${hits.length}件`,
+  ]
+  if (pending.retention_adjusted) {
+    lines.push('※当初の会話検索時点で、保持期間に合わせて検索範囲が調整されていました。')
+  }
+  if (fetchTruncated) {
+    lines.push(
+      `※この帯ではメッセージ件数が多いため、新しい順に最大${MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS}件までを走査しました。`,
+    )
+  }
+  if (summary) {
+    lines.push('')
+    lines.push('会話要約:')
+    lines.push(summary)
+  } else if (!!groqApiKey && hits.length > SEARCH_AI_SUMMARY_MAX_HITS) {
+    lines.push(`※一致件数が多いため、AI要約は省略しています（${SEARCH_AI_SUMMARY_MAX_HITS}件超）。`)
+  }
+  if (hits.length > 0) {
+    lines.push('')
+    lines.push('一致メッセージ（新しい順）:')
+    for (let i = 0; i < hits.length; i += 1) {
+      lines.push('')
+      lines.push(...formatMessageSearchPreview(hits[i], i + 1, pending.search_scope === 'all_rooms'))
+    }
+  }
+
+  const nextRingK = ringIndex + 1
+  if (nextRingK <= maxRingIdx) {
+    const { error: updateError } = await supabase
+      .from(MESSAGE_SEARCH_EXPAND_PENDING_TABLE)
+      .update({ next_ring_k: nextRingK })
+      .eq('id', Number(pending.id))
+      .eq('status', 'pending')
+    if (updateError && !isMissingMessageSearchExpandPendingTableError(updateError)) {
+      console.error('Failed to advance message search expand pending:', updateError)
+      await resolvePendingMessageSearchExpand(supabase, pending, 'confirmed')
+      lines.push('')
+      lines.push('※続行状態を保存できませんでした。さらに古い帯を試す場合は、会話検索を最初からやり直してください。')
+    } else {
+      lines.push('')
+      lines.push('※まだより古い未検索の帯があります。')
+      lines.push(`※続けて探す場合は「はい」または「さらに検索」と返信してください（${PENDING_CONFIRMATION_TTL_MIN}分以内）。`)
+    }
+  } else {
+    await resolvePendingMessageSearchExpand(supabase, pending, 'confirmed')
+  }
+
+  return splitTextForLineReply(lines.join('\n'))
 }
 
 function encodeLegacyPendingContent(payload: {
@@ -7153,13 +7869,8 @@ function keywordMatchesHaystacks(keyword: string, haystacks: string[]): boolean 
   const compactTarget = compactSearchText(target)
   if (!target && !compactTarget) return false
 
-  const rawTokens = normalizedKeyword
-    .replace(/[、,，/／|｜]+/g, ' ')
-    .split(/\s+/)
-    .filter((token) => token.length > 0)
-  if (rawTokens.length === 0) return true
-  const filteredTokens = rawTokens.filter((token) => !isIgnorableMessageSearchToken(token))
-  const tokens = filteredTokens.length > 0 ? filteredTokens : rawTokens
+  const tokens = extractMessageSearchKeywordTokens(keyword)
+  if (tokens.length === 0) return true
   return tokens.every((token) => {
     const variants = expandKeywordVariants(token)
     return variants.some((variant) => {
@@ -7170,6 +7881,19 @@ function keywordMatchesHaystacks(keyword: string, haystacks: string[]): boolean 
       return false
     })
   })
+}
+
+/** `keywordMatchesHaystacks` と同一のトークン分割（SQL 事前絞り込み用） */
+function extractMessageSearchKeywordTokens(keyword: string): string[] {
+  const normalizedKeyword = normalizeKeywordForSearch(keyword)
+  if (!normalizedKeyword) return []
+  const rawTokens = normalizedKeyword
+    .replace(/[、,，/／|｜]+/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length > 0)
+  if (rawTokens.length === 0) return []
+  const filteredTokens = rawTokens.filter((token) => !isIgnorableMessageSearchToken(token))
+  return filteredTokens.length > 0 ? filteredTokens : rawTokens
 }
 
 function isIgnorableMessageSearchToken(token: string): boolean {
@@ -7232,6 +7956,32 @@ function expandKeywordVariants(token: string): string[] {
   }
 
   return Array.from(variants).filter((v) => v.length > 0)
+}
+
+/** Postgres RPC 用: トークン AND・各トークンは類義語 OR（返却行は TS で `messageMatchesKeyword` 再検証） */
+function buildMessageSearchSqlTokenGroups(keyword: string): string[][] | null {
+  const tokens = extractMessageSearchKeywordTokens(keyword)
+  if (tokens.length === 0) return null
+  const groups: string[][] = []
+  for (const token of tokens) {
+    const variants = expandKeywordVariants(token)
+    const uniq = new Set<string>()
+    for (const v of variants) {
+      const n = normalizeKeywordForSearch(v)
+      if (n.length > 0) uniq.add(n)
+    }
+    if (uniq.size === 0) return null
+    groups.push(Array.from(uniq))
+  }
+  return groups
+}
+
+function isMissingSearchLineMessagesRpcError(error: unknown): boolean {
+  const code = String((error as { code?: string })?.code ?? '')
+  if (code === '42883' || code === 'PGRST202') return true
+  const text = `${String((error as { message?: string })?.message ?? '')} ${String((error as { details?: string })?.details ?? '')}`.toLowerCase()
+  return text.includes('search_line_messages_keyword_window')
+    && (text.includes('does not exist') || text.includes('could not find') || text.includes('schema cache'))
 }
 
 function formatDateForCalendarTemplate(rawDate: string): string {
