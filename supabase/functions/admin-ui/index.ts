@@ -1093,7 +1093,7 @@ const html = String.raw`<!doctype html>
 
       <section class="card rooms">
         <h2>ルーム別設定</h2>
-        <p class="muted" style="margin:0 0 10px 0;">運用ポリシーにより「会話検索応答」「資料検索(2段階目)」「自動応答」は固定制御です。ここでは誤設定を防ぐため表示していません。</p>
+        <p class="muted" style="margin:0 0 10px 0;">会話検索系は「AI会話返信」とは別スイッチです。必要に応じてルームごとに ON/OFF できます。</p>
         <div class="controls">
           <input id="newRoomId" class="input" type="text" placeholder="新規 room_id">
           <input id="newRoomName" class="input" type="text" placeholder="表示名（任意）">
@@ -1163,6 +1163,8 @@ const html = String.raw`<!doctype html>
       <div id="roomConfigModalMeta" class="modal-meta">対象ルーム: -</div>
       <div class="room-scope-modal-list" style="margin-top:12px;">
         <label class="room-scope-option"><input id="roomConfigBotReplyEnabled" type="checkbox">AI会話返信</label>
+        <label class="room-scope-option"><input id="roomConfigMessageSearchEnabled" type="checkbox">会話検索（ルーム / AI会話返信ON時）</label>
+        <label class="room-scope-option"><input id="roomConfigMessageSearchLibraryEnabled" type="checkbox">資料検索（2段階目 / AI会話返信ON時）</label>
         <label class="room-scope-option"><input id="roomConfigSendSummary" type="checkbox">ルーム要約配信</label>
         <label class="room-scope-option"><input id="roomConfigTomorrowReminder" type="checkbox">明日予定配信</label>
         <label class="room-scope-option"><input id="roomConfigMediaAccess" type="checkbox">LINE添付保存（ルーム）</label>
@@ -1184,6 +1186,8 @@ const html = String.raw`<!doctype html>
       <div class="modal-meta">ここで選んだ値が次の追加に使われます。</div>
       <div class="room-scope-modal-list" style="margin-top:12px;">
         <label class="room-scope-option"><input id="newRoomBotReplyEnabled" type="checkbox">AI会話返信</label>
+        <label class="room-scope-option"><input id="newRoomMessageSearchEnabled" type="checkbox">会話検索（ルーム / AI会話返信ON時）</label>
+        <label class="room-scope-option"><input id="newRoomMessageSearchLibraryEnabled" type="checkbox">資料検索（2段階目 / AI会話返信ON時）</label>
         <label class="room-scope-option"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
         <label class="room-scope-option"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
         <label class="room-scope-option"><input id="newRoomMediaFileAccessEnabled" type="checkbox">LINE添付保存（ルーム）</label>
@@ -1210,6 +1214,8 @@ const html = String.raw`<!doctype html>
     const API_BASE = '/functions/v1/admin-api';
     const TOKEN_KEY = 'line_summary_admin_token';
     const NEW_ROOM_DEFAULT_BOT_REPLY_KEY = 'line_summary_new_room_default_bot_reply_enabled';
+    const NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY = 'line_summary_new_room_default_message_search_enabled';
+    const NEW_ROOM_DEFAULT_MESSAGE_SEARCH_LIBRARY_KEY = 'line_summary_new_room_default_message_search_library_enabled';
     const NEW_ROOM_DEFAULT_SEND_SUMMARY_KEY = 'line_summary_new_room_default_send_summary';
     const NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY = 'line_summary_new_room_default_tomorrow_reminder';
     const NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY = 'line_summary_new_room_default_media_file_access';
@@ -1254,6 +1260,8 @@ const html = String.raw`<!doctype html>
       newRoomName: document.getElementById('newRoomName'),
       newRoomHours: document.getElementById('newRoomHours'),
       newRoomBotReplyEnabled: document.getElementById('newRoomBotReplyEnabled'),
+      newRoomMessageSearchEnabled: document.getElementById('newRoomMessageSearchEnabled'),
+      newRoomMessageSearchLibraryEnabled: document.getElementById('newRoomMessageSearchLibraryEnabled'),
       newRoomSendSummary: document.getElementById('newRoomSendSummary'),
       newRoomTomorrowReminder: document.getElementById('newRoomTomorrowReminder'),
       newRoomMediaFileAccessEnabled: document.getElementById('newRoomMediaFileAccessEnabled'),
@@ -1281,6 +1289,8 @@ const html = String.raw`<!doctype html>
       roomConfigModal: document.getElementById('roomConfigModal'),
       roomConfigModalMeta: document.getElementById('roomConfigModalMeta'),
       roomConfigBotReplyEnabled: document.getElementById('roomConfigBotReplyEnabled'),
+      roomConfigMessageSearchEnabled: document.getElementById('roomConfigMessageSearchEnabled'),
+      roomConfigMessageSearchLibraryEnabled: document.getElementById('roomConfigMessageSearchLibraryEnabled'),
       roomConfigSendSummary: document.getElementById('roomConfigSendSummary'),
       roomConfigTomorrowReminder: document.getElementById('roomConfigTomorrowReminder'),
       roomConfigMediaAccess: document.getElementById('roomConfigMediaAccess'),
@@ -1329,6 +1339,8 @@ const html = String.raw`<!doctype html>
 
     function applyNewRoomDefaultCheckboxes() {
       dom.newRoomBotReplyEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, false);
+      dom.newRoomMessageSearchEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, true);
+      dom.newRoomMessageSearchLibraryEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_LIBRARY_KEY, true);
       dom.newRoomSendSummary.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_SEND_SUMMARY_KEY, false);
       dom.newRoomTomorrowReminder.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY, false);
       dom.newRoomMediaFileAccessEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY, true);
@@ -1341,6 +1353,8 @@ const html = String.raw`<!doctype html>
     function buildNewRoomConfigSummary() {
       const enabledCount =
         (dom.newRoomBotReplyEnabled.checked ? 1 : 0) +
+        (dom.newRoomMessageSearchEnabled.checked ? 1 : 0) +
+        (dom.newRoomMessageSearchLibraryEnabled.checked ? 1 : 0) +
         (dom.newRoomSendSummary.checked ? 1 : 0) +
         (dom.newRoomTomorrowReminder.checked ? 1 : 0) +
         (dom.newRoomMediaFileAccessEnabled.checked ? 1 : 0) +
@@ -1352,7 +1366,7 @@ const html = String.raw`<!doctype html>
         : dom.newRoomSummaryMode.value === 'independent'
         ? '各回独立'
         : '継承';
-      return enabledCount + '/7 有効 ・ 最終回:' + summary;
+      return enabledCount + '/9 有効 ・ 最終回:' + summary;
     }
 
     function refreshNewRoomConfigSummary() {
@@ -2001,6 +2015,8 @@ const html = String.raw`<!doctype html>
 
     function getRoomConfigStateFromRow(tr) {
       const botReplyEnabledInput = tr.querySelector('.room-bot-reply-enabled');
+      const messageSearchEnabledInput = tr.querySelector('.room-message-search-enabled');
+      const messageSearchLibraryEnabledInput = tr.querySelector('.room-message-search-library-enabled');
       const sendSummaryInput = tr.querySelector('.room-send-summary');
       const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
       const mediaFileAccessEnabledInput = tr.querySelector('.room-media-file-access-enabled');
@@ -2009,6 +2025,8 @@ const html = String.raw`<!doctype html>
       const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
       const featureConfig = {
         bot_reply_enabled: botReplyEnabledInput ? !!botReplyEnabledInput.checked : parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
+        message_search_enabled: messageSearchEnabledInput ? !!messageSearchEnabledInput.checked : parseDatasetBoolean(tr.dataset.messageSearchEnabled, true),
+        message_search_library_enabled: messageSearchLibraryEnabledInput ? !!messageSearchLibraryEnabledInput.checked : parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, true),
         send_room_summary: sendSummaryInput ? !!sendSummaryInput.checked : parseDatasetBoolean(tr.dataset.roomSendSummary, false),
         calendar_tomorrow_reminder_enabled: tomorrowReminderInput ? !!tomorrowReminderInput.checked : parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
         media_file_access_enabled: mediaFileAccessEnabledInput ? !!mediaFileAccessEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
@@ -2029,6 +2047,8 @@ const html = String.raw`<!doctype html>
       };
       tr.dataset.roomEnabled = String(!!normalizedConfig.is_enabled);
       tr.dataset.botReplyEnabled = String(!!config.bot_reply_enabled);
+      tr.dataset.messageSearchEnabled = String(!!config.message_search_enabled);
+      tr.dataset.messageSearchLibraryEnabled = String(!!config.message_search_library_enabled);
       tr.dataset.roomSendSummary = String(!!config.send_room_summary);
       tr.dataset.roomTomorrowReminder = String(!!config.calendar_tomorrow_reminder_enabled);
       tr.dataset.roomMediaAccess = String(!!config.media_file_access_enabled);
@@ -2046,6 +2066,8 @@ const html = String.raw`<!doctype html>
     function getRoomConfigEnabledCount(config) {
       let enabledCount = 0;
       if (config.bot_reply_enabled) enabledCount += 1;
+      if (config.message_search_enabled) enabledCount += 1;
+      if (config.message_search_library_enabled) enabledCount += 1;
       if (config.send_room_summary) enabledCount += 1;
       if (config.calendar_tomorrow_reminder_enabled) enabledCount += 1;
       if (config.media_file_access_enabled) enabledCount += 1;
@@ -2063,7 +2085,7 @@ const html = String.raw`<!doctype html>
 
     function buildRoomConfigSummary(config) {
       const enabledCount = getRoomConfigEnabledCount(config);
-      return enabledCount + '/7 有効';
+      return enabledCount + '/9 有効';
     }
 
     function renderRooms(roomOverview, roomSettings) {
@@ -2099,6 +2121,8 @@ const html = String.raw`<!doctype html>
         const setting = entry.setting
         const roomFeatureConfig = {
           bot_reply_enabled: !!(setting && setting.bot_reply_enabled === true),
+          message_search_enabled: (setting && setting.message_search_enabled) !== false,
+          message_search_library_enabled: (setting && setting.message_search_library_enabled) !== false,
           send_room_summary: setting && setting.send_room_summary === true,
           calendar_tomorrow_reminder_enabled: setting && setting.calendar_tomorrow_reminder_enabled === true,
           media_file_access_enabled: (setting && setting.media_file_access_enabled) !== false,
@@ -2125,6 +2149,8 @@ const html = String.raw`<!doctype html>
         const configSummary = buildRoomConfigSummary({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
           bot_reply_enabled: parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
+          message_search_enabled: parseDatasetBoolean(tr.dataset.messageSearchEnabled, true),
+          message_search_library_enabled: parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, true),
           send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
           calendar_tomorrow_reminder_enabled: parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
           media_file_access_enabled: parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
@@ -2135,6 +2161,8 @@ const html = String.raw`<!doctype html>
         const configToneClass = roomConfigToneClass(getRoomConfigEnabledCount({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
           bot_reply_enabled: parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
+          message_search_enabled: parseDatasetBoolean(tr.dataset.messageSearchEnabled, true),
+          message_search_library_enabled: parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, true),
           send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
           calendar_tomorrow_reminder_enabled: parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
           media_file_access_enabled: parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
@@ -2176,6 +2204,8 @@ const html = String.raw`<!doctype html>
       dom.roomConfigModalMeta.textContent = '対象ルーム: ' + (roomName || roomId || '(未設定)');
       const config = getRoomConfigStateFromRow(tr);
       dom.roomConfigBotReplyEnabled.checked = !!config.bot_reply_enabled;
+      dom.roomConfigMessageSearchEnabled.checked = !!config.message_search_enabled;
+      dom.roomConfigMessageSearchLibraryEnabled.checked = !!config.message_search_library_enabled;
       dom.roomConfigSendSummary.checked = !!config.send_room_summary;
       dom.roomConfigTomorrowReminder.checked = !!config.calendar_tomorrow_reminder_enabled;
       dom.roomConfigMediaAccess.checked = !!config.media_file_access_enabled;
@@ -2196,6 +2226,8 @@ const html = String.raw`<!doctype html>
       if (!activeRoomConfigRow) return;
       const nextConfig = {
         bot_reply_enabled: !!dom.roomConfigBotReplyEnabled.checked,
+        message_search_enabled: !!dom.roomConfigMessageSearchEnabled.checked,
+        message_search_library_enabled: !!dom.roomConfigMessageSearchLibraryEnabled.checked,
         send_room_summary: !!dom.roomConfigSendSummary.checked,
         calendar_tomorrow_reminder_enabled: !!dom.roomConfigTomorrowReminder.checked,
         media_file_access_enabled: !!dom.roomConfigMediaAccess.checked,
@@ -2446,8 +2478,8 @@ const html = String.raw`<!doctype html>
 
       const normalizedOrder = parseRoomSortOrder(roomSortOrder)
       tr.dataset.roomSortOrder = String(normalizedOrder ?? 0)
-      const messageSearchEnabled = parseDatasetBoolean(tr.dataset.messageSearchEnabled, false)
-      const messageSearchLibraryEnabled = parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, false)
+      const messageSearchEnabled = parseDatasetBoolean(tr.dataset.messageSearchEnabled, true)
+      const messageSearchLibraryEnabled = parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, true)
 
       return {
         room_id: roomId,
@@ -2530,6 +2562,8 @@ const html = String.raw`<!doctype html>
       }
       const newRoomFeatureConfig = {
         bot_reply_enabled: !!dom.newRoomBotReplyEnabled.checked,
+        message_search_enabled: !!dom.newRoomMessageSearchEnabled.checked,
+        message_search_library_enabled: !!dom.newRoomMessageSearchLibraryEnabled.checked,
         send_room_summary: !!dom.newRoomSendSummary.checked,
         calendar_tomorrow_reminder_enabled: !!dom.newRoomTomorrowReminder.checked,
         media_file_access_enabled: !!dom.newRoomMediaFileAccessEnabled.checked,
@@ -2544,8 +2578,8 @@ const html = String.raw`<!doctype html>
         bot_reply_enabled: newRoomFeatureConfig.bot_reply_enabled,
         send_room_summary: newRoomFeatureConfig.send_room_summary,
         calendar_tomorrow_reminder_enabled: newRoomFeatureConfig.calendar_tomorrow_reminder_enabled,
-        message_search_enabled: false,
-        message_search_library_enabled: false,
+        message_search_enabled: newRoomFeatureConfig.message_search_enabled,
+        message_search_library_enabled: newRoomFeatureConfig.message_search_library_enabled,
         media_file_access_enabled: newRoomFeatureConfig.media_file_access_enabled,
         calendar_ai_auto_create_enabled: newRoomFeatureConfig.calendar_ai_auto_create_enabled,
         calendar_silent_auto_register_enabled: newRoomFeatureConfig.calendar_silent_auto_register_enabled,
@@ -2972,6 +3006,8 @@ const html = String.raw`<!doctype html>
       dom.newRoomName,
       dom.newRoomHours,
       dom.newRoomBotReplyEnabled,
+      dom.newRoomMessageSearchEnabled,
+      dom.newRoomMessageSearchLibraryEnabled,
       dom.newRoomSendSummary,
       dom.newRoomTomorrowReminder,
       dom.newRoomMediaFileAccessEnabled,
@@ -2987,6 +3023,12 @@ const html = String.raw`<!doctype html>
 
     dom.newRoomBotReplyEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, !!dom.newRoomBotReplyEnabled.checked);
+    });
+    dom.newRoomMessageSearchEnabled.addEventListener('change', function() {
+      saveBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, !!dom.newRoomMessageSearchEnabled.checked);
+    });
+    dom.newRoomMessageSearchLibraryEnabled.addEventListener('change', function() {
+      saveBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_LIBRARY_KEY, !!dom.newRoomMessageSearchLibraryEnabled.checked);
     });
     dom.newRoomSendSummary.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_SEND_SUMMARY_KEY, !!dom.newRoomSendSummary.checked);
@@ -3008,6 +3050,8 @@ const html = String.raw`<!doctype html>
     });
     [
       dom.newRoomBotReplyEnabled,
+      dom.newRoomMessageSearchEnabled,
+      dom.newRoomMessageSearchLibraryEnabled,
       dom.newRoomSendSummary,
       dom.newRoomTomorrowReminder,
       dom.newRoomMediaFileAccessEnabled,
