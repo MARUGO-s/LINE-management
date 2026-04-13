@@ -4030,7 +4030,10 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
   const hasConversationHint = /(会話|トーク|履歴|チャット|メッセージ|発言)/.test(compact)
   const hasSearchIntent =
     /(検索|要約|まとめ|まとめて|要点|要旨|教えて|見せて|みせて|確認|知りたい|調べ|調べて|調べたい|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた|なかった|無かった|なかったっけ|無かったっけ|ないか|無いか|ねえ|だよね)/.test(compact)
-  if (!hasExplicitPrefix && !(hasConversationHint && hasSearchIntent)) {
+  const hasGenericLookupIntent =
+    /(検索|調べ|探して|探す)/.test(compact) &&
+    /(について|に関して|ある|ありますか|ない|なかった|教えて)/.test(compact)
+  if (!hasExplicitPrefix && !(hasConversationHint && hasSearchIntent) && !hasGenericLookupIntent) {
     return { matched: false, command: null, error: null }
   }
 
