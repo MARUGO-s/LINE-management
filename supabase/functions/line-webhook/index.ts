@@ -2967,6 +2967,11 @@ async function tryHandlePendingMediaSearch(
     await clearPendingMediaSearch(supabase, roomId, userId)
     return 'メディア検索権限がないため、処理を終了しました。'
   }
+  if (pending.stage === 'select_item' && classifyMessageSearchPrimaryTarget(normalizedText) === 'conversation') {
+    // 会話検索っぽい入力なら、残っていたメディア候補状態を解除して会話検索側へ処理を譲る。
+    await clearPendingMediaSearch(supabase, roomId, userId)
+    return null
+  }
 
   if (pending.stage === 'select_period') {
     const period = parseMediaSearchPeriodChoice(normalizedText)
