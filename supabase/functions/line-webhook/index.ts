@@ -298,8 +298,6 @@ const LINE_MEDIA_BUCKET = 'line-media'
 const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
 /** 「メディアURL [件数]」で返す最大件数（トーク文字数・メッセージ数の上限を考慮） */
 const SAVED_MEDIA_URL_COMMAND_MAX = 3
-/** 横断取得時に走査する最大行（新しい順にフィルタするため多めに読む） */
-const SAVED_MEDIA_URL_ALL_ROOMS_FETCH_CAP = 800
 type SavedMediaUrlScope = 'current_room' | 'all_rooms'
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
@@ -599,7 +597,6 @@ Deno.serve(async (req) => {
             roomId,
             savedMediaUrlCmdEarly.count,
             savedMediaUrlCmdEarly.scope,
-            lineUserPermission.excludedMessageSearchRoomIds,
           )
           const replyResultEarly = await replyLineMessage(replyToken, urlReplyEarly, lineAccessToken)
           if (!replyResultEarly.ok) {
@@ -1470,23 +1467,13 @@ async function createSignedMediaDownloadUrlForWebhook(
   }
 }
 
-/** LINE のグループ／複数人トーク ID（友だち 1:1 の U 始まりは横断対象外） */
-function isLineGroupOrMultiRoomChatId(roomId: string): boolean {
-  const r = String(roomId ?? '').trim()
-  return r.startsWith('C') || r.startsWith('R')
-}
-
 async function buildSavedMediaUrlReply(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
   count: number,
   scope: SavedMediaUrlScope,
-  excludedRoomIds: string[],
 ): Promise<string | string[]> {
   const limit = Math.max(1, Math.min(count, SAVED_MEDIA_URL_COMMAND_MAX))
-  const excluded = new Set(
-    (excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0),
-  )
 
   let rows: Record<string, unknown>[] = []
   if (scope === 'current_room') {
@@ -1505,34 +1492,28 @@ async function buildSavedMediaUrlReply(
     }
     rows = Array.isArray(data) ? data as Record<string, unknown>[] : []
   } else {
+    /** 全ルーム: `line_message_media` 全体から新しい順（ルーム種別・会話検索の除外設定は適用しない） */
     const { data, error } = await supabase
       .from('line_message_media')
       .select(
         'room_id, line_message_id, storage_bucket, storage_path, original_file_name, media_type, created_at',
       )
       .order('created_at', { ascending: false })
-      .limit(SAVED_MEDIA_URL_ALL_ROOMS_FETCH_CAP)
+      .limit(limit)
 
     if (error) {
       console.error('Saved media URL list (all rooms) failed:', error.message)
       return '保存メディアの取得に失敗しました。しばらくしてから再度お試しください。'
     }
-    const raw = Array.isArray(data) ? data as Record<string, unknown>[] : []
-    for (const row of raw) {
-      const rid = String(row.room_id ?? '').trim()
-      if (!rid || excluded.has(rid)) continue
-      if (!isLineGroupOrMultiRoomChatId(rid)) continue
-      rows.push(row)
-      if (rows.length >= limit) break
-    }
+    rows = Array.isArray(data) ? data as Record<string, unknown>[] : []
   }
 
   if (rows.length === 0) {
     if (scope === 'all_rooms') {
       return [
-        'グループ／複数人トークに保存されたメディアがまだありません。',
-        '（「全ルーム」は友だち 1:1 を除き、管理画面で検索対象外にしたルームも除きます）',
-        'このトークだけの保存メディアは「メディアURL」と送ってください。',
+        'このBotに保存されたメディアがまだありません。',
+        '画像・ファイルを各トークで送って保存されたあと、「メディアURL 全ルーム」を再度送ってください。',
+        'いま開いているトークの分だけ取得する場合は「メディアURL」です。',
       ].join('\n')
     }
     return [
@@ -1551,7 +1532,7 @@ async function buildSavedMediaUrlReply(
     `※${Math.floor(MEDIA_SIGNED_URL_EXPIRES_SEC / 60)}分以内にタップして保存・閲覧してください。`,
   ]
   if (scope === 'all_rooms') {
-    headerLines.push('※対象: グループ／複数人トーク（友だち 1:1 の保存分は「メディアURL」で取得）')
+    headerLines.push('※対象: 保存済みメディアすべて（トークルーム横断・新しい順）')
   }
   const header = headerLines.join('\n')
 
@@ -2415,7 +2396,7 @@ function isExplicitBotCommandText(rawText: string): boolean {
   return false
 }
 
-/** `メディアURL` / `保存メディアURL` + 任意の件数 + 任意の「全ルーム」（会話検索の除外ルームを尊重） */
+/** `メディアURL` / `保存メディアURL` + 任意の件数 + 任意の「全ルーム」（全ルーム時は DB 上の保存メディア全体・ルーム除外なし） */
 function parseSavedMediaUrlRest(rest: string): { count: number; scope: SavedMediaUrlScope } | null {
   const ALL = '全ルーム'
   if (!rest) return { count: 1, scope: 'current_room' }
