@@ -9,6 +9,9 @@ const PDF_MAX_PAGES = 40
 const DB_PREVIEW_MAX_CHARS = 2000
 const TEXT_BINARY_RATIO_MAX = 0.08
 const PDFJS_MODULE_URL = "https://esm.sh/pdfjs-dist@4.10.38/build/pdf.mjs"
+const OCR_PDF_MIN_TRIGGER_CHARS = 24
+const OCR_PDF_MAX_BYTES_DEFAULT = 2 * 1024 * 1024
+const OCR_CACHE_MAX_ENTRIES = 120
 
 export const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 export const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -59,6 +62,7 @@ type OfficeZipEntry = {
 }
 
 let cachedPdfJs: Promise<PdfJsModule | null> | null = null
+const ocrPreviewCache = new Map<string, string>()
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
@@ -113,6 +117,100 @@ function normalizeExtractedText(value: string): string {
   if (!normalized) return ""
   if (normalized.length <= INTERNAL_MAX_CHARS) return normalized
   return normalized.slice(0, INTERNAL_MAX_CHARS).trimEnd()
+}
+
+function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
+  const n = Number(value ?? "")
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return Math.floor(n)
+}
+
+function fnv1a32Hex(bytes: Uint8Array): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < bytes.length; i += 1) {
+    hash ^= bytes[i]
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0")
+}
+
+function getOcrCacheKey(bytes: Uint8Array, fileName: string): string {
+  const len = bytes.length
+  if (len <= 4096) return `${len}:${fnv1a32Hex(bytes)}:${fileName}`
+  const head = bytes.slice(0, 2048)
+  const tail = bytes.slice(len - 2048)
+  const merged = new Uint8Array(head.length + tail.length)
+  merged.set(head, 0)
+  merged.set(tail, head.length)
+  return `${len}:${fnv1a32Hex(merged)}:${fileName}`
+}
+
+function setOcrCache(cacheKey: string, text: string): void {
+  if (!cacheKey || !text) return
+  if (ocrPreviewCache.has(cacheKey)) ocrPreviewCache.delete(cacheKey)
+  ocrPreviewCache.set(cacheKey, text)
+  if (ocrPreviewCache.size <= OCR_CACHE_MAX_ENTRIES) return
+  const oldestKey = ocrPreviewCache.keys().next().value
+  if (typeof oldestKey === "string") ocrPreviewCache.delete(oldestKey)
+}
+
+async function tryExtractPdfTextViaOcrSpace(bytes: Uint8Array, originalFileName: string): Promise<string> {
+  const apiKey = String(Deno.env.get("LINE_MEDIA_OCR_SPACE_API_KEY") ?? "").trim()
+  if (!apiKey) return ""
+
+  const maxBytes = parsePositiveIntEnv(Deno.env.get("LINE_MEDIA_OCR_PDF_MAX_BYTES") ?? undefined, OCR_PDF_MAX_BYTES_DEFAULT)
+  if (bytes.length <= 0 || bytes.length > maxBytes) return ""
+
+  const cacheKey = getOcrCacheKey(bytes, originalFileName)
+  const cached = ocrPreviewCache.get(cacheKey)
+  if (cached) return cached
+
+  const safeFileName = String(originalFileName || "line-file.pdf").trim() || "line-file.pdf"
+  const body = new FormData()
+  body.append("apikey", apiKey)
+  body.append("language", "jpn")
+  body.append("isOverlayRequired", "false")
+  body.append("OCREngine", "2")
+  body.append("file", new Blob([bytes], { type: "application/pdf" }), safeFileName)
+
+  try {
+    const res = await fetch("https://api.ocr.space/parse/image", { method: "POST", body })
+    if (!res.ok) {
+      console.warn(`line_media_content_preview: OCR.Space HTTP ${res.status}`)
+      return ""
+    }
+    const payload = await res.json().catch(() => null)
+    if (!isRecord(payload)) return ""
+    const parsedResults = Array.isArray(payload.ParsedResults) ? payload.ParsedResults : []
+    const joined = parsedResults
+      .map((entry) => {
+        if (!isRecord(entry)) return ""
+        const text = entry.ParsedText
+        return typeof text === "string" ? text : ""
+      })
+      .join("\n")
+    const normalized = normalizeExtractedText(joined)
+    if (!normalized) return ""
+    setOcrCache(cacheKey, normalized)
+    return normalized
+  } catch (error) {
+    console.error("line_media_content_preview: OCR.Space failed", error)
+    return ""
+  }
+}
+
+async function maybeExtractPdfTextWithOcrFallback(
+  bytes: Uint8Array,
+  originalFileName: string,
+  extractedPdfText: string,
+): Promise<string> {
+  const current = normalizeExtractedText(extractedPdfText)
+  if (current.length >= OCR_PDF_MIN_TRIGGER_CHARS) return current
+  const mode = String(Deno.env.get("LINE_MEDIA_OCR_MODE") ?? "").trim().toLowerCase()
+  if (mode !== "ocr_space") return current
+  const ocrText = await tryExtractPdfTextViaOcrSpace(bytes, originalFileName)
+  if (!ocrText) return current
+  return ocrText
 }
 
 /** Single-line preview safe for DB / LINE (max DB_PREVIEW_MAX_CHARS). */
@@ -730,9 +828,12 @@ async function extractXlsxText(bytes: Uint8Array): Promise<string> {
   return normalizeExtractedText(regexChunks.join("\n"))
 }
 
-async function extractByMime(bytes: Uint8Array, mime: ExtractMime): Promise<string> {
+async function extractByMime(bytes: Uint8Array, mime: ExtractMime, originalFileName: string): Promise<string> {
   if (mime === "text/plain") return normalizeExtractedText(tryDecodeUtf8(bytes))
-  if (mime === "application/pdf") return await extractPdfText(bytes)
+  if (mime === "application/pdf") {
+    const extracted = await extractPdfText(bytes)
+    return await maybeExtractPdfTextWithOcrFallback(bytes, originalFileName, extracted)
+  }
   if (mime === DOCX_MIME) return await extractDocxText(bytes)
   if (mime === XLSX_MIME) return await extractXlsxText(bytes)
   return ""
@@ -759,7 +860,7 @@ export async function extractLineMediaFileContentPreview(
   }
 
   try {
-    const raw = await extractByMime(bytes, mime)
+    const raw = await extractByMime(bytes, mime, originalFileName)
     if (!raw) return null
     const clipped = clipPreviewForStorage(raw)
     return clipped || null
