@@ -1,5 +1,10 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts"
-import { extractLineMediaFileContentPreview, extractLineMediaFileRawText } from '../_shared/line_media_content_preview.ts'
+import {
+  extractLineMediaFileContentPreview,
+  extractLineMediaFileRawText,
+  extractPdfTextForcedOcr,
+  isLineMediaPdf,
+} from '../_shared/line_media_content_preview.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
 import { MARUGO_GROUP_STORE_OPTIONS } from '../_shared/marugo_group_stores.ts'
 
@@ -1792,11 +1797,16 @@ function resolveBestStoreName(rawName: string): string | null {
   return String(rawName || '').trim() || null
 }
 
-function parseDateCellToYmd(value: string): string | null {
+function parseDateCellToYmd(value: string, defaultYear?: number): string | null {
   const raw = String(value || '').trim()
   if (!raw) return null
   const full = raw.match(/(\d{4})[\/\-.年](\d{1,2})[\/\-.月](\d{1,2})/)
   if (full) return normalizeYmd(Number(full[1]), Number(full[2]), Number(full[3]))
+  const md = raw.match(/^\s*(\d{1,2})[\/\-.月](\d{1,2})日?\s*$/)
+  if (md) {
+    const y = Number.isInteger(defaultYear) ? Number(defaultYear) : new Date().getFullYear()
+    return normalizeYmd(y, Number(md[1]), Number(md[2]))
+  }
   const serial = Number(raw)
   if (Number.isFinite(serial) && serial > 30000 && serial < 70000) {
     const ms = Math.round((serial - 25569) * 86400 * 1000)
@@ -1889,10 +1899,64 @@ function extractHaccpScheduleEntriesFromLooseLines(rawText: string, fileName?: s
   return Array.from(dedup.values())
 }
 
-function extractHaccpScheduleEntries(rawText: string, fileName?: string): HaccpScheduleResolvedEntry[] {
+function extractHaccpScheduleEntriesFromInlineRows(rawText: string, fileName?: string): HaccpScheduleResolvedEntry[] {
+  const text = String(rawText || '')
+  if (!text.trim()) return []
+  const defaultYear = inferDefaultYearFromHints(String(fileName || ''), text)
+  const rows: HaccpScheduleResolvedEntry[] = []
+  const rowRe = /株式会社ワルツ\s+(.+?)\s+(\d{1,2})\/(\d{1,2})\s+[月火水木金土日]\s+([0-2]?\d[:：][0-5]\d)/g
+  let m: RegExpExecArray | null
+  while ((m = rowRe.exec(text)) !== null) {
+    const rawStore = String(m[1] ?? '').trim()
+    const storeName = resolveBestStoreName(rawStore)
+    const date = normalizeYmd(defaultYear, Number(m[2]), Number(m[3]))
+    const time = parseTimeFromLooseText(String(m[4] ?? ''))
+    if (!storeName || !date) continue
+    rows.push({ storeName, date, time })
+  }
+  const dedup = new Map<string, HaccpScheduleResolvedEntry>()
+  for (const entry of rows) {
+    dedup.set(`${entry.storeName}::${entry.date}::${entry.time}`, entry)
+  }
+  return Array.from(dedup.values())
+}
+
+function extractHaccpScheduleEntriesFromCompanyBlocks(rawText: string, fileName?: string): HaccpScheduleResolvedEntry[] {
+  const text = String(rawText || '')
+  if (!text.trim()) return []
+  const defaultYear = inferDefaultYearFromHints(String(fileName || ''), text)
+  const parts = text.split(/株式会社ワルツ\s+/g)
+  if (parts.length <= 1) return []
+  const entries: HaccpScheduleResolvedEntry[] = []
+  for (let i = 1; i < parts.length; i += 1) {
+    const block = String(parts[i] || '').trim()
+    if (!block) continue
+    const dateRe = /(\d{1,2})\/(\d{1,2})(?:\s*[月火水木金土日])?/
+    const dateMatch = dateRe.exec(block)
+    if (!dateMatch) continue
+    const date = normalizeYmd(defaultYear, Number(dateMatch[1]), Number(dateMatch[2]))
+    if (!date) continue
+    const dateStart = dateMatch.index ?? -1
+    if (dateStart < 0) continue
+    const rawStore = block.slice(0, dateStart).replace(/\s+/g, ' ').trim()
+    const storeName = resolveBestStoreName(rawStore)
+    if (!storeName) continue
+    const trailing = block.slice(dateStart)
+    const time = parseTimeFromLooseText(trailing)
+    entries.push({ storeName, date, time })
+  }
+  const dedup = new Map<string, HaccpScheduleResolvedEntry>()
+  for (const entry of entries) {
+    dedup.set(`${entry.storeName}::${entry.date}::${entry.time}`, entry)
+  }
+  return Array.from(dedup.values())
+}
+
+function extractHaccpScheduleEntries(rawText: string, fileName?: string, contentType?: string): HaccpScheduleResolvedEntry[] {
   const text = String(rawText || '').replace(/\r/g, '\n')
   if (!text.trim()) return []
   const lines = text.split('\n').map((line) => line.trim()).filter(Boolean)
+  const defaultYear = inferDefaultYearFromHints(String(fileName || ''), text)
 
   let headerStoreIdx = -1
   let headerDateIdx = -1
@@ -1921,19 +1985,31 @@ function extractHaccpScheduleEntries(rawText: string, fileName?: string): HaccpS
     const timeCell = String(cells[headerTimeIdx] ?? '')
     if (!storeCell && !dateCell && !timeCell) continue
     const storeName = resolveBestStoreName(storeCell)
-    const date = parseDateCellToYmd(dateCell)
+    const date = parseDateCellToYmd(dateCell, defaultYear)
     if (!storeName || !date) continue
     const time = parseTimeCellToHm(timeCell)
     entries.push({ storeName, date, time })
   }
 
-  const dedup = new Map<string, HaccpScheduleResolvedEntry>()
+  const tableDedup = new Map<string, HaccpScheduleResolvedEntry>()
   for (const entry of entries) {
-    dedup.set(`${entry.storeName}::${entry.date}::${entry.time}`, entry)
+    tableDedup.set(`${entry.storeName}::${entry.date}::${entry.time}`, entry)
   }
-  const tableEntries = Array.from(dedup.values())
-  if (tableEntries.length > 0) return tableEntries
-  return extractHaccpScheduleEntriesFromLooseLines(text, fileName)
+  const tableEntries = Array.from(tableDedup.values())
+  const inlineRows = extractHaccpScheduleEntriesFromInlineRows(text, fileName)
+  const companyBlocks = extractHaccpScheduleEntriesFromCompanyBlocks(text, fileName)
+  const looseRows = extractHaccpScheduleEntriesFromLooseLines(text, fileName)
+
+  if (String(contentType || '').toLowerCase().includes('pdf')) {
+    if (companyBlocks.length > 0) return companyBlocks
+    if (inlineRows.length > 0) return inlineRows
+    if (looseRows.length > 0) return looseRows
+    return tableEntries
+  }
+
+  const candidates = [tableEntries, inlineRows, companyBlocks, looseRows]
+  candidates.sort((a, b) => b.length - a.length)
+  return candidates[0] ?? []
 }
 
 async function tryRegisterHaccpScheduleFromMediaFile(
@@ -1953,11 +2029,30 @@ async function tryRegisterHaccpScheduleFromMediaFile(
   const quickPreview = await extractLineMediaFileContentPreview(file.bytes, file.contentType, file.fileName) ?? ''
   if (!looksLikeHaccpScheduleFile(file.fileName, quickPreview)) return null
 
-  const rawText = await extractLineMediaFileRawText(file.bytes, file.contentType, file.fileName)
+  let rawText = await extractLineMediaFileRawText(file.bytes, file.contentType, file.fileName)
   if (!rawText) {
     return 'HACCP資料を検出しましたが、本文抽出に失敗したため予定登録は行いませんでした。'
   }
-  const scheduleEntries = extractHaccpScheduleEntries(rawText, file.fileName).slice(0, 60)
+
+  const isPdf = isLineMediaPdf(file.bytes, file.contentType, file.fileName)
+  if (isPdf) {
+    const waltsHits = (rawText.match(/株式会社ワルツ/g) || []).length
+    if (waltsHits < 10) {
+      const ocrText = await extractPdfTextForcedOcr(file.bytes, file.fileName)
+      if (ocrText) {
+        const ocrWalts = (ocrText.match(/株式会社ワルツ/g) || []).length
+        if (ocrWalts > waltsHits || ocrText.length > rawText.length * 1.2) {
+          rawText = ocrText
+        }
+      }
+    }
+  }
+
+  const scheduleEntries = extractHaccpScheduleEntries(
+    rawText,
+    file.fileName,
+    isPdf ? 'application/pdf' : file.contentType,
+  ).slice(0, 60)
   if (scheduleEntries.length === 0) {
     return 'HACCP資料を検出しましたが、店舗名と実施日の組み合わせを抽出できませんでした。'
   }

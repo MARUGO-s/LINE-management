@@ -334,6 +334,42 @@ async function maybeExtractPdfTextWithOcrFallback(
   return current
 }
 
+/**
+ * Run configured OCR for PDF regardless of native text length.
+ * Used when native pdf.js output is structurally incomplete (e.g. HACCP tables) but still > OCR trigger threshold.
+ */
+export async function extractPdfTextForcedOcr(bytes: Uint8Array, originalFileName: string): Promise<string> {
+  const mode = String(Deno.env.get("LINE_MEDIA_OCR_MODE") ?? "").trim().toLowerCase()
+  if (!mode) return ""
+
+  if (mode === "ocr_space") {
+    return normalizeExtractedText(await tryExtractPdfTextViaOcrSpace(bytes, originalFileName))
+  }
+  if (mode === "azure_docintel") {
+    return normalizeExtractedText(await tryExtractPdfTextViaAzureDocIntel(bytes, originalFileName))
+  }
+  if (mode === "hybrid_size") {
+    const ocrSpaceMaxBytes = parsePositiveIntEnv(
+      Deno.env.get("LINE_MEDIA_OCR_SPACE_MAX_BYTES") ?? undefined,
+      OCR_SPACE_MAX_BYTES_DEFAULT,
+    )
+    if (bytes.length <= ocrSpaceMaxBytes) {
+      const smallText = await tryExtractPdfTextViaOcrSpace(bytes, originalFileName)
+      if (smallText) return normalizeExtractedText(smallText)
+      return normalizeExtractedText(await tryExtractPdfTextViaAzureDocIntel(bytes, originalFileName))
+    }
+    const largeText = await tryExtractPdfTextViaAzureDocIntel(bytes, originalFileName)
+    if (largeText) return normalizeExtractedText(largeText)
+    return normalizeExtractedText(await tryExtractPdfTextViaOcrSpace(bytes, originalFileName))
+  }
+  return ""
+}
+
+/** True when bytes are a PDF (`%PDF-`). LINE may omit `.pdf` or send `application/octet-stream`. */
+export function isLineMediaPdf(bytes: Uint8Array, _contentType: string, _fileName: string): boolean {
+  return hasPdfMagicHeader(bytes)
+}
+
 /** Single-line preview safe for DB / LINE (max DB_PREVIEW_MAX_CHARS). */
 export function clipPreviewForStorage(text: string): string {
   const singleLine = String(text ?? "")
