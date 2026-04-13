@@ -407,6 +407,17 @@ Deno.serve(async (req) => {
     if (req.method === "PUT" && path === "/settings/rooms") {
       const body = await parseJson(req)
       const payload = buildRoomSettingsPayload(body)
+      console.log(
+        "[admin-api] room settings upsert request:",
+        JSON.stringify({
+          room_id: payload.room_id,
+          is_enabled: payload.is_enabled,
+          bot_reply_enabled: payload.bot_reply_enabled,
+          message_search_enabled: payload.message_search_enabled,
+          message_search_library_enabled: payload.message_search_library_enabled,
+          media_file_access_enabled: payload.media_file_access_enabled,
+        }),
+      )
       const { data, error } = await supabase
         .from("room_summary_settings")
         .upsert({
@@ -434,6 +445,18 @@ Deno.serve(async (req) => {
       if (error) {
         throw { status: 500, message: `Failed to update room settings: ${error.message}` } satisfies AppError
       }
+      console.log(
+        "[admin-api] room settings upsert result:",
+        JSON.stringify({
+          room_id: data.room_id,
+          is_enabled: data.is_enabled,
+          bot_reply_enabled: data.bot_reply_enabled,
+          message_search_enabled: data.message_search_enabled,
+          message_search_library_enabled: data.message_search_library_enabled,
+          media_file_access_enabled: data.media_file_access_enabled,
+          updated_at: data.updated_at,
+        }),
+      )
       return json({ room_settings: data }, 200)
     }
 

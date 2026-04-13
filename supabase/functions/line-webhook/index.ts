@@ -251,6 +251,7 @@ type RoomReplyPolicy = {
   mediaFileAccessEnabled: boolean
   calendarAiAutoCreateEnabled: boolean
   calendarSilentAutoRegisterEnabled: boolean
+  settingsSource: 'row' | 'fallback'
 }
 
 type LineUserPermissionPolicy = {
@@ -641,6 +642,19 @@ Deno.serve(async (req) => {
           ? null
           : (roomCanReply ? buildRoomCapabilityStatusReply(roomReplyPolicy, roomId, text) : null)
         if (capabilityStatusReply) {
+          console.log(
+            '[line-webhook] room capability denied:',
+            JSON.stringify({
+              room_id: roomId,
+              room_is_enabled: roomReplyPolicy.isEnabled,
+              bot_reply_enabled: roomReplyPolicy.botReplyEnabled,
+              message_search_enabled: roomReplyPolicy.messageSearchEnabled,
+              message_search_library_enabled: roomReplyPolicy.messageSearchLibraryEnabled,
+              settings_source: roomReplyPolicy.settingsSource,
+              user_id: userId,
+              text_preview: text.slice(0, 80),
+            }),
+          )
           if (!lineAccessToken) {
             console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room capability status.')
             continue
@@ -3835,6 +3849,7 @@ async function loadRoomReplyPolicy(
     mediaFileAccessEnabled: false,
     calendarAiAutoCreateEnabled: false,
     calendarSilentAutoRegisterEnabled: false,
+    settingsSource: 'fallback',
   } satisfies RoomReplyPolicy
   const normalizedRoomId = String(roomId ?? '').trim()
   if (!normalizedRoomId || normalizedRoomId === 'unknown') {
@@ -3887,6 +3902,7 @@ async function loadRoomReplyPolicy(
       mediaFileAccessEnabled,
       calendarAiAutoCreateEnabled,
       calendarSilentAutoRegisterEnabled,
+      settingsSource: 'row',
     }
     cache.set(normalizedRoomId, policy)
     return policy
@@ -3987,11 +4003,13 @@ function buildRoomCapabilityStatusReply(
   if (!policy.isEnabled) return null
   if (!looksLikeBotInteractionRequest(text)) return null
 
-  if (!policy.messageSearchEnabled && looksLikeMessageSearchQuestion(text)) {
+  // 会話検索がOFFでも資料検索がONなら、後段の判定で資料検索フォールバックを案内できるよう先行拒否しない
+  if (!policy.messageSearchEnabled && !policy.messageSearchLibraryEnabled && looksLikeMessageSearchQuestion(text)) {
     return [
       'この質問は、現在このルームで権限が付与されていないため実行できません。',
-      `判定: AI会話返信=${policy.botReplyEnabled ? 'ON' : 'OFF'} / 会話検索=${policy.messageSearchEnabled ? 'ON' : 'OFF'}`,
+      `判定: AI会話返信=${policy.botReplyEnabled ? 'ON' : 'OFF'} / 会話検索=${policy.messageSearchEnabled ? 'ON' : 'OFF'} / 資料検索=${policy.messageSearchLibraryEnabled ? 'ON' : 'OFF'}`,
       `room_id: ${String(roomId || '').trim() || '(unknown)'}`,
+      `設定読込: ${policy.settingsSource === 'row' ? 'room_summary_settings:FOUND' : 'room_summary_settings:MISSING'}`,
     ].join('\n')
   } else {
     return null
@@ -5151,7 +5169,7 @@ async function buildLibrarySearchPromptWhenMessageSearchDisabled(
     adjustedByRetention,
   )
   const lines: string[] = [
-    'このユーザーは会話検索の権限がないため、会話履歴は検索できません。',
+    '現在の設定では会話検索が無効のため、会話履歴は検索できません。',
     `キーワード: ${command.keyword}`,
     `対象期間: ${periodText}`,
   ]
