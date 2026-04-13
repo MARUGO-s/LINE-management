@@ -3864,8 +3864,7 @@ async function loadRoomReplyPolicy(
 
     const isEnabled = data?.is_enabled !== false
     const botReplyEnabled = data?.bot_reply_enabled !== false
-    // 現在の管理UIでは「AI会話返信」が主スイッチのため、ON時は会話検索も有効扱いにそろえる。
-    const messageSearchEnabled = botReplyEnabled || data?.message_search_enabled !== false
+    const messageSearchEnabled = data?.message_search_enabled !== false
     const messageSearchLibraryEnabled = data?.message_search_library_enabled !== false
     const mediaFileAccessEnabled = data?.media_file_access_enabled !== false
     const calendarAiAutoCreateEnabled = data?.calendar_ai_auto_create_enabled !== false
@@ -3946,15 +3945,15 @@ async function loadLineUserPermissionPolicy(
 }
 
 function isRoomInteractiveReplyEnabled(policy: RoomReplyPolicy): boolean {
-  return policy.isEnabled && policy.botReplyEnabled && policy.messageSearchEnabled
+  return policy.isEnabled && policy.messageSearchEnabled
 }
 
 function isRoomBotReplyEnabled(policy: RoomReplyPolicy): boolean {
-  return policy.isEnabled
+  return policy.isEnabled && policy.botReplyEnabled
 }
 
 function shouldSendRoomReply(policy: RoomReplyPolicy): boolean {
-  return policy.isEnabled && policy.botReplyEnabled && !policy.calendarSilentAutoRegisterEnabled
+  return policy.isEnabled && !policy.calendarSilentAutoRegisterEnabled
 }
 
 function normalizeExcludedMessageSearchRoomIds(value: unknown): string[] {
@@ -3987,12 +3986,7 @@ function buildRoomCapabilityStatusReply(
   if (!policy.isEnabled) return null
   if (!looksLikeBotInteractionRequest(text)) return null
 
-  if (!policy.botReplyEnabled) {
-    return [
-      'この質問は、現在このルームで権限が付与されていないため実行できません。',
-      `判定: AI会話返信=${policy.botReplyEnabled ? 'ON' : 'OFF'} / 会話検索=${policy.messageSearchEnabled ? 'ON' : 'OFF'}`,
-    ].join('\n')
-  } else if (!policy.messageSearchEnabled && looksLikeMessageSearchQuestion(text)) {
+  if (!policy.messageSearchEnabled && looksLikeMessageSearchQuestion(text)) {
     return [
       'この質問は、現在このルームで権限が付与されていないため実行できません。',
       `判定: AI会話返信=${policy.botReplyEnabled ? 'ON' : 'OFF'} / 会話検索=${policy.messageSearchEnabled ? 'ON' : 'OFF'}`,

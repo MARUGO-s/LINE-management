@@ -1163,8 +1163,8 @@ const html = String.raw`<!doctype html>
       <div id="roomConfigModalMeta" class="modal-meta">対象ルーム: -</div>
       <div class="room-scope-modal-list" style="margin-top:12px;">
         <label class="room-scope-option"><input id="roomConfigBotReplyEnabled" type="checkbox">AI会話返信</label>
-        <label class="room-scope-option"><input id="roomConfigMessageSearchEnabled" type="checkbox">会話検索（ルーム / AI会話返信ON時）</label>
-        <label class="room-scope-option"><input id="roomConfigMessageSearchLibraryEnabled" type="checkbox">資料検索（2段階目 / AI会話返信ON時）</label>
+        <label class="room-scope-option"><input id="roomConfigMessageSearchEnabled" type="checkbox">会話検索（ルーム）</label>
+        <label class="room-scope-option"><input id="roomConfigMessageSearchLibraryEnabled" type="checkbox">資料検索（2段階目）</label>
         <label class="room-scope-option"><input id="roomConfigSendSummary" type="checkbox">ルーム要約配信</label>
         <label class="room-scope-option"><input id="roomConfigTomorrowReminder" type="checkbox">明日予定配信</label>
         <label class="room-scope-option"><input id="roomConfigMediaAccess" type="checkbox">LINE添付保存（ルーム）</label>
@@ -1186,8 +1186,8 @@ const html = String.raw`<!doctype html>
       <div class="modal-meta">ここで選んだ値が次の追加に使われます。</div>
       <div class="room-scope-modal-list" style="margin-top:12px;">
         <label class="room-scope-option"><input id="newRoomBotReplyEnabled" type="checkbox">AI会話返信</label>
-        <label class="room-scope-option"><input id="newRoomMessageSearchEnabled" type="checkbox">会話検索（ルーム / AI会話返信ON時）</label>
-        <label class="room-scope-option"><input id="newRoomMessageSearchLibraryEnabled" type="checkbox">資料検索（2段階目 / AI会話返信ON時）</label>
+        <label class="room-scope-option"><input id="newRoomMessageSearchEnabled" type="checkbox">会話検索（ルーム）</label>
+        <label class="room-scope-option"><input id="newRoomMessageSearchLibraryEnabled" type="checkbox">資料検索（2段階目）</label>
         <label class="room-scope-option"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信</label>
         <label class="room-scope-option"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
         <label class="room-scope-option"><input id="newRoomMediaFileAccessEnabled" type="checkbox">LINE添付保存（ルーム）</label>
