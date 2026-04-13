@@ -3517,7 +3517,7 @@ function buildCalendarPermissionDeniedReply(): string {
 function buildLineImageAnalysisReply(preview: string): string {
   const body = String(preview ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
   const capped = body.length > 400 ? `${body.slice(0, 400)}…` : body
-  return ['画像を受け取りました。解析結果は次のとおりです。', capped].join('\n')
+  return ['画像を保存しました。解析結果は次のとおりです。', capped].join('\n')
 }
 
 function buildDirectUserFallbackReply(message: any, options: { canCalendarUpdate: boolean }): string {
