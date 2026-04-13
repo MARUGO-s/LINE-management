@@ -120,6 +120,18 @@ type PendingLibrarySearchConfirmation = {
   expires_at: string
 }
 
+type PendingHaccpBulkConfirmation = {
+  id: string
+  conversation_key: string
+  room_id: string
+  user_id: string | null
+  line_message_id: string
+  sender_display_name: string | null
+  original_file_name: string | null
+  items: HaccpScheduleResolvedEntry[]
+  expires_at: string
+}
+
 type PendingMessageSearchExpand = {
   id: string
   conversation_key: string
@@ -331,6 +343,7 @@ const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmatio
 const MESSAGE_SEARCH_EXPAND_PENDING_TABLE = 'message_search_expand_pending_confirmations'
 const MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE = 'message_search_followup_pending_confirmations'
 const MEDIA_SEARCH_PENDING_TABLE = 'media_search_pending_confirmations'
+const HACCP_BULK_PENDING_TABLE = 'haccp_bulk_pending_confirmations'
 const HACCP_SCHEDULE_REGISTRATION_TABLE = 'haccp_schedule_calendar_registrations'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
 const LEGACY_PENDING_DONE_PREFIX = '[[CAL_PENDING_DONE]]'
@@ -724,6 +737,33 @@ Deno.serve(async (req) => {
           let forceAiCalendarCreate = false
 
           if (calendarEnvState.ok) {
+            const haccpBulkReply = await tryHandlePendingHaccpBulkConfirmation(
+              text,
+              supabase,
+              calendarEnvState.env,
+              roomId,
+              userId,
+              calendarSourceMeta,
+            )
+            if (haccpBulkReply) {
+              if (!roomCanReply) {
+                continue
+              }
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply HACCP bulk confirmation.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for HACCP bulk confirmation.')
+                continue
+              }
+              const replyResult = await replyLineMessage(replyToken, haccpBulkReply, lineAccessToken)
+              if (!replyResult.ok) {
+                console.error('Failed to reply HACCP bulk confirmation:', replyResult.error)
+              }
+              continue
+            }
+
             const confirmationReply = await tryHandlePendingCalendarConfirmation(
               text,
               supabase,
@@ -1317,6 +1357,7 @@ Deno.serve(async (req) => {
             const mediaSaveReply = await trySaveLineMediaContent(
               supabase,
               lineAccessToken,
+              groqApiKey,
               event.message,
               savedMessageId,
               roomId,
@@ -1427,6 +1468,7 @@ function buildLineMediaTag(lineMessageId: unknown): string {
 async function trySaveLineMediaContent(
   supabase: ReturnType<typeof createClient>,
   lineAccessToken: string,
+  groqApiKey: string,
   message: any,
   lineMessageRowId: string,
   roomId: string,
@@ -1525,6 +1567,21 @@ async function trySaveLineMediaContent(
     } catch (previewErr) {
       console.error(`line_media_content_preview failed (lineMessageId=${lineMessageId}):`, previewErr)
     }
+  } else if (
+    mediaType === 'image' &&
+    groqApiKey &&
+    isVisionAnalyzableImageMime(contentFetch.contentType)
+  ) {
+    try {
+      contentPreview = await analyzeLineImageWithGroqScout(
+        contentFetch.bytes,
+        contentFetch.contentType,
+        originalFileName,
+        groqApiKey,
+      )
+    } catch (visionErr) {
+      console.error(`line_image_vision failed (lineMessageId=${lineMessageId}):`, visionErr)
+    }
   }
 
   const { error: insertError } = await supabase.from('line_message_media').insert({
@@ -1544,7 +1601,7 @@ async function trySaveLineMediaContent(
 
   if (insertError) {
     const code = String((insertError as any)?.code ?? '')
-    if (code === '23505') return
+    if (code === '23505') return null
     console.error(`Failed to insert media metadata (lineMessageId=${lineMessageId}):`, insertError)
     return null
   }
@@ -2049,68 +2106,29 @@ async function tryRegisterHaccpScheduleFromMediaFile(
   if (scheduleEntries.length === 0) {
     return 'HACCP資料を検出しましたが、店舗名と実施日の組み合わせを抽出できませんでした。'
   }
-
-  const { data: existingRows, error: existingError } = await supabase
-    .from(HACCP_SCHEDULE_REGISTRATION_TABLE)
-    .select('store_name, event_date')
-    .eq('line_message_id', file.lineMessageId)
-  if (existingError) {
-    console.error('Failed to inspect HACCP schedule registrations:', existingError.message)
-    return 'HACCP予定の重複確認に失敗したため、登録を中断しました。'
+  if (scheduleEntries.length >= 2) {
+    const saved = await savePendingHaccpBulkConfirmation(supabase, file.roomId, file.userId, {
+      lineMessageId: file.lineMessageId,
+      senderDisplayName: file.senderDisplayName,
+      originalFileName: file.fileName,
+      items: scheduleEntries,
+    })
+    if (!saved) return 'HACCP予定候補を検出しましたが、確認待ちの保存に失敗しました。もう一度ファイルを送信してください。'
+    return buildHaccpBulkConfirmationPrompt(scheduleEntries)
   }
-  const existing = new Set(
-    (Array.isArray(existingRows) ? existingRows : []).map((row: any) => `${String(row.store_name || '')}::${String(row.event_date || '')}`),
+  return await registerHaccpScheduleEntries(
+    supabase,
+    scheduleEntries,
+    {
+      lineMessageId: file.lineMessageId,
+      roomId: file.roomId,
+      userId: file.userId,
+      senderDisplayName: file.senderDisplayName,
+      fileName: file.fileName,
+    },
+    calendarEnv,
+    sourceMeta,
   )
-
-  let createdCount = 0
-  let failedCount = 0
-  const createdDetails: string[] = []
-  for (const entry of scheduleEntries) {
-    const dedupeKey = `${entry.storeName}::${entry.date}`
-    if (existing.has(dedupeKey)) continue
-    const command: CalendarCreateCommand = {
-      kind: 'create',
-      date: entry.date,
-      time: entry.time,
-      durationMin: 60,
-      title: `${entry.storeName} HACCP衛生点検`,
-      location: entry.storeName,
-    }
-    const result = await createCalendarEvent(command, calendarEnv, file.roomId, file.userId, undefined, sourceMeta)
-    if (!result.ok) {
-      console.error(`Failed to create HACCP schedule event (${entry.storeName} ${entry.date}):`, result.error)
-      failedCount += 1
-      continue
-    }
-    const { error: saveError } = await supabase
-      .from(HACCP_SCHEDULE_REGISTRATION_TABLE)
-      .upsert({
-        line_message_id: file.lineMessageId,
-        room_id: file.roomId,
-        user_id: file.userId,
-        sender_display_name: file.senderDisplayName,
-        original_file_name: file.fileName,
-        store_name: entry.storeName,
-        event_date: entry.date,
-        calendar_event_id: result.eventId ?? null,
-        created_at: new Date().toISOString(),
-      }, { onConflict: 'line_message_id,store_name,event_date' })
-    if (saveError) {
-      console.error('Failed to save HACCP registration log:', saveError.message)
-      failedCount += 1
-      continue
-    }
-    createdCount += 1
-    createdDetails.push(`- ${entry.storeName} / ${entry.date} ${entry.time}`)
-  }
-  if (createdCount > 0) {
-    const detailBody = createdDetails.slice(0, 20).join('\n')
-    const header = failedCount > 0
-      ? `HACCP衛生点検の予定を ${createdCount} 件登録しました（${failedCount} 件は登録失敗）。`
-      : `HACCP衛生点検の予定を ${createdCount} 件カレンダー登録しました。`
-    return [header, '登録明細（店舗 / 日付 時間）', detailBody].join('\n')
-  }
-  return 'HACCP予定はすべて既登録のため、新規登録はありませんでした。'
 }
 
 const MEDIA_CATEGORY_DEFINITIONS: Array<{ key: MediaSearchCategoryKey; label: string; keywords: string[] }> = [
@@ -2357,6 +2375,228 @@ async function clearPendingMediaSearch(
   if (error) {
     console.error('Failed to clear media search pending state:', error.message)
   }
+}
+
+function resolveHaccpBulkConversationKey(roomId: string, userId: string | null): string {
+  return `${roomId || '__unknown_room__'}::${userId || '__anonymous__'}`
+}
+
+async function savePendingHaccpBulkConfirmation(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  payload: {
+    lineMessageId: string
+    senderDisplayName: string | null
+    originalFileName: string | null
+    items: HaccpScheduleResolvedEntry[]
+  },
+): Promise<boolean> {
+  const conversationKey = resolveHaccpBulkConversationKey(roomId, userId)
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + PENDING_CONFIRMATION_TTL_MIN * 60 * 1000).toISOString()
+  const { error } = await supabase
+    .from(HACCP_BULK_PENDING_TABLE)
+    .upsert({
+      conversation_key: conversationKey,
+      room_id: roomId,
+      user_id: userId,
+      line_message_id: payload.lineMessageId,
+      sender_display_name: payload.senderDisplayName,
+      original_file_name: payload.originalFileName,
+      items_json: payload.items,
+      expires_at: expiresAt,
+      updated_at: nowIso,
+    }, { onConflict: 'conversation_key' })
+  if (error) {
+    console.error('Failed to save HACCP bulk pending confirmation:', error.message)
+    return false
+  }
+  return true
+}
+
+async function loadPendingHaccpBulkConfirmation(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingHaccpBulkConfirmation | null> {
+  const conversationKey = resolveHaccpBulkConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(HACCP_BULK_PENDING_TABLE)
+    .select('id, conversation_key, room_id, user_id, line_message_id, sender_display_name, original_file_name, items_json, expires_at')
+    .eq('conversation_key', conversationKey)
+    .maybeSingle()
+  if (error) {
+    console.error('Failed to load HACCP bulk pending confirmation:', error.message)
+    return null
+  }
+  if (!data) return null
+  const expiresAt = String((data as any).expires_at ?? '')
+  if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+    await clearPendingHaccpBulkConfirmation(supabase, roomId, userId)
+    return null
+  }
+  const rawItems = Array.isArray((data as any).items_json) ? (data as any).items_json : []
+  const items: HaccpScheduleResolvedEntry[] = rawItems
+    .map((row: any) => ({
+      storeName: String(row?.storeName ?? row?.store_name ?? '').trim(),
+      date: String(row?.date ?? '').trim(),
+      time: String(row?.time ?? '').trim(),
+    }))
+    .filter((row: HaccpScheduleResolvedEntry) => row.storeName && row.date && row.time)
+  if (items.length === 0) {
+    await clearPendingHaccpBulkConfirmation(supabase, roomId, userId)
+    return null
+  }
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    room_id: String((data as any).room_id ?? ''),
+    user_id: (data as any).user_id ? String((data as any).user_id) : null,
+    line_message_id: String((data as any).line_message_id ?? ''),
+    sender_display_name: (data as any).sender_display_name ? String((data as any).sender_display_name) : null,
+    original_file_name: (data as any).original_file_name ? String((data as any).original_file_name) : null,
+    items,
+    expires_at: expiresAt,
+  }
+}
+
+async function clearPendingHaccpBulkConfirmation(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<void> {
+  const conversationKey = resolveHaccpBulkConversationKey(roomId, userId)
+  const { error } = await supabase.from(HACCP_BULK_PENDING_TABLE).delete().eq('conversation_key', conversationKey)
+  if (error) {
+    console.error('Failed to clear HACCP bulk pending confirmation:', error.message)
+  }
+}
+
+function buildHaccpBulkConfirmationPrompt(items: HaccpScheduleResolvedEntry[]): string {
+  const lines = [
+    `HACCP衛生点検の予定を ${items.length} 件検出しました。`,
+    'このままカレンダーに一括登録してよろしいですか？',
+    '「はい」で登録 / 「いいえ」でキャンセル',
+    '',
+    '候補（店舗 / 日付 時間）',
+  ]
+  for (const row of items.slice(0, 10)) {
+    lines.push(`- ${row.storeName} / ${row.date} ${row.time}`)
+  }
+  if (items.length > 10) lines.push(`…ほか ${items.length - 10} 件`)
+  return lines.join('\n')
+}
+
+async function registerHaccpScheduleEntries(
+  supabase: ReturnType<typeof createClient>,
+  entries: HaccpScheduleResolvedEntry[],
+  fileMeta: {
+    lineMessageId: string
+    roomId: string
+    userId: string | null
+    senderDisplayName: string | null
+    fileName: string
+  },
+  calendarEnv: CalendarEnv,
+  sourceMeta: CalendarSourceMeta,
+): Promise<string> {
+  const { data: existingRows, error: existingError } = await supabase
+    .from(HACCP_SCHEDULE_REGISTRATION_TABLE)
+    .select('store_name, event_date')
+    .eq('line_message_id', fileMeta.lineMessageId)
+  if (existingError) {
+    console.error('Failed to inspect HACCP schedule registrations:', existingError.message)
+    return 'HACCP予定の重複確認に失敗したため、登録を中断しました。'
+  }
+  const existing = new Set(
+    (Array.isArray(existingRows) ? existingRows : []).map((row: any) => `${String(row.store_name || '')}::${String(row.event_date || '')}`),
+  )
+
+  let createdCount = 0
+  let failedCount = 0
+  const createdDetails: string[] = []
+  for (const entry of entries) {
+    const dedupeKey = `${entry.storeName}::${entry.date}`
+    if (existing.has(dedupeKey)) continue
+    const command: CalendarCreateCommand = {
+      kind: 'create',
+      date: entry.date,
+      time: entry.time,
+      durationMin: 60,
+      title: `${entry.storeName} HACCP衛生点検`,
+      location: entry.storeName,
+    }
+    const result = await createCalendarEvent(command, calendarEnv, fileMeta.roomId, fileMeta.userId, undefined, sourceMeta)
+    if (!result.ok) {
+      console.error(`Failed to create HACCP schedule event (${entry.storeName} ${entry.date}):`, result.error)
+      failedCount += 1
+      continue
+    }
+    const { error: saveError } = await supabase
+      .from(HACCP_SCHEDULE_REGISTRATION_TABLE)
+      .upsert({
+        line_message_id: fileMeta.lineMessageId,
+        room_id: fileMeta.roomId,
+        user_id: fileMeta.userId,
+        sender_display_name: fileMeta.senderDisplayName,
+        original_file_name: fileMeta.fileName,
+        store_name: entry.storeName,
+        event_date: entry.date,
+        calendar_event_id: result.eventId ?? null,
+        created_at: new Date().toISOString(),
+      }, { onConflict: 'line_message_id,store_name,event_date' })
+    if (saveError) {
+      console.error('Failed to save HACCP registration log:', saveError.message)
+      failedCount += 1
+      continue
+    }
+    createdCount += 1
+    createdDetails.push(`- ${entry.storeName} / ${entry.date} ${entry.time}`)
+  }
+  if (createdCount > 0) {
+    const detailBody = createdDetails.slice(0, 20).join('\n')
+    const header = failedCount > 0
+      ? `HACCP衛生点検の予定を ${createdCount} 件登録しました（${failedCount} 件は登録失敗）。`
+      : `HACCP衛生点検の予定を ${createdCount} 件カレンダー登録しました。`
+    return [header, '登録明細（店舗 / 日付 時間）', detailBody].join('\n')
+  }
+  return 'HACCP予定はすべて既登録のため、新規登録はありませんでした。'
+}
+
+async function tryHandlePendingHaccpBulkConfirmation(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  calendarEnv: CalendarEnv,
+  roomId: string,
+  userId: string | null,
+  sourceMeta: CalendarSourceMeta,
+): Promise<string | null> {
+  const pending = await loadPendingHaccpBulkConfirmation(supabase, roomId, userId)
+  if (!pending) return null
+  const decision = normalizeConfirmationDecision(text)
+  if (decision === 'no') {
+    await clearPendingHaccpBulkConfirmation(supabase, roomId, userId)
+    return 'HACCP予定の一括登録をキャンセルしました。'
+  }
+  if (decision !== 'yes') {
+    return buildHaccpBulkConfirmationPrompt(pending.items)
+  }
+  const reply = await registerHaccpScheduleEntries(
+    supabase,
+    pending.items,
+    {
+      lineMessageId: pending.line_message_id,
+      roomId: pending.room_id,
+      userId: pending.user_id,
+      senderDisplayName: pending.sender_display_name,
+      fileName: pending.original_file_name || '',
+    },
+    calendarEnv,
+    sourceMeta,
+  )
+  await clearPendingHaccpBulkConfirmation(supabase, roomId, userId)
+  return reply
 }
 
 async function loadLineUserDisplayNameMap(
@@ -2860,6 +3100,74 @@ function resolveOriginalFileName(
         ? 'audio'
         : 'file'
   return `${base}-${lineMessageId}.${extension}`
+}
+
+const GROQ_VISION_BASE64_MAX_BYTES = 3 * 1024 * 1024
+const VISION_IMAGE_MIME_TYPES = new Set<string>(['image/jpeg', 'image/jpg', 'image/png'])
+
+function isVisionAnalyzableImageMime(contentType: string | null): boolean {
+  const mime = String(contentType ?? '').trim().toLowerCase()
+  return VISION_IMAGE_MIME_TYPES.has(mime)
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 0x8000
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize)
+    binary += String.fromCharCode(...chunk)
+  }
+  return btoa(binary)
+}
+
+async function analyzeLineImageWithGroqScout(
+  bytes: Uint8Array,
+  contentType: string | null,
+  fileName: string,
+  groqApiKey: string,
+): Promise<string | null> {
+  if (!groqApiKey) return null
+  if (bytes.byteLength <= 0 || bytes.byteLength > GROQ_VISION_BASE64_MAX_BYTES) return null
+  const mime = String(contentType ?? '').trim().toLowerCase()
+  if (!isVisionAnalyzableImageMime(mime)) return null
+
+  const imageDataUrl = `data:${mime};base64,${toBase64(bytes)}`
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${groqApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+      temperature: 0.1,
+      max_tokens: 120,
+      messages: [
+        {
+          role: 'system',
+          content: 'あなたは画像内容の説明器です。画像に映っている主な被写体を日本語で1文だけ、60文字以内で説明してください。推測が難しい場合は「画像の内容を特定できませんでした」と返してください。',
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: `この画像には何が映っていますか？ファイル名: ${fileName || '(unknown)'}` },
+            { type: 'image_url', image_url: { url: imageDataUrl } },
+          ],
+        },
+      ],
+    }),
+  })
+
+  if (!response.ok) {
+    const err = await response.text()
+    console.error('Groq image vision failed:', response.status, err)
+    return null
+  }
+
+  const json = await response.json()
+  const content = String(json?.choices?.[0]?.message?.content ?? '').trim()
+  if (!content) return null
+  return content.slice(0, 240)
 }
 
 function buildMediaStoragePath(

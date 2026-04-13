@@ -1367,11 +1367,20 @@
         '<div class="item-line sub" title="ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '">ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '</div>',
         '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item.created_at)) + '</div>',
         '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
-        (type === 'file'
+        ((type === 'file' || type === 'image')
           ? (function() {
               const cp = item.content_preview != null && String(item.content_preview).trim()
                 ? String(item.content_preview).trim()
                 : '';
+              if (type === 'image') {
+                if (!cp) return '';
+                return [
+                  '<div class="extract-block">',
+                  '<div class="extract-label">画像解析結果（Llama 4 Scout）</div>',
+                  '<div class="extract-text">', escapeHtml(cp), '</div>',
+                  '</div>',
+                ].join('');
+              }
               if (cp) {
                 const analysis = inferFilePurpose(name, mime, cp);
                 return [
