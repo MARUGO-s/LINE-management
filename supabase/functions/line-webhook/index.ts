@@ -222,6 +222,9 @@ type MessageSearchMediaHit = {
   storage_path: string
 }
 
+/** 会話テキスト優先か、保存メディア（画像・ファイル等）優先か */
+type MessageSearchPrimaryTarget = 'conversation' | 'media' | 'both'
+
 type AiMessageSearchIntent = {
   shouldSearch: boolean
   keyword: string
@@ -1071,6 +1074,7 @@ Deno.serve(async (req) => {
               lineUserPermission.excludedMessageSearchRoomIds,
               groqApiKey,
               canUseMedia,
+              text,
             )
 
             if (!lineAccessToken) {
@@ -3989,6 +3993,29 @@ function buildRoomRegistrationRequiredReply(roomName: string | null): string {
   return lines.join('\n')
 }
 
+/**
+ * トーク/会話/履歴を「調べる」系 → 会話テキスト優先。
+ * 画像・PDF・添付などの語が中心 → 保存メディア優先。
+ */
+function classifyMessageSearchPrimaryTarget(rawText: string): MessageSearchPrimaryTarget {
+  const compact = normalizeForRuleParsing(String(rawText ?? '')).replace(/\s+/g, '')
+  if (!compact) return 'both'
+
+  const convNoun = /(会話|トーク|履歴|チャット|メッセージ|発言)/.test(compact)
+  const convProbe =
+    /(会話|トーク|履歴|チャット)(を|が|は)?(調べ|検索|探)/.test(compact) ||
+    /(調べ|検索)(て|たい)?(の)?(会話|トーク|履歴|チャット)/.test(compact) ||
+    /(会話|トーク|履歴)(について|のこと)(調べ|検索|知り)/.test(compact)
+
+  const mediaCue =
+    /(画像|写真|イメージ|png|jpe?g|gif|webp|ファイル|メディア|スクショ|スクリショ|スクリーンショット|スナップ|添付|pdf|ppt|xlsx?|csv|zip|動画|音声|ボイス|録音|エクセル|スプレッドシート|スプシ|パワポイント|ワード|ドキュメント|資料画像|チラシ|ポスター|pop|メニュー|レシート|請求書|見積書|スキャン|書面)/i.test(compact)
+
+  if (convProbe) return mediaCue ? 'both' : 'conversation'
+  if (convNoun && !mediaCue) return 'conversation'
+  if (mediaCue) return 'media'
+  return 'both'
+}
+
 function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentionDays): MessageSearchParseResult {
   const text = normalizeSpaces(rawText)
   if (!text) return { matched: false, command: null, error: null }
@@ -3997,7 +4024,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
   const hasExplicitPrefix = /^(会話|トーク|履歴|チャット)(検索|要約|確認|まとめ|まとめて)/.test(compact)
   const hasConversationHint = /(会話|トーク|履歴|チャット|メッセージ|発言)/.test(compact)
   const hasSearchIntent =
-    /(検索|要約|まとめ|まとめて|要点|要旨|教えて|見せて|みせて|確認|知りたい|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた|なかった|無かった|なかったっけ|無かったっけ|ないか|無いか|ねえ|だよね)/.test(compact)
+    /(検索|要約|まとめ|まとめて|要点|要旨|教えて|見せて|みせて|確認|知りたい|調べ|調べて|調べたい|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた|なかった|無かった|なかったっけ|無かったっけ|ないか|無いか|ねえ|だよね)/.test(compact)
   if (!hasExplicitPrefix && !(hasConversationHint && hasSearchIntent)) {
     return { matched: false, command: null, error: null }
   }
@@ -4100,7 +4127,7 @@ function extractMessageSearchKeyword(rawText: string): string {
     .replace(/(1095日|730日|365日|180日|120日|60日|3年|2年|1年|三年|二年|一年|半年|12ヶ月|12か月|十二ヶ月|6ヶ月|6か月|六ヶ月|4ヶ月|4か月|四ヶ月|2ヶ月|2か月|二ヶ月|全期間|無制限)/g, ' ')
     .replace(/(過去|最近|直近|以内|分|間)/g, ' ')
     .replace(/(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|全ルーム|他ルーム|他のルーム|別ルーム|別のルーム)/g, ' ')
-    .replace(/(検索|探し|探して|探す|要約|まとめ|まとめて|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい|記述|言及)/g, ' ')
+    .replace(/(検索|探し|探して|探す|要約|まとめ|まとめて|教えて|見せて|みせて|確認|調べ|調べて|調べたい|表示|表示して|出して|だして|知りたい|記述|言及)/g, ' ')
     .replace(/(ありますか|あるか|あります|ある|でしたか|ですか|ますか|でしょうか|だったっけ|だっけ|っけ|かな|です|ます)/g, ' ')
     .replace(/(なかったっけ|無かったっけ|なかったか|無かったか|なかった|無かった)/g, ' ')
     // NOTE: Longer particles first to avoid partial matches (e.g. "について" -> "に" + "ついて").
@@ -4704,9 +4731,12 @@ async function buildMessageSearchReply(
   excludedRoomIds: string[],
   groqApiKey: string,
   includeSavedMedia: boolean,
+  originalUserText: string,
 ): Promise<string[]> {
   if (parseError) return [parseError]
   if (!command) return ['会話検索の意図を解釈できませんでした。']
+
+  const primaryTarget = classifyMessageSearchPrimaryTarget(originalUserText)
 
   const { error: supersedeStaleLibraryPendingError } = await supabase
     .from(LIBRARY_SEARCH_PENDING_TABLE)
@@ -4924,6 +4954,14 @@ async function buildMessageSearchReply(
       : null,
   }))
 
+  const suppressMediaWithConversationHit =
+    includeSavedMedia && primaryTarget === 'conversation' && hits.length > 0
+  const mediaLines =
+    includeSavedMedia && mediaHits.length > 0 && !suppressMediaWithConversationHit
+      ? await buildMessageSearchMediaHitLines(supabase, mediaHits, command.scope)
+      : []
+  const mediaFirst = primaryTarget === 'media' && mediaLines.length > 0
+
   const shouldSummarize = !!groqApiKey && hits.length > 0 && hits.length <= SEARCH_AI_SUMMARY_MAX_HITS
   const summary = await summarizeMessageSearchHitsWithGroq(
     shouldSummarize ? hits.slice(0, SEARCH_MAX_SUMMARY_ROWS) : [],
@@ -4979,6 +5017,16 @@ async function buildMessageSearchReply(
       `※いずれかの段階でメッセージ件数が多いため、新しい順に最大${MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS}件までを走査しました。`,
     )
   }
+  if (includeSavedMedia && suppressMediaWithConversationHit) {
+    lines.push('※会話テキストに一致があるため、保存メディア一覧は省略しています。')
+  } else if (includeSavedMedia && mediaFirst) {
+    lines.push('※保存メディアを優先して表示しています。')
+  } else if (mediaLines.length > 0 && primaryTarget === 'both') {
+    lines.push('※会話に続けて、同一キーワードの保存メディアも表示します。')
+  }
+  if (mediaFirst) {
+    lines.push(...mediaLines)
+  }
   if (summary) {
     lines.push('')
     lines.push('会話要約:')
@@ -4994,8 +5042,8 @@ async function buildMessageSearchReply(
       lines.push(...formatMessageSearchPreview(hits[i], i + 1, command.scope === 'all_rooms'))
     }
   }
-  if (includeSavedMedia && mediaHits.length > 0) {
-    lines.push(...await buildMessageSearchMediaHitLines(supabase, mediaHits, command.scope))
+  if (!mediaFirst && mediaLines.length > 0) {
+    lines.push(...mediaLines)
   }
 
   const canOfferOlderExpand = usedMultiStageSearch && stopStageIndex < stageDayWindows.length - 1
