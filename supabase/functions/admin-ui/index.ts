@@ -1,5 +1,4 @@
-import "jsr:@supabase/functions-js/edge-runtime.d.ts"
-
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 const html = String.raw`<!doctype html>
 <html lang="ja">
 <head>
@@ -2088,6 +2087,15 @@ const html = String.raw`<!doctype html>
       return enabledCount + '/9 有効';
     }
 
+    function buildRoomConfigSavedMessage(tr, config) {
+      const roomId = String((tr && tr.dataset && tr.dataset.roomId) || '').trim() || '(unknown)';
+      return [
+        'ルーム設定を保存しました。',
+        `room_id: ${roomId}`,
+        `保存値: AI会話返信=${config.bot_reply_enabled ? 'ON' : 'OFF'} / 会話検索=${config.message_search_enabled ? 'ON' : 'OFF'} / 資料検索=${config.message_search_library_enabled ? 'ON' : 'OFF'}`,
+      ].join('\n');
+    }
+
     function renderRooms(roomOverview, roomSettings) {
       const settingsMap = new Map();
       if (Array.isArray(roomSettings)) {
@@ -2237,7 +2245,7 @@ const html = String.raw`<!doctype html>
       };
       applyRoomConfigStateToRow(activeRoomConfigRow, nextConfig);
       await saveRoomFromRow(activeRoomConfigRow);
-      alert('ルーム設定を保存しました。');
+      alert(buildRoomConfigSavedMessage(activeRoomConfigRow, nextConfig));
       closeRoomConfigModal();
     }
 
@@ -3175,12 +3183,12 @@ const html = String.raw`<!doctype html>
     }
   </script>
 </body>
-</html>`
-
+</html>`;
 const headers = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-store",
-  "x-admin-ui": "1",
-}
-
-Deno.serve(() => new Response(html, { headers }))
+  "x-admin-ui": "1"
+};
+Deno.serve(()=>new Response(html, {
+    headers
+  }));

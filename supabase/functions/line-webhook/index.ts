@@ -639,7 +639,7 @@ Deno.serve(async (req) => {
         }
         const capabilityStatusReply = isDirectUserChat
           ? null
-          : (roomCanReply ? buildRoomCapabilityStatusReply(roomReplyPolicy, text) : null)
+          : (roomCanReply ? buildRoomCapabilityStatusReply(roomReplyPolicy, roomId, text) : null)
         if (capabilityStatusReply) {
           if (!lineAccessToken) {
             console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply room capability status.')
@@ -3981,6 +3981,7 @@ function looksLikeBotInteractionRequest(text: string): boolean {
 
 function buildRoomCapabilityStatusReply(
   policy: RoomReplyPolicy,
+  roomId: string,
   text: string,
 ): string | null {
   if (!policy.isEnabled) return null
@@ -3990,6 +3991,7 @@ function buildRoomCapabilityStatusReply(
     return [
       'この質問は、現在このルームで権限が付与されていないため実行できません。',
       `判定: AI会話返信=${policy.botReplyEnabled ? 'ON' : 'OFF'} / 会話検索=${policy.messageSearchEnabled ? 'ON' : 'OFF'}`,
+      `room_id: ${String(roomId || '').trim() || '(unknown)'}`,
     ].join('\n')
   } else {
     return null
