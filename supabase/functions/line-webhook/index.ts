@@ -212,6 +212,16 @@ type MessageSearchParseResult = {
   error: string | null
 }
 
+type MessageSearchMediaHit = {
+  line_message_id: string
+  room_id: string
+  original_file_name: string
+  content_preview: string
+  created_at: string
+  storage_bucket: string
+  storage_path: string
+}
+
 type AiMessageSearchIntent = {
   shouldSearch: boolean
   keyword: string
@@ -366,6 +376,10 @@ const MEDIA_SEARCH_CANDIDATE_MAX = 10
 const MEDIA_SEARCH_FETCH_LIMIT = 80
 /** キーワード指定時は解析テキスト一致まで見るため多めに取得 */
 const MEDIA_SEARCH_KEYWORD_FETCH_LIMIT = 240
+/** 会話検索に合わせて表示する保存メディアの最大件数 */
+const MESSAGE_SEARCH_MEDIA_APPEND_MAX = 15
+/** 会話検索のメディア一覧で付与する署名付き URL の最大件数 */
+const MESSAGE_SEARCH_MEDIA_SIGNED_URL_MAX = 3
 const MEDIA_SEARCH_PENDING_TTL_MIN = 20
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
@@ -1056,6 +1070,7 @@ Deno.serve(async (req) => {
               messageRetentionDays,
               lineUserPermission.excludedMessageSearchRoomIds,
               groqApiKey,
+              canUseMedia,
             )
 
             if (!lineAccessToken) {
@@ -2344,6 +2359,18 @@ function parseMediaSearchFilterText(rawText: string): {
   return null
 }
 
+/** 会話・履歴を探す口語（「〜の会話なかったっけ？」等）。メディア用の口語ルートと二重にならないよう先に判定する */
+function looksLikeCasualConversationSearchText(raw: string): boolean {
+  const t = String(raw ?? '').trim()
+  if (t.length < 4 || t.length > 160) return false
+  if (!/(会話|トーク|履歴|チャット|メッセージ|発言)/.test(t)) return false
+  if (/[?？]/.test(t)) return true
+  if (/(かな|かしら|ですか|でしょうか|だっけ|だったっけ|あったっけ|なかったっけ|なかった|無かった|ありますか|あるか|探して|探す|ないか|無いか)/.test(t)) {
+    return true
+  }
+  return false
+}
+
 /** 保存メディアを探す口語（「〜の画像あった？」等）。会話検索と区別するため画像・写真・ファイル等の語を含むときだけ有効 */
 function looksLikeMediaExistenceQuestion(raw: string): boolean {
   const t = String(raw ?? '').trim()
@@ -2403,6 +2430,7 @@ async function tryHandleCasualMediaLookupQuestion(
   if (parseMediaSearchStartCommand(normalized)) return null
   if (parseSavedMediaUrlCommand(normalized)) return null
   if (await loadPendingMediaSearch(supabase, roomId, userId)) return null
+  if (looksLikeCasualConversationSearchText(normalized)) return null
   if (!looksLikeMediaExistenceQuestion(normalized)) return null
   const kw = extractFlexibleMediaSearchKeyword(normalized)
   if (!kw) return null
@@ -3969,7 +3997,7 @@ function parseMessageSearchCommand(rawText: string, defaultDays: MessageRetentio
   const hasExplicitPrefix = /^(会話|トーク|履歴|チャット)(検索|要約|確認|まとめ|まとめて)/.test(compact)
   const hasConversationHint = /(会話|トーク|履歴|チャット|メッセージ|発言)/.test(compact)
   const hasSearchIntent =
-    /(検索|要約|まとめ|まとめて|要点|要旨|教えて|見せて|みせて|確認|知りたい|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた)/.test(compact)
+    /(検索|要約|まとめ|まとめて|要点|要旨|教えて|見せて|みせて|確認|知りたい|ありますか|あるか|あります|ある|記述|言及|話してた|言ってた|なかった|無かった|なかったっけ|無かったっけ|ないか|無いか|ねえ|だよね)/.test(compact)
   if (!hasExplicitPrefix && !(hasConversationHint && hasSearchIntent)) {
     return { matched: false, command: null, error: null }
   }
@@ -4074,6 +4102,7 @@ function extractMessageSearchKeyword(rawText: string): string {
     .replace(/(会話|トーク|履歴|チャット|メッセージ|発言|ルーム|グループ|全ルーム|他ルーム|他のルーム|別ルーム|別のルーム)/g, ' ')
     .replace(/(検索|探し|探して|探す|要約|まとめ|まとめて|教えて|見せて|みせて|確認|表示|表示して|出して|だして|知りたい|記述|言及)/g, ' ')
     .replace(/(ありますか|あるか|あります|ある|でしたか|ですか|ますか|でしょうか|だったっけ|だっけ|っけ|かな|です|ます)/g, ' ')
+    .replace(/(なかったっけ|無かったっけ|なかったか|無かったか|なかった|無かった)/g, ' ')
     // NOTE: Longer particles first to avoid partial matches (e.g. "について" -> "に" + "ついて").
     .replace(/(について|に関して|に対して|してください|して下さい|お願いします|お願い|下さい|ください|だけ|から|とか|って|こと|もの|やつ|して|を|は|が|に|で|の)/g, ' ')
     .replace(/[?？!！。．、,「」『』（）()\[\]【】]/g, ' ')
@@ -4569,6 +4598,101 @@ function formatMessageSearchRingCaption(ringIndex: number, windows: Array<number
   return `約${upper}日より古く、約${lower}日より新しい期間`
 }
 
+async function fetchSavedMediaHitsForMessageSearch(
+  supabase: ReturnType<typeof createClient>,
+  options: {
+    keyword: string
+    scope: MessageSearchScope
+    roomId: string
+    excludedRoomIds: string[]
+    sinceIso: string | null
+  },
+): Promise<MessageSearchMediaHit[]> {
+  const keywordNeedle = String(options.keyword ?? '').trim()
+  if (!keywordNeedle) return []
+
+  let query = supabase
+    .from('line_message_media')
+    .select('room_id, line_message_id, storage_bucket, storage_path, original_file_name, content_preview, created_at')
+    .order('created_at', { ascending: false })
+    .limit(MEDIA_SEARCH_KEYWORD_FETCH_LIMIT)
+
+  if (options.sinceIso) {
+    query = query.gte('created_at', options.sinceIso)
+  }
+  if (options.scope !== 'all_rooms') {
+    query = query.eq('room_id', options.roomId)
+  }
+
+  const { data, error } = await query
+  if (error) {
+    console.error('Failed to fetch line_message_media for message search:', error.message)
+    return []
+  }
+  const excludedSet = new Set((options.excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0))
+  const rows = Array.isArray(data) ? (data as Record<string, unknown>[]) : []
+  const out: MessageSearchMediaHit[] = []
+
+  for (const row of rows) {
+    const rid = String(row.room_id ?? '').trim()
+    if (options.scope === 'all_rooms' && excludedSet.has(rid)) continue
+    const fileName = String(row.original_file_name ?? '').trim()
+    const preview = String(row.content_preview ?? '').trim()
+    if (!keywordMatchesHaystacks(keywordNeedle, [fileName, preview])) continue
+    const lineMessageId = String(row.line_message_id ?? '').trim()
+    const storagePath = String(row.storage_path ?? '').trim()
+    if (!lineMessageId || !storagePath) continue
+    out.push({
+      line_message_id: lineMessageId,
+      room_id: rid,
+      original_file_name: fileName || `media-${lineMessageId}`,
+      content_preview: preview,
+      created_at: String(row.created_at ?? ''),
+      storage_bucket: String(row.storage_bucket ?? LINE_MEDIA_BUCKET).trim() || LINE_MEDIA_BUCKET,
+      storage_path: storagePath,
+    })
+    if (out.length >= MESSAGE_SEARCH_MEDIA_APPEND_MAX) break
+  }
+  return out
+}
+
+async function buildMessageSearchMediaHitLines(
+  supabase: ReturnType<typeof createClient>,
+  mediaHits: MessageSearchMediaHit[],
+  scope: MessageSearchScope,
+): Promise<string[]> {
+  if (mediaHits.length === 0) return []
+  const roomLabels = scope === 'all_rooms'
+    ? await loadRoomLabelsForHits(supabase, mediaHits.map((h) => ({ room_id: h.room_id })))
+    : new Map<string, string>()
+  const lines: string[] = ['', '一致した保存メディア（ファイル名・画像解析テキスト・新しい順）:']
+  for (let i = 0; i < mediaHits.length; i += 1) {
+    const h = mediaHits[i]
+    const dateLabel = formatSearchDateTime(h.created_at)
+    const roomLine = scope === 'all_rooms'
+      ? (roomLabels.get(h.room_id) ?? h.room_id.slice(0, 12))
+      : null
+    const prev = clipMediaPreview(h.content_preview, 100)
+    lines.push('')
+    lines.push(`${i + 1}) ${h.original_file_name} [${dateLabel}]`)
+    if (roomLine) lines.push(`   ルーム: ${roomLine}`)
+    if (prev) lines.push(`   解析: ${prev}`)
+    if (i < MESSAGE_SEARCH_MEDIA_SIGNED_URL_MAX) {
+      const url = await createSignedMediaDownloadUrlForWebhook(
+        supabase,
+        h.storage_bucket,
+        h.storage_path,
+        h.original_file_name,
+      )
+      if (url) lines.push(`   URL: ${url}`)
+    }
+  }
+  if (mediaHits.length > MESSAGE_SEARCH_MEDIA_SIGNED_URL_MAX) {
+    lines.push(`※先頭${MESSAGE_SEARCH_MEDIA_SIGNED_URL_MAX}件のみダウンロード用URLを付けています。`)
+  }
+  return lines
+}
+
 async function buildMessageSearchReply(
   command: MessageSearchCommand | null,
   parseError: string | null,
@@ -4579,6 +4703,7 @@ async function buildMessageSearchReply(
   configuredRetentionDays: MessageRetentionDays,
   excludedRoomIds: string[],
   groqApiKey: string,
+  includeSavedMedia: boolean,
 ): Promise<string[]> {
   if (parseError) return [parseError]
   if (!command) return ['会話検索の意図を解釈できませんでした。']
@@ -4719,15 +4844,33 @@ async function buildMessageSearchReply(
     }
   }
 
+  const mediaSinceIso = effectiveDays > 0
+    ? new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000).toISOString()
+    : null
+  const mediaHits = includeSavedMedia
+    ? await fetchSavedMediaHitsForMessageSearch(supabase, {
+        keyword: command.keyword,
+        scope: command.scope,
+        roomId,
+        excludedRoomIds,
+        sinceIso: mediaSinceIso,
+      })
+    : []
+
   if (hitsRaw.length === 0) {
     const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
 
     if (!librarySearchEnabled) {
-      const lines: string[] = [`「${command.keyword}」に一致する会話はありません（${periodText}）`]
+      const lines: string[] = [`「${command.keyword}」に一致する会話テキストはありません（${periodText}）`]
       if (adjustedByRetention) {
         lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
       }
-      lines.push('※このルームでは資料ライブラリ検索（2段階目）が無効です。')
+      if (mediaHits.length > 0) {
+        lines.push(`保存メディア（ファイル名・画像解析）との一致: ${mediaHits.length}件`)
+        lines.push(...await buildMessageSearchMediaHitLines(supabase, mediaHits, command.scope))
+      } else {
+        lines.push('※このルームでは資料ライブラリ検索（2段階目）が無効です。')
+      }
       return [lines.join('\n')]
     }
     const pendingSaved = await savePendingLibrarySearchConfirmation(
@@ -4739,7 +4882,7 @@ async function buildMessageSearchReply(
       adjustedByRetention,
     )
     const lines: string[] = [
-      `「${command.keyword}」に一致する会話はありません（${periodText}）`,
+      `「${command.keyword}」に一致する会話テキストはありません（${periodText}）`,
     ]
     if (phase1Wizard) {
       if (didChainedFullFromWizard) {
@@ -4754,6 +4897,10 @@ async function buildMessageSearchReply(
     }
     if (adjustedByRetention) {
       lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
+    }
+    if (mediaHits.length > 0) {
+      lines.push(`保存メディア（ファイル名・画像解析）との一致: ${mediaHits.length}件`)
+      lines.push(...await buildMessageSearchMediaHitLines(supabase, mediaHits, command.scope))
     }
     if (pendingSaved) {
       lines.push('')
@@ -4792,7 +4939,9 @@ async function buildMessageSearchReply(
     `対象: ${scopeLabel}`,
     `期間: ${periodLabel}`,
     `キーワード: ${command.keyword}`,
-    `会話一致: ${hits.length}件`,
+    ...(includeSavedMedia
+      ? [`一致: 会話テキスト ${hits.length}件 / 保存メディア ${mediaHits.length}件`]
+      : [`会話一致: ${hits.length}件`]),
   ]
   if (adjustedByRetention) {
     lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
@@ -4844,6 +4993,9 @@ async function buildMessageSearchReply(
       lines.push('')
       lines.push(...formatMessageSearchPreview(hits[i], i + 1, command.scope === 'all_rooms'))
     }
+  }
+  if (includeSavedMedia && mediaHits.length > 0) {
+    lines.push(...await buildMessageSearchMediaHitLines(supabase, mediaHits, command.scope))
   }
 
   const canOfferOlderExpand = usedMultiStageSearch && stopStageIndex < stageDayWindows.length - 1
