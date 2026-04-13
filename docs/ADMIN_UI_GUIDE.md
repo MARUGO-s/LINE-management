@@ -151,7 +151,7 @@
 | **予定更新** | カレンダー**変更**（編集・削除に相当する操作）を許可するか（`can_calendar_update`）。 |
 | **メディア** | **メディア保存・メディア系機能**にアクセスできるか（`can_media_access`）。ルームの「LINE添付保存」とセットで効きます。 |
 
-※ **LINE Bot 側の挙動（この画面には項目なし）**: 会話検索はサーバーで **段階的**に試行します。**通常**は過去 **約6か月（180日）**までを上限にし（保持がそれより長くても同様）、**「会話検索フル」「会話検索全履歴」「会話検索裏」**のように指定したときだけ、**メッセージ保持設定の範囲いっぱい**まで段階を延ばします。**早い段階でキーワードにヒットしたとき**はそこで打ち切り、まだ古い帯が未走査なら Bot が **「さらに古い帯を検索するか」** を案内します（保留は `message_search_expand_pending_confirmations`。**会話検索 ON** かつルーム／除外設定の範囲内）。**ヒット 0 件のときの資料ライブラリ検索**（別テーブル）とは別フローです。
+※ **LINE Bot 側の挙動**（この画面に項目なし）: **第1段（最大180日）→ 第2段（必要時フル相当）→ 第3段（資料のはい/いいえ）** で段階試行。拡大・フォローアップ・資料の各保留（`message_search_expand_pending_confirmations` / `message_search_followup_pending_confirmations` / `message_search_library_pending_confirmations`）や `会話検索フル` 省略の詳細は **`README.md` §8** を参照。
 
 ### 5.3 ルーム選択（会話検索の対象）
 
@@ -271,6 +271,7 @@
 | 予定閲覧 / 予定作成 / 予定更新 | `can_calendar_view` / `can_calendar_create` / `can_calendar_update` |
 | ルーム除外（検索） | `excluded_message_search_room_ids` |
 | （LINE のみ・参考）古い帯の追加検索の保留 | `message_search_expand_pending_confirmations`（管理 UI からは編集しません） |
+| （LINE のみ・参考）会話検索フォローアップ保留 | `message_search_followup_pending_confirmations` |
 | （LINE のみ・参考）資料ライブラリ検索の保留 | `message_search_library_pending_confirmations` |
 | （実装定数・参考）通常の会話検索の日数上限 | `MESSAGE_SEARCH_NORMAL_MAX_DAYS`（`line-webhook`、既定 180 日） |
 
