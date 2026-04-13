@@ -296,6 +296,40 @@
       color: #93bdd5;
     }
 
+    .file-preview-hint {
+      font-size: 0.72rem;
+      color: #7aa8c4;
+      line-height: 1.45;
+      padding: 0 12px 12px;
+      margin: 0;
+      white-space: normal;
+    }
+
+    .file-preview-hint strong {
+      color: #b8dff5;
+      font-weight: 600;
+    }
+
+    .content-preview-missing {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: unset;
+      font-size: 0.78rem;
+      line-height: 1.45;
+    }
+
+    .content-preview-missing .muted {
+      color: #7a9aaf;
+    }
+
+    .content-preview-line {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: unset;
+      line-height: 1.35;
+      max-height: 5.4em;
+    }
+
     .item-line a {
       color: #8de3ff;
       text-decoration: underline;
@@ -1175,7 +1209,10 @@
       } else if (type === 'audio') {
         preview = '<audio controls preload="metadata" src="' + escapeHtml(signedUrl) + '"></audio>';
       } else {
-        preview = '<div class="empty"><a href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a></div>';
+        preview = [
+          '<div class="empty"><a href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a></div>',
+          '<p class="file-preview-hint">Excel / PDF / Word は<strong>表やページのプレビュー画像は出しません</strong>。本文から取り出したテキストは下の<strong>内容抜粋</strong>に表示されます（対応形式のみ）。</p>',
+        ].join('');
       }
 
       const downloadAction = downloadUrl
@@ -1202,8 +1239,16 @@
         '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item.created_at)) + '</div>',
         '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
         '<div class="item-line sub" title="' + escapeHtml(mime) + '">MIME: ' + escapeHtml(mime) + '</div>',
-        (item.content_preview
-          ? '<div class="item-line sub" title="' + escapeHtml(String(item.content_preview)) + '">内容抜粋: ' + escapeHtml(String(item.content_preview)) + '</div>'
+        (type === 'file'
+          ? (function() {
+              const cp = item.content_preview != null && String(item.content_preview).trim()
+                ? String(item.content_preview).trim()
+                : '';
+              if (cp) {
+                return '<div class="item-line sub content-preview-line" title="' + escapeHtml(cp) + '">内容抜粋: ' + escapeHtml(cp) + '</div>';
+              }
+              return '<div class="item-line sub content-preview-missing">内容抜粋: <span class="muted">未取得</span>（保存時に PDF / Excel / Word / テキストから自動抽出します。<strong>機能追加前に上げたファイル</strong>や取得に失敗した場合は空です。同じファイルを<strong>もう一度送る</strong>と付くことがあります。）</div>';
+            })()
           : ''),
         '<div class="item-line sub" title="' + escapeHtml(String(item.line_message_tag || '')) + '">タグ: ' + escapeHtml(String(item.line_message_tag || '-')) + '</div>',
         selectBlock,
