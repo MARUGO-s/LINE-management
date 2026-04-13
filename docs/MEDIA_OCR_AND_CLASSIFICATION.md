@@ -189,3 +189,30 @@ Latest rollout completed with both GitHub and Supabase deployment.
 - GitHub: `main` pushed with OCR/categorization/docs changes
 - Supabase DB: up to date
 - Supabase Functions: deployed (`line-webhook`, `admin-api`, `admin-ui`, `summary-cron`, `gmail-alert-cron`, `calendar-pending-cron`, `check-cron`)
+
+## 10. HACCP hygiene schedule → Google Calendar auto-registration
+
+Behavior when `line-webhook` treats an attachment as a HACCP-style schedule.
+
+### 10.1 PDF: no calendar registration (policy A)
+
+PDF layout and text extraction are too unstable for reliable calendar writes, so **PDFs are excluded from auto-registration**.
+
+- If the file is a PDF (bytes start with `%PDF-`) and passes the HACCP schedule heuristic, **no Google Calendar events are created** and **nothing is written** to `haccp_schedule_calendar_registrations`.
+- Short LINE reply sent to the user:
+
+  > HACCP資料（PDF）を受信しました。PDFは自動登録しません。最新のExcelファイルを送信いただければ、カレンダーに自動登録します。
+
+### 10.2 Excel (XLSX) only for auto-registration
+
+Send the **Excel (`.xlsx`)** version with columns such as store name, inspection date, and inspection time. The function parses the sheet, creates events, and deduplicates via `haccp_schedule_calendar_registrations`.
+
+### 10.3 Excel extraction priority (avoid inflated row counts)
+
+Previously, combining loose fallbacks with "pick the candidate list with the **most** rows" could yield **40+ spurious rows** for a sheet that should register about **16** stores.
+
+Current rule in `extractHaccpScheduleEntries` (`supabase/functions/line-webhook/index.ts`):
+
+- If **tabular extraction** succeeds (header row finds store / inspection date / time columns and data rows parse), **use only that table result**; do not override it with longer fallback lists.
+- Fallback line-based parsing runs **only when** the table path produces no rows. PDF auto-registration remains disabled per section 10.1.
+

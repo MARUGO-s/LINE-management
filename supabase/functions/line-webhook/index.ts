@@ -2,7 +2,6 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts"
 import {
   extractLineMediaFileContentPreview,
   extractLineMediaFileRawText,
-  extractPdfTextForcedOcr,
   isLineMediaPdf,
 } from '../_shared/line_media_content_preview.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
@@ -2000,14 +1999,17 @@ function extractHaccpScheduleEntries(rawText: string, fileName?: string, content
   const companyBlocks = extractHaccpScheduleEntriesFromCompanyBlocks(text, fileName)
   const looseRows = extractHaccpScheduleEntriesFromLooseLines(text, fileName)
 
+  // For structured sources (especially XLSX), prefer table extraction when available.
+  if (tableEntries.length > 0) return tableEntries
+
   if (String(contentType || '').toLowerCase().includes('pdf')) {
     if (companyBlocks.length > 0) return companyBlocks
     if (inlineRows.length > 0) return inlineRows
     if (looseRows.length > 0) return looseRows
-    return tableEntries
+    return []
   }
 
-  const candidates = [tableEntries, inlineRows, companyBlocks, looseRows]
+  const candidates = [inlineRows, companyBlocks, looseRows]
   candidates.sort((a, b) => b.length - a.length)
   return candidates[0] ?? []
 }
@@ -2029,29 +2031,20 @@ async function tryRegisterHaccpScheduleFromMediaFile(
   const quickPreview = await extractLineMediaFileContentPreview(file.bytes, file.contentType, file.fileName) ?? ''
   if (!looksLikeHaccpScheduleFile(file.fileName, quickPreview)) return null
 
+  const isPdf = isLineMediaPdf(file.bytes, file.contentType, file.fileName)
+  if (isPdf) {
+    return 'HACCP資料（PDF）を受信しました。PDFは自動登録しません。最新のExcelファイルを送信いただければ、カレンダーに自動登録します。'
+  }
+
   let rawText = await extractLineMediaFileRawText(file.bytes, file.contentType, file.fileName)
   if (!rawText) {
     return 'HACCP資料を検出しましたが、本文抽出に失敗したため予定登録は行いませんでした。'
   }
 
-  const isPdf = isLineMediaPdf(file.bytes, file.contentType, file.fileName)
-  if (isPdf) {
-    const waltsHits = (rawText.match(/株式会社ワルツ/g) || []).length
-    if (waltsHits < 10) {
-      const ocrText = await extractPdfTextForcedOcr(file.bytes, file.fileName)
-      if (ocrText) {
-        const ocrWalts = (ocrText.match(/株式会社ワルツ/g) || []).length
-        if (ocrWalts > waltsHits || ocrText.length > rawText.length * 1.2) {
-          rawText = ocrText
-        }
-      }
-    }
-  }
-
   const scheduleEntries = extractHaccpScheduleEntries(
     rawText,
     file.fileName,
-    isPdf ? 'application/pdf' : file.contentType,
+    file.contentType,
   ).slice(0, 60)
   if (scheduleEntries.length === 0) {
     return 'HACCP資料を検出しましたが、店舗名と実施日の組み合わせを抽出できませんでした。'
