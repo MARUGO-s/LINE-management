@@ -1363,10 +1363,10 @@
         '<div class="item-body">',
         '<span class="tag">' + escapeHtml(type) + '</span>',
         '<div class="item-line" title="' + escapeHtml(name) + '">' + escapeHtml(name) + '</div>',
+        '<div class="item-line sub" title="投稿者: ' + escapeHtml(String(item.sender_display_name || '').trim() || '（記録なし）') + '">投稿者: ' + escapeHtml(String(item.sender_display_name || '').trim() || '（記録なし）') + '</div>',
         '<div class="item-line sub" title="ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '">ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '</div>',
         '<div class="item-line sub">日時: ' + escapeHtml(formatDate(item.created_at)) + '</div>',
         '<div class="item-line sub">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
-        '<div class="item-line sub" title="' + escapeHtml(mime) + '">MIME: ' + escapeHtml(mime) + '</div>',
         (type === 'file'
           ? (function() {
               const cp = item.content_preview != null && String(item.content_preview).trim()
@@ -1387,7 +1387,6 @@
               return '<div class="item-line sub content-preview-missing"><strong>抽出テキストなし</strong> — この行にはまだ文字列が保存されていません。保存時に Excel / PDF / Word / テキストから<strong>セル・本文を機械的に抜き出し</strong>ます（AI の意味分析ではありません）。<strong>機能追加前の保存</strong>や取得失敗時は空のままです。同じファイルを<strong>再送</strong>すると付くことがあります。</div>';
             })()
           : ''),
-        '<div class="item-line sub" title="' + escapeHtml(String(item.line_message_tag || '')) + '">タグ: ' + escapeHtml(String(item.line_message_tag || '-')) + '</div>',
         selectBlock,
         contextBlock,
         '<div class="item-actions">' + downloadAction + '<button class="button danger media-delete-btn" type="button" data-media-id="' + escapeHtml(String(item.id || '')) + '">削除</button></div>',

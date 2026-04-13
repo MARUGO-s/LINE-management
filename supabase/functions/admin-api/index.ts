@@ -41,6 +41,7 @@ type MediaListRow = {
   room_id: string
   room_name: string | null
   user_id: string | null
+  sender_display_name: string | null
   media_type: MediaType
   storage_bucket: string
   storage_path: string
@@ -1503,7 +1504,7 @@ async function fetchMediaState(
   let query = supabase
     .from("line_message_media")
     .select(
-      "id, message_id, line_message_id, room_id, user_id, media_type, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, content_preview, created_at",
+      "id, message_id, line_message_id, room_id, user_id, sender_display_name, media_type, storage_bucket, storage_path, original_file_name, mime_type, file_size_bytes, content_preview, created_at",
       { count: "exact" },
     )
     .order("created_at", { ascending: false })
@@ -2848,6 +2849,9 @@ function normalizeMediaListRow(value: unknown): MediaListRow | null {
     room_id: roomId,
     room_name: value.room_name == null ? null : String(value.room_name),
     user_id: value.user_id == null ? null : String(value.user_id),
+    sender_display_name: value.sender_display_name == null || String(value.sender_display_name).trim() === ""
+      ? null
+      : String(value.sender_display_name).trim(),
     media_type: mediaType,
     storage_bucket: storageBucket,
     storage_path: storagePath,
