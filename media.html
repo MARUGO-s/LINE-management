@@ -310,6 +310,11 @@
       font-weight: 600;
     }
 
+    .file-preview-hint .hint-note {
+      color: #6a9ab8;
+      font-size: 0.68rem;
+    }
+
     .content-preview-missing {
       white-space: normal;
       overflow: visible;
@@ -328,6 +333,32 @@
       text-overflow: unset;
       line-height: 1.35;
       max-height: 5.4em;
+    }
+
+    .extract-block {
+      border: 1px solid rgba(100, 200, 255, 0.28);
+      border-radius: 10px;
+      background: rgba(8, 32, 52, 0.55);
+      padding: 8px 10px;
+      margin-top: 2px;
+    }
+
+    .extract-label {
+      font-size: 0.72rem;
+      color: #7dd3a8;
+      letter-spacing: 0.02em;
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+
+    .extract-text {
+      font-size: 0.8rem;
+      color: #d4eefc;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 9em;
+      overflow-y: auto;
     }
 
     .item-line a {
@@ -1211,7 +1242,7 @@
       } else {
         preview = [
           '<div class="empty"><a href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a></div>',
-          '<p class="file-preview-hint">Excel / PDF / Word は<strong>表やページのプレビュー画像は出しません</strong>。本文から取り出したテキストは下の<strong>内容抜粋</strong>に表示されます（対応形式のみ）。</p>',
+          '<p class="file-preview-hint">左はプレビュー画像ではありません。<strong>下の「抽出テキスト」</strong>に、サーバーがファイル内から読み取った文字列（Excel のセル・PDF のテキスト層など）が載ります。<span class="hint-note">（AI による意味分析・要約ではなく、形式に沿った自動抽出です。）</span></p>',
         ].join('');
       }
 
@@ -1245,9 +1276,14 @@
                 ? String(item.content_preview).trim()
                 : '';
               if (cp) {
-                return '<div class="item-line sub content-preview-line" title="' + escapeHtml(cp) + '">内容抜粋: ' + escapeHtml(cp) + '</div>';
+                return [
+                  '<div class="extract-block">',
+                  '<div class="extract-label">抽出テキストあり（サーバーがファイルを解析して取得・先頭付近）</div>',
+                  '<div class="extract-text">', escapeHtml(cp), '</div>',
+                  '</div>',
+                ].join('');
               }
-              return '<div class="item-line sub content-preview-missing">内容抜粋: <span class="muted">未取得</span>（保存時に PDF / Excel / Word / テキストから自動抽出します。<strong>機能追加前に上げたファイル</strong>や取得に失敗した場合は空です。同じファイルを<strong>もう一度送る</strong>と付くことがあります。）</div>';
+              return '<div class="item-line sub content-preview-missing"><strong>抽出テキストなし</strong> — この行にはまだ文字列が保存されていません。保存時に Excel / PDF / Word / テキストから<strong>セル・本文を機械的に抜き出し</strong>ます（AI の意味分析ではありません）。<strong>機能追加前の保存</strong>や取得失敗時は空のままです。同じファイルを<strong>再送</strong>すると付くことがあります。</div>';
             })()
           : ''),
         '<div class="item-line sub" title="' + escapeHtml(String(item.line_message_tag || '')) + '">タグ: ' + escapeHtml(String(item.line_message_tag || '-')) + '</div>',
