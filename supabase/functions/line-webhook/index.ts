@@ -2092,9 +2092,9 @@ function buildDirectUserRoomPolicy(base: RoomReplyPolicy): RoomReplyPolicy {
     requiresRegistration: false,
     isEnabled: true,
     botReplyEnabled: true,
-    /** 友だち 1:1 では会話検索・資料検索は行わない（グループ等で利用） */
-    messageSearchEnabled: false,
-    messageSearchLibraryEnabled: false,
+    /** 会話テキストは DB に残さないが、会話検索・資料検索コマンドは利用可（全ルーム等はグループ履歴を検索） */
+    messageSearchEnabled: true,
+    messageSearchLibraryEnabled: true,
     /** メディアは DB に残し「メディアURL」「メディアURL 全ルーム」で取得可能 */
     mediaFileAccessEnabled: true,
     calendarAiAutoCreateEnabled: true,
@@ -2127,8 +2127,8 @@ function buildDirectUserFallbackReply(message: any, options: { canCalendarUpdate
   }
   return [
     'うまく意図を解釈できませんでした。',
-    '友だちトークでは会話検索は使えません。グループ等のトークでは「会話検索 キーワード」、予定確認なら「予定確認 5月」、予定変更なら「1件目の時間を19:00に変更」の形式で送ってください。',
-    '保存メディアのURLは「メディアURL」または「メディアURL 全ルーム」で取得できます。',
+    '会話検索なら「会話検索 キーワード」、予定確認なら「予定確認 5月」、予定変更なら「1件目の時間を19:00に変更」の形式で送ってください。',
+    '保存メディアのURLは「メディアURL」または「メディアURL 全ルーム」です。',
   ].join('\n')
 }
 
@@ -2765,7 +2765,7 @@ async function fetchLineMessagesForSearchBatched(
       p_max_rows: maxRows,
     })
     if (!error && Array.isArray(data)) {
-      let rows: SearchMessageRow[] = data.map((row: unknown) => ({
+      const rows: SearchMessageRow[] = data.map((row: unknown) => ({
         room_id: String((row as { room_id?: unknown })?.room_id ?? ''),
         content: String((row as { content?: unknown })?.content ?? ''),
         created_at: String((row as { created_at?: unknown })?.created_at ?? ''),
@@ -2773,9 +2773,6 @@ async function fetchLineMessagesForSearchBatched(
           ? null
           : String((row as { user_id?: unknown }).user_id),
       }))
-      if (scope === 'all_rooms') {
-        rows = rows.filter((r) => !String(r.room_id ?? '').startsWith('U'))
-      }
       const truncated = rows.length >= maxRows
       return { rows: rows.slice(0, maxRows), truncated }
     }
@@ -2801,8 +2798,6 @@ async function fetchLineMessagesForSearchBatched(
     }
     if (scope !== 'all_rooms') {
       query = query.eq('room_id', roomId)
-    } else {
-      query = query.not('room_id', 'like', 'U%')
     }
     const { data, error } = await query
     if (error) {
@@ -2857,7 +2852,7 @@ async function fetchLineMessagesForSearchRingBatched(
       p_max_rows: maxRows,
     })
     if (!error && Array.isArray(data)) {
-      let rows: SearchMessageRow[] = data.map((row: unknown) => ({
+      const rows: SearchMessageRow[] = data.map((row: unknown) => ({
         room_id: String((row as { room_id?: unknown })?.room_id ?? ''),
         content: String((row as { content?: unknown })?.content ?? ''),
         created_at: String((row as { created_at?: unknown })?.created_at ?? ''),
@@ -2865,9 +2860,6 @@ async function fetchLineMessagesForSearchRingBatched(
           ? null
           : String((row as { user_id?: unknown }).user_id),
       }))
-      if (scope === 'all_rooms') {
-        rows = rows.filter((r) => !String(r.room_id ?? '').startsWith('U'))
-      }
       const truncated = rows.length >= maxRows
       return { rows: rows.slice(0, maxRows), truncated }
     }
@@ -2894,8 +2886,6 @@ async function fetchLineMessagesForSearchRingBatched(
     }
     if (scope !== 'all_rooms') {
       query = query.eq('room_id', roomId)
-    } else {
-      query = query.not('room_id', 'like', 'U%')
     }
     const { data, error } = await query
     if (error) {
