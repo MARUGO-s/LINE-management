@@ -11,7 +11,11 @@ const TEXT_BINARY_RATIO_MAX = 0.08
 const PDFJS_MODULE_URL = "https://esm.sh/pdfjs-dist@4.10.38/build/pdf.mjs"
 const OCR_PDF_MIN_TRIGGER_CHARS = 24
 const OCR_PDF_MAX_BYTES_DEFAULT = 2 * 1024 * 1024
+const OCR_SPACE_MAX_BYTES_DEFAULT = 1 * 1024 * 1024
 const OCR_CACHE_MAX_ENTRIES = 120
+const AZURE_DOCINTEL_API_VERSION = "2024-11-30"
+const AZURE_POLL_INTERVAL_MS = 1200
+const AZURE_POLL_MAX_ATTEMPTS = 12
 
 export const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 export const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -199,6 +203,104 @@ async function tryExtractPdfTextViaOcrSpace(bytes: Uint8Array, originalFileName:
   }
 }
 
+function sanitizeAzureEndpoint(raw: string): string {
+  return String(raw ?? "").trim().replace(/\/+$/, "")
+}
+
+async function sleepMs(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function readAzureAnalyzeText(payload: unknown): string {
+  if (!isRecord(payload)) return ""
+  const analyzeResult = isRecord(payload.analyzeResult) ? payload.analyzeResult : null
+  if (!analyzeResult) return ""
+  const content = analyzeResult.content
+  if (typeof content === "string" && content.trim()) return content
+
+  const pages = Array.isArray(analyzeResult.pages) ? analyzeResult.pages : []
+  const lines: string[] = []
+  for (const page of pages) {
+    if (!isRecord(page)) continue
+    const lineRows = Array.isArray(page.lines) ? page.lines : []
+    for (const row of lineRows) {
+      if (!isRecord(row)) continue
+      const text = row.content
+      if (typeof text === "string" && text.trim()) lines.push(text)
+    }
+  }
+  return lines.join("\n")
+}
+
+async function tryExtractPdfTextViaAzureDocIntel(bytes: Uint8Array, originalFileName: string): Promise<string> {
+  const endpoint = sanitizeAzureEndpoint(Deno.env.get("LINE_MEDIA_AZURE_DOCINTEL_ENDPOINT") ?? "")
+  const apiKey = String(Deno.env.get("LINE_MEDIA_AZURE_DOCINTEL_KEY") ?? "").trim()
+  if (!endpoint || !apiKey) return ""
+
+  const maxBytes = parsePositiveIntEnv(Deno.env.get("LINE_MEDIA_AZURE_DOCINTEL_MAX_BYTES") ?? undefined, 20 * 1024 * 1024)
+  if (bytes.length <= 0 || bytes.length > maxBytes) return ""
+
+  const cacheKey = `az:${getOcrCacheKey(bytes, originalFileName)}`
+  const cached = ocrPreviewCache.get(cacheKey)
+  if (cached) return cached
+
+  const analyzeUrl = `${endpoint}/documentintelligence/documentModels/prebuilt-read:analyze?api-version=${AZURE_DOCINTEL_API_VERSION}`
+  try {
+    const startRes = await fetch(analyzeUrl, {
+      method: "POST",
+      headers: {
+        "Ocp-Apim-Subscription-Key": apiKey,
+        "Content-Type": "application/pdf",
+      },
+      body: bytes,
+    })
+    if (!startRes.ok) {
+      const bodyText = await startRes.text().catch(() => "")
+      console.warn(`line_media_content_preview: Azure analyze start failed (${startRes.status}) ${bodyText.slice(0, 300)}`)
+      return ""
+    }
+
+    const operationLocation = String(startRes.headers.get("operation-location") ?? "").trim()
+    if (!operationLocation) {
+      console.warn("line_media_content_preview: Azure operation-location missing")
+      return ""
+    }
+
+    for (let attempt = 0; attempt < AZURE_POLL_MAX_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await sleepMs(AZURE_POLL_INTERVAL_MS)
+      const pollRes = await fetch(operationLocation, {
+        method: "GET",
+        headers: {
+          "Ocp-Apim-Subscription-Key": apiKey,
+        },
+      })
+      if (!pollRes.ok) {
+        const bodyText = await pollRes.text().catch(() => "")
+        console.warn(`line_media_content_preview: Azure poll failed (${pollRes.status}) ${bodyText.slice(0, 300)}`)
+        return ""
+      }
+      const payload = await pollRes.json().catch(() => null)
+      if (!isRecord(payload)) return ""
+      const status = String(payload.status ?? "").toLowerCase()
+      if (status === "running" || status === "notstarted") continue
+      if (status !== "succeeded") {
+        console.warn(`line_media_content_preview: Azure analyze status=${status}`)
+        return ""
+      }
+      const rawText = readAzureAnalyzeText(payload)
+      const normalized = normalizeExtractedText(rawText)
+      if (!normalized) return ""
+      setOcrCache(cacheKey, normalized)
+      return normalized
+    }
+    console.warn("line_media_content_preview: Azure analyze polling timeout")
+    return ""
+  } catch (error) {
+    console.error("line_media_content_preview: Azure OCR failed", error)
+    return ""
+  }
+}
+
 async function maybeExtractPdfTextWithOcrFallback(
   bytes: Uint8Array,
   originalFileName: string,
@@ -207,10 +309,29 @@ async function maybeExtractPdfTextWithOcrFallback(
   const current = normalizeExtractedText(extractedPdfText)
   if (current.length >= OCR_PDF_MIN_TRIGGER_CHARS) return current
   const mode = String(Deno.env.get("LINE_MEDIA_OCR_MODE") ?? "").trim().toLowerCase()
-  if (mode !== "ocr_space") return current
-  const ocrText = await tryExtractPdfTextViaOcrSpace(bytes, originalFileName)
-  if (!ocrText) return current
-  return ocrText
+  if (!mode) return current
+
+  if (mode === "ocr_space") {
+    const ocrText = await tryExtractPdfTextViaOcrSpace(bytes, originalFileName)
+    return ocrText || current
+  }
+  if (mode === "azure_docintel") {
+    const ocrText = await tryExtractPdfTextViaAzureDocIntel(bytes, originalFileName)
+    return ocrText || current
+  }
+  if (mode === "hybrid_size") {
+    const ocrSpaceMaxBytes = parsePositiveIntEnv(
+      Deno.env.get("LINE_MEDIA_OCR_SPACE_MAX_BYTES") ?? undefined,
+      OCR_SPACE_MAX_BYTES_DEFAULT,
+    )
+    if (bytes.length <= ocrSpaceMaxBytes) {
+      const smallText = await tryExtractPdfTextViaOcrSpace(bytes, originalFileName)
+      return smallText || current
+    }
+    const largeText = await tryExtractPdfTextViaAzureDocIntel(bytes, originalFileName)
+    return largeText || current
+  }
+  return current
 }
 
 /** Single-line preview safe for DB / LINE (max DB_PREVIEW_MAX_CHARS). */
