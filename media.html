@@ -909,6 +909,7 @@
       return src.slice(0, max).trimEnd() + '…';
     }
 
+    /** ルールは supabase/functions/_shared/line_media_file_purpose_infer.ts と同一に保つこと（LINE 返信の解析行にも使用）。 */
     function inferFilePurpose(fileName, mimeType, contentPreview) {
       const text = (String(fileName || '') + ' ' + String(contentPreview || '')).toLowerCase();
       if (!text.trim()) return '';

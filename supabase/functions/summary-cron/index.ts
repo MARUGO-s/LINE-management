@@ -12,6 +12,7 @@ type RoomRuntimeSetting = {
   delivery_hours: number[] | null
   is_enabled: boolean
   send_room_summary: boolean
+  receive_overall_summary_enabled: boolean
   calendar_tomorrow_reminder_enabled: boolean
   gmail_reservation_alert_enabled: boolean
   message_cleanup_timing: MessageCleanupTiming | null
@@ -171,7 +172,7 @@ Deno.serve(async (req) => {
     // Fetch per-room settings
     const { data: roomSettingsList, error: roomSettingsError } = await supabase
       .from('room_summary_settings')
-      .select('room_id, room_name, delivery_hours, is_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode')
+      .select('room_id, room_name, delivery_hours, is_enabled, send_room_summary, receive_overall_summary_enabled, calendar_tomorrow_reminder_enabled, gmail_reservation_alert_enabled, message_cleanup_timing, last_delivery_summary_mode')
 
     if (roomSettingsError) {
       console.error(`Error fetching room settings: ${roomSettingsError.message}`)
@@ -185,6 +186,7 @@ Deno.serve(async (req) => {
           delivery_hours: rs.delivery_hours,
           is_enabled: rs.is_enabled,
           send_room_summary: rs.send_room_summary === true,
+          receive_overall_summary_enabled: rs.receive_overall_summary_enabled === true,
           calendar_tomorrow_reminder_enabled: rs.calendar_tomorrow_reminder_enabled === true,
           gmail_reservation_alert_enabled: rs.gmail_reservation_alert_enabled === true,
           message_cleanup_timing: normalizeNullableMessageCleanupTiming(rs.message_cleanup_timing),
@@ -354,32 +356,12 @@ Deno.serve(async (req) => {
       })
     }
 
-    if (shouldSendOverall && !overallRoomId) {
-      await writeDeliveryLog(supabase, {
-        jst_hour: jstHour,
-        status: 'line_config_missing',
-        reason: 'LINE_OVERALL_ROOM_ID is missing while overall delivery is scheduled.',
-        should_send_overall: true,
-        rooms_targeted: roomsToSummarize.length,
-        messages_in_queue: queueCount,
-        messages_marked_processed: 0,
-        line_send_attempted: false,
-        line_send_success: false,
-        target_room_id: null,
-        details: {
-          room_ids: roomsToSummarize,
-          room_delivery_targets: roomDeliveryTargets,
-          force_run: forceRun,
-          message_cleanup_timing: messageCleanupTiming,
-          last_delivery_summary_mode: lastDeliverySummaryMode,
-          using_daily_rollup_scope: shouldUseOverallDailyRollup,
-        },
-      })
-
-      return new Response(JSON.stringify({ error: "LINE delivery configuration is missing." }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      })
+    const overallRecipientRoomIds = collectOverallSummaryRecipientRoomIds(overallRoomId, roomSettingsMap)
+    const willDeliverOverall = shouldSendOverall && overallRecipientRoomIds.length > 0
+    if (shouldSendOverall && overallRecipientRoomIds.length === 0) {
+      console.warn(
+        '[summary-cron] Overall delivery hour matched but no recipients (LINE_OVERALL_ROOM_ID empty and no rooms with receive_overall_summary_enabled). Skipping consolidated overall send.',
+      )
     }
 
     if (!groq) {
@@ -475,11 +457,12 @@ Deno.serve(async (req) => {
     let lineSendAttempted = false
     let lineSendSuccess = true
     let lineHttpStatus: number | null = null
+    let overallDeliverySucceeded = false
     const successfulRoomDeliveries: string[] = []
     const failedRoomDeliveries: Array<{ room_id: string; status: number | null; error: string }> = []
 
-    // 4. Deliver to the overall room when scheduled
-    if (shouldSendOverall) {
+    // 4. Build consolidated overall summary and deliver to LINE_OVERALL_ROOM_ID + per-room subscribers
+    if (willDeliverOverall) {
       const summariesForOverall = roomsToSummarize.filter((roomId) => roomSummaries[roomId])
       if (summariesForOverall.length === 0) {
         await writeDeliveryLog(supabase, {
@@ -492,10 +475,11 @@ Deno.serve(async (req) => {
           messages_marked_processed: 0,
           line_send_attempted: false,
           line_send_success: false,
-          target_room_id: overallRoomId || null,
+          target_room_id: overallRecipientRoomIds[0] || null,
           details: {
             room_ids: roomsToSummarize,
             room_delivery_targets: roomDeliveryTargets,
+            overall_recipient_room_ids: overallRecipientRoomIds,
             force_run: forceRun,
             message_cleanup_timing: messageCleanupTiming,
             last_delivery_summary_mode: lastDeliverySummaryMode,
@@ -535,30 +519,37 @@ Deno.serve(async (req) => {
 
       const overallSummary = overallResponse.choices[0].message?.content || "全体要約を生成できませんでした。"
       const overallTitle = shouldUseOverallDailyRollup ? '【全体 1日まとめレポート】' : '【全体 定期要約レポート】'
-      const overallSendResult = await sendLineMessage(
-        overallRoomId,
-        `${overallTitle}\n\n${overallSummary}`,
-        lineAccessToken,
-      )
-      lineSendAttempted = true
-      if (overallSendResult.status != null) lineHttpStatus = overallSendResult.status
+      const overallBody = `${overallTitle}\n\n${overallSummary}`
+      let anyOverallDeliveryOk = false
+      const overallDeliveryErrors: string[] = []
+      for (const destRoomId of overallRecipientRoomIds) {
+        const overallSendResult = await sendLineMessage(destRoomId, overallBody, lineAccessToken)
+        lineSendAttempted = true
+        if (overallSendResult.status != null) lineHttpStatus = overallSendResult.status
+        if (overallSendResult.ok) {
+          anyOverallDeliveryOk = true
+        } else {
+          lineSendSuccess = false
+          overallDeliveryErrors.push(`${destRoomId}: ${overallSendResult.error}`)
+        }
+      }
 
-      if (!overallSendResult.ok) {
-        lineSendSuccess = false
+      if (!anyOverallDeliveryOk) {
         await writeDeliveryLog(supabase, {
           jst_hour: jstHour,
           status: 'line_send_failed',
-          reason: overallSendResult.error,
+          reason: overallDeliveryErrors.join(' | ') || 'All overall summary deliveries failed.',
           should_send_overall: true,
           rooms_targeted: roomsToSummarize.length,
           messages_in_queue: queueCount,
           messages_marked_processed: 0,
           line_send_attempted: true,
           line_send_success: false,
-          line_http_status: overallSendResult.status ?? null,
-          target_room_id: overallRoomId,
+          line_http_status: lineHttpStatus,
+          target_room_id: overallRecipientRoomIds[0] || null,
           details: {
             scope: 'overall',
+            overall_recipient_room_ids: overallRecipientRoomIds,
             room_ids: roomsToSummarize,
             room_delivery_targets: roomDeliveryTargets,
             force_run: forceRun,
@@ -570,12 +561,13 @@ Deno.serve(async (req) => {
 
         return new Response(JSON.stringify({
           error: "LINE message delivery failed.",
-          detail: overallSendResult.error,
+          detail: overallDeliveryErrors.join(' | '),
         }), {
           status: 502,
           headers: { "Content-Type": "application/json" }
         })
       }
+      overallDeliverySucceeded = true
     }
 
     // 5. Deliver room summaries to each room (opt-in only)
@@ -635,8 +627,16 @@ Deno.serve(async (req) => {
       })
     }
 
-    const deliveredRoomIds = shouldSendOverall ? roomsToSummarize : successfulRoomDeliveries
-    const targetRoomId = (shouldSendOverall ? overallRoomId : roomDeliveryTargets[0]) || null
+    const deliveredRoomIdSet = new Set<string>(successfulRoomDeliveries)
+    if (overallDeliverySucceeded) {
+      for (const roomId of roomsToSummarize) deliveredRoomIdSet.add(roomId)
+    }
+    const deliveredRoomIds = Array.from(deliveredRoomIdSet)
+    const targetRoomId =
+      (overallDeliverySucceeded ? overallRecipientRoomIds[0] : null) ||
+      overallRoomId ||
+      roomDeliveryTargets[0] ||
+      null
 
     const markProcessedMessageIds = new Set<string>()
 
@@ -714,6 +714,7 @@ Deno.serve(async (req) => {
       details: {
         room_ids: roomsToSummarize,
         room_delivery_targets: roomDeliveryTargets,
+        overall_recipient_room_ids: overallDeliverySucceeded ? overallRecipientRoomIds : [],
         room_delivery_success: successfulRoomDeliveries,
         room_delivery_failed: failedRoomDeliveries,
         force_run: forceRun,
@@ -730,7 +731,7 @@ Deno.serve(async (req) => {
       success: true,
       delivered: true,
       roomsProcessed: deliveredRoomIds.length,
-      overallDelivered: shouldSendOverall,
+      overallDelivered: overallDeliverySucceeded,
       messageUpdateCount: affectedCount,
       cleanupAction: cleanupAction,
       roomDelivery: {
@@ -1829,6 +1830,22 @@ function normalizeOptionalRoomName(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+/** LINE_OVERALL_ROOM_ID ＋ ルーム設定で「全体要約をこのルームに配信」が ON の room_id（重複なし）。 */
+function collectOverallSummaryRecipientRoomIds(
+  overallRoomIdRaw: string,
+  roomSettingsMap: Map<string, RoomRuntimeSetting>,
+): string[] {
+  const out: string[] = []
+  const trimmed = String(overallRoomIdRaw ?? '').trim()
+  if (trimmed) out.push(trimmed)
+  for (const [roomId, rs] of roomSettingsMap.entries()) {
+    if (!rs.receive_overall_summary_enabled) continue
+    if (rs.is_enabled === false) continue
+    if (!out.includes(roomId)) out.push(roomId)
+  }
+  return out
 }
 
 function getRoomDisplayName(roomId: string, setting: RoomRuntimeSetting | undefined): string {

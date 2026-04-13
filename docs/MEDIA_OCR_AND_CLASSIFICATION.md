@@ -5,7 +5,7 @@
 This project now supports low-cost, rule-first media analysis with selective OCR fallback:
 
 - XLSX extraction reliability improvements (namespace and regex fallback)
-- Rule-based file-purpose inference in `media.html`
+- Rule-based file-purpose inference in `media.html` (function `inferFilePurpose`; **keep in sync** with `supabase/functions/_shared/line_media_file_purpose_infer.ts` used for LINE replies)
   - inventory classification (wine / ingredients / packaging / consumables)
 - Selective PDF OCR fallback in `line-webhook` shared extractor
   - OCR is called only when normal PDF text extraction is too short
@@ -38,6 +38,8 @@ In short, OCR/AI are fallback paths, not the default path.
 
 During analysis display (`media.html`), extracted text is categorized by keyword scoring.
 This means the system is not just showing raw text; it also classifies likely document type.
+
+The same scoring rules are compiled into **`line_media_file_purpose_infer.ts`** for **LINE bot output**: when listing saved media (search / `メディアURL`), the bot shows **only this short estimated label** for **file** rows, not the long extracted preview (search still matches against the full `content_preview` in the database).
 
 Current main categories:
 

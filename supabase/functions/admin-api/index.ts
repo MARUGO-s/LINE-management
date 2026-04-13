@@ -426,9 +426,12 @@ Deno.serve(async (req) => {
           is_enabled: payload.is_enabled,
           bot_reply_enabled: payload.bot_reply_enabled,
           send_room_summary: payload.send_room_summary,
+          receive_overall_summary_enabled: payload.receive_overall_summary_enabled,
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
           calendar_ai_auto_create_enabled: payload.calendar_ai_auto_create_enabled,
           calendar_silent_auto_register_enabled: payload.calendar_silent_auto_register_enabled,
+          calendar_low_confidence_confirm_reply_enabled: payload.calendar_low_confidence_confirm_reply_enabled,
+          calendar_registration_reply_enabled: payload.calendar_registration_reply_enabled,
           message_search_enabled: payload.message_search_enabled,
           message_search_library_enabled: payload.message_search_library_enabled,
           media_file_access_enabled: payload.media_file_access_enabled,
@@ -439,7 +442,7 @@ Deno.serve(async (req) => {
           last_delivery_summary_mode: payload.last_delivery_summary_mode,
           updated_at: new Date().toISOString(),
         }, { onConflict: "room_id" })
-        .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, calendar_silent_auto_register_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+        .select("*")
         .single()
 
       if (error) {
@@ -593,6 +596,23 @@ Deno.serve(async (req) => {
         throw { status: 500, message: `Failed to delete room settings: ${roomSettingsDeleteError.message}` } satisfies AppError
       }
 
+      // get_room_overview は line_room_names も room 一覧に含める。ここを消さないとメッセージ0でも行が残る。
+      const { data: lineRoomNamesRow, error: lineRoomNamesInspectError } = await supabase
+        .from("line_room_names")
+        .select("room_id")
+        .eq("room_id", roomId)
+        .maybeSingle()
+      if (lineRoomNamesInspectError) {
+        throw { status: 500, message: `Failed to inspect line_room_names: ${lineRoomNamesInspectError.message}` } satisfies AppError
+      }
+      const { error: lineRoomNamesDeleteError } = await supabase
+        .from("line_room_names")
+        .delete()
+        .eq("room_id", roomId)
+      if (lineRoomNamesDeleteError) {
+        throw { status: 500, message: `Failed to delete line_room_names: ${lineRoomNamesDeleteError.message}` } satisfies AppError
+      }
+
       return json({
         success: true,
         room_id: roomId,
@@ -603,6 +623,7 @@ Deno.serve(async (req) => {
           document_files: documentCleanup.deletedFiles,
           document_metadata: documentCleanup.deletedMetadataRows,
           room_settings: roomSettingsRow ? 1 : 0,
+          line_room_names: lineRoomNamesRow ? 1 : 0,
         },
       }, 200)
     }
@@ -740,7 +761,7 @@ async function fetchState(
   const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState, userPermissionsRes] = await Promise.all([
     supabase
       .from("room_summary_settings")
-      .select("room_id, room_name, delivery_hours, is_enabled, bot_reply_enabled, send_room_summary, calendar_tomorrow_reminder_enabled, calendar_ai_auto_create_enabled, calendar_silent_auto_register_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, gmail_reservation_alert_enabled, room_sort_order, message_cleanup_timing, last_delivery_summary_mode, updated_at")
+      .select("*")
       .order("updated_at", { ascending: false }),
     supabase.rpc("get_room_overview"),
     supabase
@@ -3536,9 +3557,12 @@ function buildRoomSettingsPayload(body: unknown): {
   is_enabled: boolean
   bot_reply_enabled: boolean
   send_room_summary: boolean
+  receive_overall_summary_enabled: boolean
   calendar_tomorrow_reminder_enabled: boolean
   calendar_ai_auto_create_enabled: boolean
   calendar_silent_auto_register_enabled: boolean
+  calendar_low_confidence_confirm_reply_enabled: boolean
+  calendar_registration_reply_enabled: boolean
   message_search_enabled: boolean
   message_search_library_enabled: boolean
   media_file_access_enabled: boolean
@@ -3573,6 +3597,19 @@ function buildRoomSettingsPayload(body: unknown): {
     throw { status: 400, message: "send_room_summary must be boolean." } satisfies AppError
   }
 
+  const receiveOverallRaw = body.receive_overall_summary_enabled
+  if (receiveOverallRaw != null && typeof receiveOverallRaw !== "boolean") {
+    throw { status: 400, message: "receive_overall_summary_enabled must be boolean when provided." } satisfies AppError
+  }
+  let receiveOverallSummaryEnabled = receiveOverallRaw === true
+  let sendRoomSummaryFinal = sendRoomSummary
+  if (receiveOverallSummaryEnabled) {
+    sendRoomSummaryFinal = false
+  }
+  if (sendRoomSummaryFinal) {
+    receiveOverallSummaryEnabled = false
+  }
+
   const roomTomorrowReminderEnabledRaw = body.calendar_tomorrow_reminder_enabled
   if (roomTomorrowReminderEnabledRaw != null && typeof roomTomorrowReminderEnabledRaw !== "boolean") {
     throw { status: 400, message: "calendar_tomorrow_reminder_enabled must be boolean when provided." } satisfies AppError
@@ -3590,6 +3627,18 @@ function buildRoomSettingsPayload(body: unknown): {
     throw { status: 400, message: "calendar_silent_auto_register_enabled must be boolean when provided." } satisfies AppError
   }
   const roomSilentAutoRegisterEnabled = roomSilentAutoRegisterEnabledRaw !== false
+
+  const roomLowConfidenceConfirmRaw = body.calendar_low_confidence_confirm_reply_enabled
+  if (roomLowConfidenceConfirmRaw != null && typeof roomLowConfidenceConfirmRaw !== "boolean") {
+    throw { status: 400, message: "calendar_low_confidence_confirm_reply_enabled must be boolean when provided." } satisfies AppError
+  }
+  const roomLowConfidenceConfirmReplyEnabled = roomLowConfidenceConfirmRaw === true
+
+  const roomRegistrationReplyRaw = body.calendar_registration_reply_enabled
+  if (roomRegistrationReplyRaw != null && typeof roomRegistrationReplyRaw !== "boolean") {
+    throw { status: 400, message: "calendar_registration_reply_enabled must be boolean when provided." } satisfies AppError
+  }
+  const roomRegistrationReplyEnabled = roomRegistrationReplyRaw === true
 
   const messageSearchEnabledRaw = body.message_search_enabled
   if (messageSearchEnabledRaw != null && typeof messageSearchEnabledRaw !== "boolean") {
@@ -3644,10 +3693,13 @@ function buildRoomSettingsPayload(body: unknown): {
     room_name: roomNameRaw || null,
     is_enabled: isEnabled,
     bot_reply_enabled: botReplyEnabled,
-    send_room_summary: sendRoomSummary,
+    send_room_summary: sendRoomSummaryFinal,
+    receive_overall_summary_enabled: receiveOverallSummaryEnabled,
     calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,
     calendar_ai_auto_create_enabled: roomAiAutoCreateEnabled,
     calendar_silent_auto_register_enabled: roomSilentAutoRegisterEnabled,
+    calendar_low_confidence_confirm_reply_enabled: roomLowConfidenceConfirmReplyEnabled,
+    calendar_registration_reply_enabled: roomRegistrationReplyEnabled,
     message_search_enabled: messageSearchEnabled,
     message_search_library_enabled: messageSearchLibraryEnabled,
     media_file_access_enabled: mediaFileAccessEnabled,

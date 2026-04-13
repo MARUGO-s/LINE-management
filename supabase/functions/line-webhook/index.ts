@@ -4,6 +4,7 @@ import {
   extractLineMediaFileRawText,
   isLineMediaPdf,
 } from '../_shared/line_media_content_preview.ts'
+import { inferLineMediaFilePurposeLabel } from '../_shared/line_media_file_purpose_infer.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
 import { MARUGO_GROUP_STORE_OPTIONS } from '../_shared/marugo_group_stores.ts'
 
@@ -217,6 +218,8 @@ type MessageSearchMediaHit = {
   room_id: string
   original_file_name: string
   content_preview: string
+  media_type: string
+  mime_type: string | null
   created_at: string
   storage_bucket: string
   storage_path: string
@@ -251,6 +254,10 @@ type RoomReplyPolicy = {
   mediaFileAccessEnabled: boolean
   calendarAiAutoCreateEnabled: boolean
   calendarSilentAutoRegisterEnabled: boolean
+  /** 無返信自動登録ON時、低確度は確認返信（pending）に切り替える */
+  calendarLowConfidenceConfirmReplyEnabled: boolean
+  /** 無返信自動登録で高確度登録成功後、登録内容を LINE で返信する（bot_reply_enabled 併用） */
+  calendarRegistrationReplyEnabled: boolean
   settingsSource: 'row' | 'fallback'
 }
 
@@ -714,9 +721,7 @@ Deno.serve(async (req) => {
             }
             continue
           }
-          if (!roomCanReply) {
-            continue
-          }
+          // 無返信自動登録ONでもメディア検索はユーザーが明示した対話のため返信する
           if (!canUseMedia) {
             const denyReply = await replyLineMessage(
               replyToken,
@@ -756,7 +761,6 @@ Deno.serve(async (req) => {
             if (!replyToken) console.error('Missing replyToken for media search pending.')
             continue
           }
-          if (!roomCanReply) continue
           const pendingReply = await replyLineMessage(replyToken, mediaSearchPendingReply, lineAccessToken)
           if (!pendingReply.ok) {
             console.error('Failed to reply media search pending:', pendingReply.error)
@@ -777,7 +781,6 @@ Deno.serve(async (req) => {
             if (!replyToken) console.error('Missing replyToken for casual media lookup.')
             continue
           }
-          if (!roomCanReply) continue
           const casualReplyResult = await replyLineMessage(replyToken, casualMediaLookupReply, lineAccessToken)
           if (!casualReplyResult.ok) {
             console.error('Failed to reply casual media lookup:', casualReplyResult.error)
@@ -827,7 +830,7 @@ Deno.serve(async (req) => {
               calendarSourceMeta,
             )
             if (confirmationReply) {
-              if (!roomCanReply) {
+              if (!roomCanReply && !wantLowConfidenceInteractiveCalendarConfirm(roomReplyPolicy)) {
                 continue
               }
               if (!lineAccessToken) {
@@ -978,22 +981,26 @@ Deno.serve(async (req) => {
                 if (isRoomInteractiveReplyEnabled(roomReplyPolicy)) {
                   const confirmPrompt = buildPrimaryIntentConfirmationPrompt(primaryIntent)
                   if (confirmPrompt) {
-                    if (!roomCanReply) {
+                    // 無返信自動登録ONでは shouldSendRoomReply が false になり、ここで continue すると
+                    // 以降のカレンダーAI・単発予告フォールバックまで届かない。確認は送れないが処理は続行する。
+                    if (!roomCanReply && !roomReplyPolicy.calendarSilentAutoRegisterEnabled) {
                       continue
                     }
-                    if (!lineAccessToken) {
-                      console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI primary-intent confirmation.')
+                    if (roomCanReply) {
+                      if (!lineAccessToken) {
+                        console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI primary-intent confirmation.')
+                        continue
+                      }
+                      if (!replyToken) {
+                        console.error('Missing replyToken for AI primary-intent confirmation.')
+                        continue
+                      }
+                      const replyResult = await replyLineMessage(replyToken, confirmPrompt, lineAccessToken)
+                      if (!replyResult.ok) {
+                        console.error('Failed to reply AI primary-intent confirmation:', replyResult.error)
+                      }
                       continue
                     }
-                    if (!replyToken) {
-                      console.error('Missing replyToken for AI primary-intent confirmation.')
-                      continue
-                    }
-                    const replyResult = await replyLineMessage(replyToken, confirmPrompt, lineAccessToken)
-                    if (!replyResult.ok) {
-                      console.error('Failed to reply AI primary-intent confirmation:', replyResult.error)
-                    }
-                    continue
                   }
                 }
               }
@@ -1043,74 +1050,77 @@ Deno.serve(async (req) => {
           }
 
           if (messageSearchCommand || messageSearchError) {
-            if (!roomCanReply) {
+            // 無返信自動登録ONでは roomCanReply が false のため、ここで continue するとカレンダー登録まで届かない。
+            // 会話検索は返信なしでは実行できないのでスキップし、後段のカレンダーAIへ任せる。
+            if (!roomCanReply && !roomReplyPolicy.calendarSilentAutoRegisterEnabled) {
               continue
             }
+            if (roomCanReply) {
+              const currentRoomExcludedForCurrentScope = !!messageSearchCommand &&
+                messageSearchCommand.scope !== 'all_rooms' &&
+                isCurrentRoomExcludedForMessageSearch
+              if (!canMessageSearch || currentRoomExcludedForCurrentScope) {
+                if (!lineAccessToken) {
+                  console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search permission status.')
+                  continue
+                }
+                if (!replyToken) {
+                  console.error('Missing replyToken for message search permission status.')
+                  continue
+                }
+                const permissionReasons: string[] = []
+                if (!roomReplyPolicy.messageSearchEnabled) permissionReasons.push('ルーム設定: 会話検索OFF')
+                if (!lineUserPermission.canMessageSearch) permissionReasons.push('ユーザー設定: 会話検索OFF')
+                if (!lineUserPermission.canLibrarySearch) permissionReasons.push('ユーザー設定: 資料ライブラリ検索OFF')
+                const permissionReply = currentRoomExcludedForCurrentScope
+                  ? 'このルームは会話検索の対象に含まれていません。管理画面のユーザー権限で、このルームにチェックを入れて対象にしてください。'
+                  : messageSearchCommand && canLibrarySearch
+                  ? await buildLibrarySearchPromptWhenMessageSearchDisabled(
+                    supabase,
+                    roomId,
+                    userId,
+                    messageSearchCommand,
+                    messageRetentionDays,
+                  )
+                  : (messageSearchError || [
+                    'この質問は、現在このルームで権限が付与されていないため実行できません。',
+                    ...(permissionReasons.length > 0 ? [`判定理由: ${permissionReasons.join(' / ')}`] : []),
+                  ].join('\n'))
+                const permissionReplyResult = await replyLineMessage(replyToken, permissionReply, lineAccessToken)
+                if (!permissionReplyResult.ok) {
+                  console.error('Failed to reply message search permission status:', permissionReplyResult.error)
+                }
+                continue
+              }
 
-            const currentRoomExcludedForCurrentScope = !!messageSearchCommand &&
-              messageSearchCommand.scope !== 'all_rooms' &&
-              isCurrentRoomExcludedForMessageSearch
-            if (!canMessageSearch || currentRoomExcludedForCurrentScope) {
+              const replyMessages = await buildMessageSearchReply(
+                messageSearchCommand,
+                messageSearchError,
+                supabase,
+                roomId,
+                userId,
+                canLibrarySearch,
+                messageRetentionDays,
+                lineUserPermission.excludedMessageSearchRoomIds,
+                groqApiKey,
+                canUseMedia,
+                text,
+              )
+
               if (!lineAccessToken) {
-                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search permission status.')
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search.')
                 continue
               }
               if (!replyToken) {
-                console.error('Missing replyToken for message search permission status.')
+                console.error('Missing replyToken for message search.')
                 continue
               }
-              const permissionReasons: string[] = []
-              if (!roomReplyPolicy.messageSearchEnabled) permissionReasons.push('ルーム設定: 会話検索OFF')
-              if (!lineUserPermission.canMessageSearch) permissionReasons.push('ユーザー設定: 会話検索OFF')
-              if (!lineUserPermission.canLibrarySearch) permissionReasons.push('ユーザー設定: 資料ライブラリ検索OFF')
-              const permissionReply = currentRoomExcludedForCurrentScope
-                ? 'このルームは会話検索の対象に含まれていません。管理画面のユーザー権限で、このルームにチェックを入れて対象にしてください。'
-                : messageSearchCommand && canLibrarySearch
-                ? await buildLibrarySearchPromptWhenMessageSearchDisabled(
-                  supabase,
-                  roomId,
-                  userId,
-                  messageSearchCommand,
-                  messageRetentionDays,
-                )
-                : (messageSearchError || [
-                  'この質問は、現在このルームで権限が付与されていないため実行できません。',
-                  ...(permissionReasons.length > 0 ? [`判定理由: ${permissionReasons.join(' / ')}`] : []),
-                ].join('\n'))
-              const permissionReplyResult = await replyLineMessage(replyToken, permissionReply, lineAccessToken)
-              if (!permissionReplyResult.ok) {
-                console.error('Failed to reply message search permission status:', permissionReplyResult.error)
+              const replyResult = await replyLineMessage(replyToken, replyMessages, lineAccessToken)
+              if (!replyResult.ok) {
+                console.error('Failed to reply message search:', replyResult.error)
               }
               continue
             }
-
-            const replyMessages = await buildMessageSearchReply(
-              messageSearchCommand,
-              messageSearchError,
-              supabase,
-              roomId,
-              userId,
-              canLibrarySearch,
-              messageRetentionDays,
-              lineUserPermission.excludedMessageSearchRoomIds,
-              groqApiKey,
-              canUseMedia,
-              text,
-            )
-
-            if (!lineAccessToken) {
-              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search.')
-              continue
-            }
-            if (!replyToken) {
-              console.error('Missing replyToken for message search.')
-              continue
-            }
-            const replyResult = await replyLineMessage(replyToken, replyMessages, lineAccessToken)
-            if (!replyResult.ok) {
-              console.error('Failed to reply message search:', replyResult.error)
-            }
-            continue
           }
 
           const commandParse = parseCalendarCommand(text)
@@ -1266,12 +1276,19 @@ Deno.serve(async (req) => {
                 isHighConfidenceAiCalendarIntent(normalizedAiIntent, createMinConfidence) &&
                 resolvedDetails?.titleSource !== 'default' &&
                 !isLikelyMultiEvent
+              const wantLowConfidenceInteractiveConfirm =
+                wantLowConfidenceInteractiveCalendarConfirm(roomReplyPolicy)
+              const allowSilentProvisionalLowConfidence = !wantLowConfidenceInteractiveConfirm
               const shouldSilentAutoCreateProvisional =
                 canCalendarCreate &&
                 roomReplyPolicy.calendarSilentAutoRegisterEnabled &&
+                allowSilentProvisionalLowConfidence &&
                 normalizedAiIntent &&
                 !shouldSilentAutoCreateHighConfidence &&
                 isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)
+              const canReplyForCalendarPendingConfirmation =
+                roomCanReply ||
+                wantLowConfidenceInteractiveConfirm
               const shouldAutoCreateWithoutReply =
                 canCalendarCreate &&
                 !roomReplyPolicy.calendarSilentAutoRegisterEnabled &&
@@ -1279,25 +1296,10 @@ Deno.serve(async (req) => {
                 normalizedAiIntent &&
                 isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)
 
-              if (canAutoCreate && normalizedAiIntent) {
-                const reply = await createCalendarEventReply(
-                  {
-                    kind: 'create',
-                    date: normalizedAiIntent.date,
-                    time: normalizedAiIntent.time,
-                    durationMin: normalizedAiIntent.durationMin,
-                    title: normalizedAiIntent.title,
-                    ...(normalizedAiIntent.location ? { location: normalizedAiIntent.location } : {}),
-                  },
-                  calendarEnvState.env,
-                  roomId,
-                  userId,
-                  calendarSourceMeta,
-                )
-                if (roomCanReply) {
-                  aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${reply}`
-                }
-              } else if (shouldSilentAutoCreateHighConfidence && normalizedAiIntent) {
+              // 無返信自動登録ONのとき shouldSendRoomReply が false になり canAutoCreate 分岐では
+              // createCalendarEventReply 後に返信文が付かない。高確度サイレント＋登録内容返信へ届かないため、
+              // shouldSilentAutoCreateHighConfidence を先に評価する。
+              if (shouldSilentAutoCreateHighConfidence && normalizedAiIntent) {
                 const silentCommand: CalendarCreateCommand = {
                   kind: 'create',
                   date: normalizedAiIntent.date,
@@ -1316,6 +1318,38 @@ Deno.serve(async (req) => {
                 )
                 if (!silentResult.ok) {
                   console.error('Silent high-confidence auto-create failed:', silentResult.error)
+                } else if (
+                  silentResult.ok &&
+                  roomReplyPolicy.calendarRegistrationReplyEnabled &&
+                  roomReplyPolicy.botReplyEnabled &&
+                  roomReplyPolicy.isEnabled
+                ) {
+                  const detail = buildCalendarCreateAckTextFromResult(
+                    silentCommand,
+                    silentResult,
+                    calendarEnvState.env,
+                    '予定を登録しました。',
+                  )
+                  aiAutoCreateReply =
+                    `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${detail}`
+                }
+              } else if (canAutoCreate && normalizedAiIntent) {
+                const reply = await createCalendarEventReply(
+                  {
+                    kind: 'create',
+                    date: normalizedAiIntent.date,
+                    time: normalizedAiIntent.time,
+                    durationMin: normalizedAiIntent.durationMin,
+                    title: normalizedAiIntent.title,
+                    ...(normalizedAiIntent.location ? { location: normalizedAiIntent.location } : {}),
+                  },
+                  calendarEnvState.env,
+                  roomId,
+                  userId,
+                  calendarSourceMeta,
+                )
+                if (roomCanReply) {
+                  aiAutoCreateReply = `AI判断で予定を自動登録しました（信頼度 ${Math.round(normalizedAiIntent.confidence * 100)}%）。\n${reply}`
                 }
               } else if (shouldSilentAutoCreateProvisional && normalizedAiIntent) {
                 const silentCommand: CalendarCreateCommand = {
@@ -1357,7 +1391,7 @@ Deno.serve(async (req) => {
                 if (!silentResult.ok) {
                   console.error('Silent auto-create failed:', silentResult.error)
                 }
-              } else if (roomCanReply && canCalendarCreate && normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)) {
+              } else if (canReplyForCalendarPendingConfirmation && canCalendarCreate && normalizedAiIntent && isConfirmableAiCalendarIntent(normalizedAiIntent, createConfirmMinConfidence)) {
                 const pendingSaved = await savePendingCalendarConfirmation(
                   supabase,
                   roomId,
@@ -1367,11 +1401,11 @@ Deno.serve(async (req) => {
                 )
                 if (pendingSaved) {
                   const basePrompt = buildPendingCalendarConfirmationPrompt(normalizedAiIntent, calendarEnvState.env.timezone)
-                  if (roomCanReply) {
+                  if (canReplyForCalendarPendingConfirmation) {
                     aiAutoCreateReply = basePrompt
                   }
                 } else {
-                  if (roomCanReply) {
+                  if (canReplyForCalendarPendingConfirmation) {
                     aiAutoCreateReply = '予定候補を解釈しましたが、確認待ちの保存に失敗しました。もう一度送ってください。'
                   }
                 }
@@ -1417,6 +1451,11 @@ Deno.serve(async (req) => {
           console.log(`Saved message from ${roomId}: ${content.substring(0, 30)}...`)
           const savedMessageId = String(savedMessage?.id ?? '').trim()
           if (savedMessageId && shouldStoreMediaFile) {
+            // HACCP Excel 等のファイルからのカレンダー登録は、会話ベースの calendar_ai_auto_create とは別。
+            // 1:1 は buildDirectUserRoomPolicy で calendarAiAutoCreate が常に true のため env が渡るが、
+            // グループで「会話からの自動登録」OFF だと env が null になり解析が走らないのを防ぐ。
+            const calendarEnvForFileMedia =
+              lineUserPermission.canCalendarCreate && calendarEnvState.ok ? calendarEnvState.env : null
             const mediaSaveReply = await trySaveLineMediaContent(
               supabase,
               lineAccessToken,
@@ -1427,12 +1466,12 @@ Deno.serve(async (req) => {
               userId,
               senderDisplayName,
               mediaUploadMaxBytes,
-              (lineUserPermission.canCalendarCreate && roomReplyPolicy.calendarAiAutoCreateEnabled && calendarEnvState.ok)
-                ? calendarEnvState.env
-                : null,
+              calendarEnvForFileMedia,
               calendarSourceMeta,
             )
-            if (mediaSaveReply && !aiAutoCreateReply && roomCanReply) {
+            // 無返信自動登録ONでは roomCanReply が false になるが、ファイル（HACCP Excel 等）の
+            // 解析結果・確認プロンプトは返信必須のため roomCanReply に依存しない。
+            if (mediaSaveReply && !aiAutoCreateReply) {
               aiAutoCreateReply = mediaSaveReply
             }
           }
@@ -1760,7 +1799,7 @@ async function buildSavedMediaUrlReply(
   const { data, error } = await supabase
     .from('line_message_media')
     .select(
-      'room_id, line_message_id, storage_bucket, storage_path, original_file_name, media_type, content_preview, created_at',
+      'room_id, line_message_id, storage_bucket, storage_path, original_file_name, media_type, mime_type, content_preview, created_at',
     )
     .order('created_at', { ascending: false })
     .limit(limit)
@@ -1804,13 +1843,14 @@ async function buildSavedMediaUrlReply(
     const roomLabel = roomLabelMap.get(rid) ?? rid.slice(0, 12)
     const titlePrefix = `${i + 1}. [${roomLabel}] `
     const previewRaw = String((row as Record<string, unknown>).content_preview ?? '').trim()
-    const previewShort = previewRaw
-      ? previewRaw.replace(/\s+/g, ' ').length > 140
-        ? `${previewRaw.replace(/\s+/g, ' ').slice(0, 139).trimEnd()}…`
-        : previewRaw.replace(/\s+/g, ' ')
-      : ''
+    const previewShort = lineReplyMediaAnalysisCaption(
+      displayName,
+      row.mime_type == null ? null : String(row.mime_type).trim(),
+      resolveStoredMediaType(row),
+      previewRaw,
+    )
     const label = previewShort
-      ? `${titlePrefix}${displayName}\n   内容: ${previewShort}`
+      ? `${titlePrefix}${displayName}\n   解析: ${previewShort}`
       : `${titlePrefix}${displayName}`
     if (!url) {
       chunks.push(`${label}\n（URL の作成に失敗しました）`)
@@ -2286,6 +2326,38 @@ function clipMediaPreview(text: string, max = 42): string {
   return `${normalized.slice(0, max - 1).trimEnd()}…`
 }
 
+function resolveStoredMediaType(row: Record<string, unknown>): string {
+  const raw = String(row.media_type ?? '').trim().toLowerCase()
+  if (raw === 'image' || raw === 'video' || raw === 'audio' || raw === 'file') return raw
+  const mime = String(row.mime_type ?? '').toLowerCase()
+  if (mime.startsWith('image/')) return 'image'
+  if (mime.startsWith('video/')) return 'video'
+  if (mime.startsWith('audio/')) return 'audio'
+  return 'file'
+}
+
+/** ファイルは raw 抽出ではなく推定ラベルのみ。画像は Groq 短文をそのまま短く。 */
+function lineReplyMediaAnalysisCaption(
+  originalFileName: string,
+  mimeType: string | null | undefined,
+  mediaType: string | null | undefined,
+  contentPreview: string,
+): string {
+  const mt = String(mediaType ?? '').trim().toLowerCase()
+  const prev = String(contentPreview ?? '').trim()
+  if (mt === 'file') {
+    const inferred = inferLineMediaFilePurposeLabel(
+      String(originalFileName ?? ''),
+      String(mimeType ?? ''),
+      prev,
+    )
+    return inferred ? clipMediaPreview(inferred, 200) : ''
+  }
+  if (!prev) return ''
+  const max = mt === 'image' ? 100 : 80
+  return clipMediaPreview(prev, max)
+}
+
 function buildMediaSearchPeriodPrompt(): string {
   return [
     '保存メディア検索を開始します。まず期間を選んで返信してください。',
@@ -2303,14 +2375,19 @@ function buildMediaSearchCategoryPrompt(periodMonths: MediaSearchPeriodMonths): 
     '6) 請求支払  7) 売上予実  8) 発注納品  9) 衛生HACCP  10) マニュアル',
     '例: 3  または  シフト',
     '※ 番号でもキーワードでもOKです。',
-    '絞り込みは「キー:語句」または語句だけ（ファイル名・画像解析テキスト）。',
+    '絞り込みは「キー:語句」または語句だけ（ファイル名・ファイル内の抽出テキスト）。',
   ].join('\n')
 }
 
 function parseMediaSearchStartCommand(rawText: string): boolean {
-  const compact = normalizeForRuleParsing(String(rawText ?? '')).replace(/\s+/g, '')
-  if (!compact) return false
-  return compact === 'メディア検索' || compact === '保存メディア検索'
+  const normalized = normalizeForRuleParsing(String(rawText ?? '')).trim()
+  if (!normalized) return false
+  const noSpace = normalized.replace(/\s+/g, '')
+  if (noSpace === 'メディア検索' || noSpace === '保存メディア検索') return true
+  // 「メディア検索 キーワード…」のように続きがある場合も開始扱い（完全一致のみだと反応しない）
+  if (/^メディア検索(\s|$)/u.test(normalized)) return true
+  if (/^保存メディア検索(\s|$)/u.test(normalized)) return true
+  return false
 }
 
 function parseMediaSearchPeriodChoice(rawText: string): MediaSearchPeriodMonths | null {
@@ -2692,10 +2769,9 @@ function buildHaccpBulkConfirmationPrompt(items: HaccpScheduleResolvedEntry[]): 
     '',
     '候補（店舗 / 日付 時間）',
   ]
-  for (const row of items.slice(0, 10)) {
+  for (const row of items) {
     lines.push(`- ${row.storeName} / ${row.date} ${row.time}`)
   }
-  if (items.length > 10) lines.push(`…ほか ${items.length - 10} 件`)
   return lines.join('\n')
 }
 
@@ -2869,7 +2945,9 @@ async function buildMediaSearchCandidates(
   const fetchLimit = keywordNeedle ? MEDIA_SEARCH_KEYWORD_FETCH_LIMIT : MEDIA_SEARCH_FETCH_LIMIT
   let query = supabase
     .from('line_message_media')
-    .select('room_id, user_id, sender_display_name, line_message_id, storage_bucket, storage_path, original_file_name, content_preview, created_at')
+    .select(
+      'room_id, user_id, sender_display_name, line_message_id, storage_bucket, storage_path, original_file_name, media_type, mime_type, content_preview, created_at',
+    )
     .order('created_at', { ascending: false })
     .limit(fetchLimit)
 
@@ -2914,6 +2992,8 @@ async function buildMediaSearchCandidates(
       if (!senderName.toLowerCase().includes(q) && !senderId.toLowerCase().includes(q)) continue
     }
     const preview = String(row.content_preview ?? '').trim()
+    const mediaType = resolveStoredMediaType(row)
+    const mimeType = row.mime_type == null ? '' : String(row.mime_type).trim()
     const category = computeMediaCategory(`${fileName}\n${preview}`)
     if (options.categoryKey !== 'all' && category.key !== options.categoryKey) continue
     if (keywordNeedle && !keywordMatchesHaystacks(keywordNeedle, [fileName, preview])) continue
@@ -2930,7 +3010,7 @@ async function buildMediaSearchCandidates(
       created_at: String(row.created_at ?? ''),
       category_key: category.key,
       category_label: category.label,
-      preview_short: clipMediaPreview(preview, 80),
+      preview_short: lineReplyMediaAnalysisCaption(fileName, mimeType, mediaType, preview),
     })
     if (candidates.length >= MEDIA_SEARCH_CANDIDATE_MAX) break
   }
@@ -2968,7 +3048,7 @@ function buildMediaSearchCandidateListReply(
     linesOut.push('')
   }
   linesOut.push('番号返信でURL送信（例: 2）')
-  linesOut.push('絞り込み: 語句をそのまま返信（ファイル名・画像解析テキスト）または キー:語句')
+  linesOut.push('絞り込み: 語句をそのまま返信（ファイル名・ファイル内の抽出テキスト）または キー:語句')
   linesOut.push('条件変更: 送信者:名前 / カテゴリ:シフト / 期間変更')
   return linesOut.join('\n')
 }
@@ -3546,12 +3626,16 @@ async function syncRoomDisplayNameIfMissing(
       room_id: normalizedRoomId,
       room_name: fetchedName,
       is_enabled: true,
-      bot_reply_enabled: false,
+      bot_reply_enabled: true,
+      message_search_enabled: false,
+      message_search_library_enabled: false,
       send_room_summary: false,
+      receive_overall_summary_enabled: false,
       calendar_tomorrow_reminder_enabled: false,
       media_file_access_enabled: true,
       calendar_ai_auto_create_enabled: true,
       calendar_silent_auto_register_enabled: true,
+      calendar_low_confidence_confirm_reply_enabled: false,
       gmail_reservation_alert_enabled: false,
       updated_at: updatedAt,
     })
@@ -3767,6 +3851,7 @@ function buildDirectUserRoomPolicy(base: RoomReplyPolicy): RoomReplyPolicy {
     mediaFileAccessEnabled: true,
     calendarAiAutoCreateEnabled: true,
     calendarSilentAutoRegisterEnabled: false,
+    calendarRegistrationReplyEnabled: false,
   }
 }
 
@@ -3849,6 +3934,8 @@ async function loadRoomReplyPolicy(
     mediaFileAccessEnabled: false,
     calendarAiAutoCreateEnabled: false,
     calendarSilentAutoRegisterEnabled: false,
+    calendarLowConfidenceConfirmReplyEnabled: false,
+    calendarRegistrationReplyEnabled: false,
     settingsSource: 'fallback',
   } satisfies RoomReplyPolicy
   const normalizedRoomId = String(roomId ?? '').trim()
@@ -3860,9 +3947,10 @@ async function loadRoomReplyPolicy(
   }
 
   try {
+    // 列追加より先にデプロイしても壊れないよう * で取得（未知列を明示 select すると PostgREST がエラーになりフォールバックでカレンダーが全無効になる）
     const { data, error } = await supabase
       .from('room_summary_settings')
-      .select('room_name, is_enabled, bot_reply_enabled, message_search_enabled, message_search_library_enabled, media_file_access_enabled, calendar_ai_auto_create_enabled, calendar_silent_auto_register_enabled')
+      .select('*')
       .eq('room_id', normalizedRoomId)
       .maybeSingle()
 
@@ -3884,6 +3972,8 @@ async function loadRoomReplyPolicy(
     const mediaFileAccessEnabled = data?.media_file_access_enabled !== false
     const calendarAiAutoCreateEnabled = data?.calendar_ai_auto_create_enabled !== false
     const calendarSilentAutoRegisterEnabled = data?.calendar_silent_auto_register_enabled === true
+    const calendarLowConfidenceConfirmReplyEnabled = data?.calendar_low_confidence_confirm_reply_enabled === true
+    const calendarRegistrationReplyEnabled = data?.calendar_registration_reply_enabled === true
     const requiresRegistration =
       data?.is_enabled === false &&
       data?.bot_reply_enabled === false &&
@@ -3891,7 +3981,9 @@ async function loadRoomReplyPolicy(
       data?.message_search_library_enabled === false &&
       data?.media_file_access_enabled === false &&
       data?.calendar_ai_auto_create_enabled === false &&
-      data?.calendar_silent_auto_register_enabled !== true
+      data?.calendar_silent_auto_register_enabled !== true &&
+      data?.calendar_low_confidence_confirm_reply_enabled !== true &&
+      data?.calendar_registration_reply_enabled !== true
     const policy: RoomReplyPolicy = {
       roomName: normalizeDisplayName(data?.room_name ?? null),
       requiresRegistration,
@@ -3902,6 +3994,8 @@ async function loadRoomReplyPolicy(
       mediaFileAccessEnabled,
       calendarAiAutoCreateEnabled,
       calendarSilentAutoRegisterEnabled,
+      calendarLowConfidenceConfirmReplyEnabled,
+      calendarRegistrationReplyEnabled,
       settingsSource: 'row',
     }
     cache.set(normalizedRoomId, policy)
@@ -3970,6 +4064,19 @@ function isRoomBotReplyEnabled(policy: RoomReplyPolicy): boolean {
 
 function shouldSendRoomReply(policy: RoomReplyPolicy): boolean {
   return policy.isEnabled && !policy.calendarSilentAutoRegisterEnabled
+}
+
+/**
+ * 無返信自動登録ONでも、低確度のみLINEで確認する設定のとき true。
+ * `shouldSendRoomReply` が false でも、このONならカレンダー確認（pending）の送受信を許可する。
+ */
+function wantLowConfidenceInteractiveCalendarConfirm(policy: RoomReplyPolicy): boolean {
+  return (
+    policy.calendarSilentAutoRegisterEnabled &&
+    policy.calendarLowConfidenceConfirmReplyEnabled &&
+    policy.isEnabled &&
+    policy.botReplyEnabled
+  )
 }
 
 function normalizeExcludedMessageSearchRoomIds(value: unknown): string[] {
@@ -4676,7 +4783,9 @@ async function fetchSavedMediaHitsForMessageSearch(
 
   let query = supabase
     .from('line_message_media')
-    .select('room_id, line_message_id, storage_bucket, storage_path, original_file_name, content_preview, created_at')
+    .select(
+      'room_id, line_message_id, storage_bucket, storage_path, original_file_name, media_type, mime_type, content_preview, created_at',
+    )
     .order('created_at', { ascending: false })
     .limit(MEDIA_SEARCH_KEYWORD_FETCH_LIMIT)
 
@@ -4710,6 +4819,8 @@ async function fetchSavedMediaHitsForMessageSearch(
       room_id: rid,
       original_file_name: fileName || `media-${lineMessageId}`,
       content_preview: preview,
+      media_type: resolveStoredMediaType(row),
+      mime_type: row.mime_type == null ? null : String(row.mime_type).trim(),
       created_at: String(row.created_at ?? ''),
       storage_bucket: String(row.storage_bucket ?? LINE_MEDIA_BUCKET).trim() || LINE_MEDIA_BUCKET,
       storage_path: storagePath,
@@ -4728,14 +4839,19 @@ async function buildMessageSearchMediaHitLines(
   const roomLabels = scope === 'all_rooms'
     ? await loadRoomLabelsForHits(supabase, mediaHits.map((h) => ({ room_id: h.room_id })))
     : new Map<string, string>()
-  const lines: string[] = ['', '一致した保存メディア（ファイル名・画像解析テキスト・新しい順）:']
+  const lines: string[] = ['', '一致した保存メディア（ファイル名・解析要約・新しい順）:']
   for (let i = 0; i < mediaHits.length; i += 1) {
     const h = mediaHits[i]
     const dateLabel = formatSearchDateTime(h.created_at)
     const roomLine = scope === 'all_rooms'
       ? (roomLabels.get(h.room_id) ?? h.room_id.slice(0, 12))
       : null
-    const prev = clipMediaPreview(h.content_preview, 100)
+    const prev = lineReplyMediaAnalysisCaption(
+      h.original_file_name,
+      h.mime_type,
+      h.media_type,
+      h.content_preview,
+    )
     lines.push('')
     lines.push(`${i + 1}) ${h.original_file_name} [${dateLabel}]`)
     if (roomLine) lines.push(`   ルーム: ${roomLine}`)
@@ -4932,7 +5048,7 @@ async function buildMessageSearchReply(
         lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
       }
       if (mediaHits.length > 0) {
-        lines.push(`保存メディア（ファイル名・画像解析）との一致: ${mediaHits.length}件`)
+        lines.push(`保存メディア（ファイル名・抽出テキスト検索）との一致: ${mediaHits.length}件`)
         lines.push(...await buildMessageSearchMediaHitLines(supabase, mediaHits, command.scope))
       } else {
         lines.push('※このルームでは資料ライブラリ検索（2段階目）が無効です。')
@@ -4965,7 +5081,7 @@ async function buildMessageSearchReply(
       lines.push(`※保持期間設定が${configuredRetentionDays}日のため、検索範囲を調整しました。`)
     }
     if (mediaHits.length > 0) {
-      lines.push(`保存メディア（ファイル名・画像解析）との一致: ${mediaHits.length}件`)
+      lines.push(`保存メディア（ファイル名・抽出テキスト検索）との一致: ${mediaHits.length}件`)
       lines.push(...await buildMessageSearchMediaHitLines(supabase, mediaHits, command.scope))
     }
     if (pendingSaved) {
@@ -9402,6 +9518,26 @@ function loadCalendarEnv(): CalendarEnvState {
   }
 }
 
+function buildCalendarCreateAckTextFromResult(
+  command: CalendarCreateCommand,
+  result: Extract<CalendarCreateResult, { ok: true }>,
+  env: CalendarEnv,
+  headline: string,
+): string {
+  const registeredDate = formatDateOnlyForLine(result.startDate, env.timezone)
+  const registeredTime = `${formatTimeOnlyForLine(result.startDate, env.timezone)}-${formatTimeOnlyForLine(result.endDate, env.timezone)}`
+  return [
+    headline,
+    ...buildCalendarDetailTemplateLines({
+      title: result.summary,
+      date: registeredDate,
+      time: registeredTime,
+      location: command.location ?? null,
+      content: null,
+    }),
+  ].join('\n')
+}
+
 async function createCalendarEventReply(
   command: CalendarCreateCommand,
   env: CalendarEnv,
@@ -9413,19 +9549,7 @@ async function createCalendarEventReply(
   if (!result.ok) {
     return `予定登録に失敗しました。${result.error}`
   }
-  const registeredDate = formatDateOnlyForLine(result.startDate, env.timezone)
-  const registeredTime = `${formatTimeOnlyForLine(result.startDate, env.timezone)}-${formatTimeOnlyForLine(result.endDate, env.timezone)}`
-
-  return [
-    '予定を登録しました。',
-    ...buildCalendarDetailTemplateLines({
-      title: result.summary,
-      date: registeredDate,
-      time: registeredTime,
-      location: command.location ?? null,
-      content: null,
-    }),
-  ].join('\n')
+  return buildCalendarCreateAckTextFromResult(command, result, env, '予定を登録しました。')
 }
 
 async function updateCalendarEventReply(
@@ -9960,6 +10084,66 @@ function keywordMatchesHaystacks(keyword: string, haystacks: string[]): boolean 
   })
 }
 
+/**
+ * 日本語の自然文（空白なし）を助詞で分割し、文末の丁寧表現を落として検索トークンにする。
+ * これにより「haccpの予定表は保存されていますか」のような一文でも、ファイル名に含まれる語へ部分一致しやすくなる。
+ */
+function splitJapaneseKeywordGlueSegments(chunk: string): string[] {
+  const trimmed = chunk.trim()
+  if (!trimmed) return []
+  const parts = trimmed
+    .split(/[のノはハをヲがガにニでデとトもモやヤからカラまでマデ]+/u)
+    .map((p) => p.trim())
+    .filter(Boolean)
+  return parts.length > 0 ? parts : [trimmed]
+}
+
+function stripJapaneseSearchVerbalTail(token: string): string {
+  let t = token.replace(/[?？!！。．]+$/u, '').trim()
+  let prev = ''
+  const tailPatterns = [
+    /されていますか$/u,
+    /されています$/u,
+    /していますか$/u,
+    /しています$/u,
+    /てますか$/u,
+    /てます$/u,
+    /でいますか$/u,
+    /でいます$/u,
+    /ありますか$/u,
+    /あります$/u,
+    /でしたか$/u,
+    /ですか$/u,
+    /でしょうか$/u,
+    /ますか$/u,
+    /です$/u,
+    /ます$/u,
+  ]
+  while (t !== prev && t.length > 0) {
+    prev = t
+    for (const re of tailPatterns) {
+      const next = t.replace(re, '').trim()
+      if (next !== t) {
+        t = next
+        break
+      }
+    }
+  }
+  return t
+}
+
+/** 疑問文で「〜は保存されていますか」のようなとき、残った補助語だけのトークンは必須マッチから外す */
+function dropAuxiliaryTokensInQuestionContext(tokens: string[], originalKeyword: string): string[] {
+  if (tokens.length <= 1) return tokens
+  if (!/(ですか|ますか|ありますか|でしょうか|だっけ|っけ|\?|？)/.test(originalKeyword)) {
+    return tokens
+  }
+  const auxiliary = new Set([
+    '保存', '保管', '格納', '記録', '残っ', '残って', '残る', 'ある', 'あり', '確認', '探す', '見る',
+  ])
+  return tokens.filter((t) => !auxiliary.has(normalizeKeywordForSearch(t)))
+}
+
 /** `keywordMatchesHaystacks` と同一のトークン分割（SQL 事前絞り込み用） */
 function extractMessageSearchKeywordTokens(keyword: string): string[] {
   const normalizedKeyword = normalizeKeywordForSearch(keyword)
@@ -9969,7 +10153,10 @@ function extractMessageSearchKeywordTokens(keyword: string): string[] {
     .split(/\s+/)
     .filter((token) => token.length > 0)
   if (rawTokens.length === 0) return []
-  const filteredTokens = rawTokens.filter((token) => !isIgnorableMessageSearchToken(token))
+  const expanded = rawTokens.flatMap((chunk) => splitJapaneseKeywordGlueSegments(chunk))
+  const stripped = expanded.map((t) => stripJapaneseSearchVerbalTail(t)).filter((t) => t.length > 0)
+  const afterAux = dropAuxiliaryTokensInQuestionContext(stripped, normalizedKeyword)
+  const filteredTokens = afterAux.filter((token) => !isIgnorableMessageSearchToken(token))
   return filteredTokens.length > 0 ? filteredTokens : rawTokens
 }
 
