@@ -1045,6 +1045,10 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for message search permission status.')
                 continue
               }
+              const permissionReasons: string[] = []
+              if (!roomReplyPolicy.messageSearchEnabled) permissionReasons.push('ルーム設定: 会話検索OFF')
+              if (!lineUserPermission.canMessageSearch) permissionReasons.push('ユーザー設定: 会話検索OFF')
+              if (!lineUserPermission.canLibrarySearch) permissionReasons.push('ユーザー設定: 資料ライブラリ検索OFF')
               const permissionReply = currentRoomExcludedForCurrentScope
                 ? 'このルームは会話検索の対象に含まれていません。管理画面のユーザー権限で、このルームにチェックを入れて対象にしてください。'
                 : messageSearchCommand && canLibrarySearch
@@ -1055,7 +1059,10 @@ Deno.serve(async (req) => {
                   messageSearchCommand,
                   messageRetentionDays,
                 )
-                : (messageSearchError || 'この質問は、現在このルームで権限が付与されていないため実行できません。')
+                : (messageSearchError || [
+                  'この質問は、現在このルームで権限が付与されていないため実行できません。',
+                  ...(permissionReasons.length > 0 ? [`判定理由: ${permissionReasons.join(' / ')}`] : []),
+                ].join('\n'))
               const permissionReplyResult = await replyLineMessage(replyToken, permissionReply, lineAccessToken)
               if (!permissionReplyResult.ok) {
                 console.error('Failed to reply message search permission status:', permissionReplyResult.error)
