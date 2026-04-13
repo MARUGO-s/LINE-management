@@ -294,6 +294,10 @@ const SEARCH_MAX_SUMMARY_ROWS = 120
 const SEARCH_AI_SUMMARY_MAX_HITS = 80
 const SEARCH_MAX_DOCUMENT_ROWS = 300
 const LINE_MEDIA_BUCKET = 'line-media'
+/** admin-api の署名付き URL と同じ有効期限（秒） */
+const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
+/** 「メディアURL [件数]」で返す最大件数（トーク文字数・メッセージ数の上限を考慮） */
+const SAVED_MEDIA_URL_COMMAND_MAX = 3
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
@@ -699,6 +703,38 @@ Deno.serve(async (req) => {
               }
               continue
             }
+          }
+
+          const savedMediaUrlCmd = parseSavedMediaUrlCommand(text)
+          if (savedMediaUrlCmd) {
+            if (!roomCanReply) {
+              continue
+            }
+            if (!lineAccessToken) {
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply saved media URL command.')
+              continue
+            }
+            if (!replyToken) {
+              console.error('Missing replyToken for saved media URL command.')
+              continue
+            }
+            if (!canUseMedia) {
+              const replyResult = await replyLineMessage(
+                replyToken,
+                '保存メディアのURLを出すには、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
+                lineAccessToken,
+              )
+              if (!replyResult.ok) {
+                console.error('Failed to reply saved media URL permission:', replyResult.error)
+              }
+              continue
+            }
+            const urlReply = await buildSavedMediaUrlReply(supabase, roomId, savedMediaUrlCmd.count)
+            const replyResult = await replyLineMessage(replyToken, urlReply, lineAccessToken)
+            if (!replyResult.ok) {
+              console.error('Failed to reply saved media URL command:', replyResult.error)
+            }
+            continue
           }
 
           if (!!groqApiKey && text && !isExplicitBotCommandText(text)) {
@@ -1381,6 +1417,101 @@ async function trySaveLineMediaContent(
   }
 
   console.log(`Saved media content (${mediaType}) for room=${roomId}, lineMessageId=${lineMessageId}`)
+}
+
+function sanitizeDownloadFileNameForWebhook(value: string): string {
+  const sanitized = String(value ?? '')
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!sanitized) return ''
+  if (sanitized.length <= 120) return sanitized
+  return sanitized.slice(0, 120).trimEnd()
+}
+
+async function createSignedMediaDownloadUrlForWebhook(
+  supabase: ReturnType<typeof createClient>,
+  storageBucket: string,
+  storagePath: string,
+  fileName: string,
+): Promise<string | null> {
+  const safeName = sanitizeDownloadFileNameForWebhook(fileName)
+  const downloadOption: string | boolean = safeName || true
+  try {
+    const { data, error } = await supabase.storage.from(storageBucket).createSignedUrl(
+      storagePath,
+      MEDIA_SIGNED_URL_EXPIRES_SEC,
+      {
+        download: downloadOption,
+      } as any,
+    )
+    if (error) {
+      console.error(`Failed to create signed download URL for ${storageBucket}/${storagePath}:`, error.message)
+      return null
+    }
+    const signedUrl = typeof data?.signedUrl === 'string' ? data.signedUrl.trim() : ''
+    return signedUrl || null
+  } catch (error) {
+    console.error(`Unexpected error while signing media URL for ${storageBucket}/${storagePath}:`, error)
+    return null
+  }
+}
+
+async function buildSavedMediaUrlReply(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  count: number,
+): Promise<string | string[]> {
+  const limit = Math.max(1, Math.min(count, SAVED_MEDIA_URL_COMMAND_MAX))
+  const { data, error } = await supabase
+    .from('line_message_media')
+    .select(
+      'line_message_id, storage_bucket, storage_path, original_file_name, media_type, created_at',
+    )
+    .eq('room_id', roomId)
+    .order('created_at', { ascending: false })
+    .limit(limit)
+
+  if (error) {
+    console.error('Saved media URL list failed:', error.message)
+    return '保存メディアの取得に失敗しました。しばらくしてから再度お試しください。'
+  }
+  const rows = Array.isArray(data) ? data : []
+  if (rows.length === 0) {
+    return 'このルームには、まだ保存されたメディアがありません。'
+  }
+
+  const header = [
+    '保存メディアのダウンロードURLです（短期で失効します）。',
+    `※${Math.floor(MEDIA_SIGNED_URL_EXPIRES_SEC / 60)}分以内にタップして保存・閲覧してください。`,
+  ].join('\n')
+
+  const chunks: string[] = []
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i] as Record<string, unknown>
+    const lineMessageId = String(row.line_message_id ?? '').trim()
+    const baseName = String(row.original_file_name ?? '').trim()
+    const displayName = baseName || `media-${lineMessageId || String(i + 1)}`
+    const bucket = String(row.storage_bucket ?? LINE_MEDIA_BUCKET).trim() || LINE_MEDIA_BUCKET
+    const path = String(row.storage_path ?? '').trim()
+    if (!path) continue
+    const url = await createSignedMediaDownloadUrlForWebhook(supabase, bucket, path, displayName)
+    const label = `${i + 1}. ${displayName}`
+    if (!url) {
+      chunks.push(`${label}\n（URL の作成に失敗しました）`)
+      continue
+    }
+    chunks.push(`${label}\n${url}`)
+  }
+  if (chunks.length === 0) {
+    return '保存メディアのURLを作成できませんでした。'
+  }
+
+  const body = [header, '', chunks.join('\n\n')].join('\n')
+  if (body.length <= 4500) {
+    return body
+  }
+  return [header, ...chunks]
 }
 
 async function loadLineMediaUsageTotals(
@@ -2202,7 +2333,27 @@ function isExplicitBotCommandText(rawText: string): boolean {
   if (!compact) return false
   if (/^予定(?:登録|追加|変更|確認|一覧|報告)/.test(compact)) return true
   if (/^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)) return true
+  if (/^メディアURL/.test(compact)) return true
+  if (/^保存メディアURL/.test(compact)) return true
   return false
+}
+
+/** `メディアURL` / `保存メディアURL` のあとに任意で件数（1〜3）。件数省略時は 1 件。 */
+function parseSavedMediaUrlCommand(rawText: string): { count: number } | null {
+  const normalized = normalizeForRuleParsing(String(rawText ?? '')).trim()
+  if (!normalized) return null
+  if (!/^メディアURL\b/i.test(normalized) && !/^保存メディアURL\b/i.test(normalized)) {
+    return null
+  }
+  const withoutPrefix = normalized
+    .replace(/^保存メディアURL\s*/i, '')
+    .replace(/^メディアURL\s*/i, '')
+    .trim()
+  if (!withoutPrefix) return { count: 1 }
+  if (!/^\d+$/.test(withoutPrefix)) return null
+  const n = Number(withoutPrefix)
+  if (!Number.isInteger(n) || n < 1) return null
+  return { count: Math.min(n, SAVED_MEDIA_URL_COMMAND_MAX) }
 }
 
 function detectMessageSearchDays(compactText: string): MessageRetentionDays | null {
@@ -3597,7 +3748,9 @@ function isLikelyBotConversationText(text: string): boolean {
   if (looksLikeCalendarListQuestion(normalized)) return true
   if (looksLikeMessageSearchQuestion(normalized)) return true
   if (isLikelyBotDirectedSearchPrompt(normalized)) return true
-  if (/^(予定確認|予定一覧|予定報告|会話検索|履歴検索|トーク検索|チャット検索)/.test(compact)) return true
+  if (/^(予定確認|予定一覧|予定報告|会話検索|履歴検索|トーク検索|チャット検索|メディアURL|保存メディアURL)/.test(compact)) {
+    return true
+  }
   return false
 }
 
