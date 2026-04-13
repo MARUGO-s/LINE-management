@@ -733,6 +733,27 @@ Deno.serve(async (req) => {
           continue
         }
 
+        const casualMediaLookupReply = await tryHandleCasualMediaLookupQuestion(
+          text,
+          supabase,
+          roomId,
+          userId,
+          canUseMedia,
+        )
+        if (casualMediaLookupReply) {
+          if (!lineAccessToken || !replyToken) {
+            if (!lineAccessToken) console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply casual media lookup.')
+            if (!replyToken) console.error('Missing replyToken for casual media lookup.')
+            continue
+          }
+          if (!roomCanReply) continue
+          const casualReplyResult = await replyLineMessage(replyToken, casualMediaLookupReply, lineAccessToken)
+          if (!casualReplyResult.ok) {
+            console.error('Failed to reply casual media lookup:', casualReplyResult.error)
+          }
+          continue
+        }
+
         if (isRoomBotReplyEnabled(roomReplyPolicy)) {
           let forceAiMessageSearch = false
           let forceAiCalendarList = false
@@ -2323,6 +2344,98 @@ function parseMediaSearchFilterText(rawText: string): {
   return null
 }
 
+/** 保存メディアを探す口語（「〜の画像あった？」等）。会話検索と区別するため画像・写真・ファイル等の語を含むときだけ有効 */
+function looksLikeMediaExistenceQuestion(raw: string): boolean {
+  const t = String(raw ?? '').trim()
+  if (t.length < 4 || t.length > 160) return false
+  if (!/(画像|写真|スクショ|スクリショ|スクリーンショット|メディア|ファイル)/.test(t)) return false
+  if (/[?？]/.test(t)) return true
+  if (/(かな|かしら|ですか|でしょうか|だっけ|だったっけ|あったっけ|ありますか|あるか|残って|見つか|探して|探す|ってあった|ってある)/.test(t)) {
+    return true
+  }
+  return false
+}
+
+/**
+ * 口語のメディア探索文から検索語を切り出す（例: 「いちごの画像ってあったっけ？」→「いちご」）
+ */
+function extractFlexibleMediaSearchKeyword(raw: string): string | null {
+  const stripped = String(raw ?? '').normalize('NFKC').trim().replace(/[?!？!。．、,]+$/u, '').trim()
+  if (!stripped) return null
+
+  const mediaAfterNo = stripped.match(
+    /^(.+?)[のノ](?:画像|写真|スクショ|スクリーンショット|スクリショ|メディア|ファイル)(?:について|のこと)?/u,
+  )
+  if (mediaAfterNo?.[1]) {
+    let subject = String(mediaAfterNo[1]).trim().replace(/\s+/g, ' ')
+    subject = subject.replace(
+      /^(この|その|あの|どの|こないだ|この間|先日|昨日|今日|もう|また|前に|さっき)\s*/u,
+      '',
+    ).trim()
+    if (subject.length >= 2 && subject.length <= 48) return subject
+  }
+
+  const mediaThenTail = stripped.match(
+    /^(.+?)[のノ](?:画像|写真).{0,32}?(?:って|て|が|は)(?:あった|ある|あり|いた|だっけ|っけ)/u,
+  )
+  if (mediaThenTail?.[1]) {
+    let subject = String(mediaThenTail[1]).trim().replace(/\s+/g, ' ')
+    subject = subject.replace(
+      /^(この|その|あの|どの|こないだ|この間|先日|昨日|今日|もう|また|前に|さっき)\s*/u,
+      '',
+    ).trim()
+    if (subject.length >= 2 && subject.length <= 48) return subject
+  }
+
+  return null
+}
+
+async function tryHandleCasualMediaLookupQuestion(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  canUseMedia: boolean,
+): Promise<string | null> {
+  if (!canUseMedia) return null
+  const normalized = String(text ?? '').trim()
+  if (!normalized) return null
+  if (parseMediaSearchStartCommand(normalized)) return null
+  if (parseSavedMediaUrlCommand(normalized)) return null
+  if (await loadPendingMediaSearch(supabase, roomId, userId)) return null
+  if (!looksLikeMediaExistenceQuestion(normalized)) return null
+  const kw = extractFlexibleMediaSearchKeyword(normalized)
+  if (!kw) return null
+
+  const periodMonths: MediaSearchPeriodMonths = 3
+  const items = await buildMediaSearchCandidates(supabase, {
+    periodMonths,
+    categoryKey: 'all',
+    senderQuery: '',
+    keywordQuery: kw,
+  })
+  const pendingShell: PendingMediaSearch = {
+    id: '',
+    conversation_key: '',
+    stage: 'select_item',
+    period_months: periodMonths,
+    category_key: 'all',
+    sender_query: '',
+    item_cursor: 0,
+    items,
+    expires_at: '',
+  }
+  await savePendingMediaSearch(supabase, roomId, userId, {
+    stage: 'select_item',
+    periodMonths,
+    categoryKey: 'all',
+    senderQuery: '',
+    itemCursor: 0,
+    items,
+  })
+  return buildMediaSearchCandidateListReply(pendingShell, items, { keywordQuery: kw })
+}
+
 function resolveMediaSearchConversationKey(roomId: string, userId: string | null): string {
   return `${roomId || '__unknown_room__'}::${userId || '__anonymous__'}`
 }
@@ -2937,17 +3050,29 @@ async function tryHandlePendingMediaSearch(
     const freeKw = normalizedText.trim()
     if (
       freeKw.length >= 2 &&
-      freeKw.length <= 64 &&
       !parseMediaSearchFilterText(freeKw) &&
       !/^(期間変更|期間を変更|期間)$/i.test(freeKw)
     ) {
       const catOnly = parseMediaSearchCategoryChoice(freeKw)
       if (!catOnly) {
+        const extracted = extractFlexibleMediaSearchKeyword(freeKw)
+        let kw: string
+        if (extracted && (looksLikeMediaExistenceQuestion(freeKw) || freeKw.length > 64)) {
+          kw = extracted
+        } else if (freeKw.length > 64) {
+          return [
+            '検索語が長い場合は「キー:語句」の形式で送ってください。',
+            '例: キー:いちご',
+          ].join('\n')
+        } else {
+          kw = freeKw
+        }
+        const keywordQuery = kw.length > 64 ? kw.slice(0, 64) : kw
         const items = await buildMediaSearchCandidates(supabase, {
           periodMonths: pending.period_months,
           categoryKey: pending.category_key,
           senderQuery: pending.sender_query,
-          keywordQuery: freeKw,
+          keywordQuery,
         })
         await savePendingMediaSearch(supabase, roomId, userId, {
           stage: 'select_item',
@@ -2957,7 +3082,7 @@ async function tryHandlePendingMediaSearch(
           itemCursor: 0,
           items,
         })
-        return buildMediaSearchCandidateListReply({ ...pending, items }, items, { keywordQuery: freeKw })
+        return buildMediaSearchCandidateListReply({ ...pending, items }, items, { keywordQuery })
       }
     }
   }
@@ -2984,7 +3109,7 @@ async function tryHandlePendingMediaSearch(
     }, items)
   }
 
-  return '候補番号（例: 1）を返信してください。絞り込みは語句をそのまま送るか「キー:語句」。条件変更は「送信者:山田」「カテゴリ:シフト」「期間変更」です。'
+  return '候補番号（例: 1）を返信してください。絞り込みは語句・「キー:語句」、または「〜の画像あった？」のような口語でも構いません。条件変更は「送信者:山田」「カテゴリ:シフト」「期間変更」です。'
 }
 
 async function loadLineMediaUsageTotals(
