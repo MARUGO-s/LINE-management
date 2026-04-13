@@ -25,6 +25,7 @@ LINEグループ/ルームの会話を蓄積し、AI（Groq）を活用して以
 - **検索と LLM の分離**: 会話・資料のキーワード検索は **DB 保存テキストへのルール照合**で **Groq 不使用**。蓄積量が増えても **検索＝全文 LLM 投入** にはならず、**Groq 従量を抑える設計**（`README.md` §7.1 / §8.5）。
 - 低信頼の予定登録は pending にして確認し、期限切れは `calendar-pending-cron` が自動処理。
 - LINEメディア（image/video/audio/file）を `line-media` へ保存。
+  - **画像**（`jpeg` / `jpg` / `png`）は `GROQ_API_KEY` がある場合、Groq **`meta-llama/llama-4-scout-17b-16e-instruct`** で短文の内容説明を生成し `line_message_media.content_preview` に保存。`media.html` で **何が写っているか**を確認できる（詳細は `docs/MEDIA_OCR_AND_CLASSIFICATION.md` §1.3）。
   - 1ファイル絶対上限: 20MB
   - 合計上限: 2GB
 - 共有レート制限（DB-backed）を適用。
@@ -65,7 +66,7 @@ LINEグループ/ルームの会話を蓄積し、AI（Groq）を活用して以
 | LINE Messaging API | 受信Webhook / reply / push |
 | Google Calendar API | 予定作成・照会・更新 |
 | Gmail API | 予約通知メール取得 |
-| Groq API | 意図判定・要約・抽出 |
+| Groq API | 意図判定・要約・抽出・画像の内容説明（Llama 4 Scout、`line-webhook`） |
 
 ---
 

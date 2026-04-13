@@ -60,6 +60,21 @@ Classification approach:
 
 This is deterministic, explainable, and low-cost (no AI inference required).
 
+## 1.3 Image content description (Groq vision, not OCR)
+
+For **LINE image messages** (`message.type === image`), after the binary is fetched and uploaded, the system can optionally attach a **short Japanese description of what is visible** so operators know **what kind of image** it is without opening the file.
+
+Behavior:
+
+- **Trigger**: `media_type === image` and response `Content-Type` is one of **`image/jpeg`**, **`image/jpg`**, **`image/png`**.
+- **Model**: Groq **`meta-llama/llama-4-scout-17b-16e-instruct`** (vision-capable; see Groq docs).
+- **Secret**: **`GROQ_API_KEY`** must be set (same key as other Groq calls). If missing, image description is skipped.
+- **Storage**: The description is stored in **`line_message_media.content_preview`** (same column used for file text extraction previews; semantics differ by `media_type`).
+- **Size guard**: Very large payloads are skipped for base64 vision requests (see `line-webhook` implementation) to avoid oversized API requests.
+- **UI**: `media.html` shows the text under **「画像解析結果（Llama 4 Scout）」** when `content_preview` is present for an image row.
+
+This path is **multimodal LLM inference** (billed by Groq token usage), separate from **PDF OCR** and rule-based file classification above.
+
 ## 2. OCR behavior (cost-aware)
 
 OCR is **disabled by default**.
