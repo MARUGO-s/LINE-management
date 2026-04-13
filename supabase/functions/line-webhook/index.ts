@@ -563,6 +563,55 @@ Deno.serve(async (req) => {
           }
           continue
         }
+
+        const savedMediaUrlCmdEarly = parseSavedMediaUrlCommand(text)
+        if (savedMediaUrlCmdEarly) {
+          if (!lineAccessToken || !replyToken) {
+            if (!lineAccessToken) {
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply saved media URL command.')
+            }
+            if (!replyToken) {
+              console.error('Missing replyToken for saved media URL command.')
+            }
+            continue
+          }
+          if (!roomCanReply) {
+            continue
+          }
+          if (isDirectUserChat) {
+            const replyResult = await replyLineMessage(
+              replyToken,
+              [
+                'このBotでは、友だち（1:1）トークに送られた画像・ファイルは自動保存していません。',
+                '保存されるのは、メディア保存が有効なグループ／複数人トークなどです。',
+                '保存済みメディアのURLを受け取るには、そのトークを開いて「メディアURL」と送ってください。',
+              ].join('\n'),
+              lineAccessToken,
+            )
+            if (!replyResult.ok) {
+              console.error('Failed to reply saved media URL (1:1 guidance):', replyResult.error)
+            }
+            continue
+          }
+          if (!canUseMedia) {
+            const replyResult = await replyLineMessage(
+              replyToken,
+              '保存メディアのURLを出すには、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
+              lineAccessToken,
+            )
+            if (!replyResult.ok) {
+              console.error('Failed to reply saved media URL permission:', replyResult.error)
+            }
+            continue
+          }
+          const urlReplyEarly = await buildSavedMediaUrlReply(supabase, roomId, savedMediaUrlCmdEarly.count)
+          const replyResultEarly = await replyLineMessage(replyToken, urlReplyEarly, lineAccessToken)
+          if (!replyResultEarly.ok) {
+            console.error('Failed to reply saved media URL command:', replyResultEarly.error)
+          }
+          continue
+        }
+
         if (isRoomBotReplyEnabled(roomReplyPolicy)) {
           let forceAiMessageSearch = false
           let forceAiCalendarList = false
@@ -703,38 +752,6 @@ Deno.serve(async (req) => {
               }
               continue
             }
-          }
-
-          const savedMediaUrlCmd = parseSavedMediaUrlCommand(text)
-          if (savedMediaUrlCmd) {
-            if (!roomCanReply) {
-              continue
-            }
-            if (!lineAccessToken) {
-              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply saved media URL command.')
-              continue
-            }
-            if (!replyToken) {
-              console.error('Missing replyToken for saved media URL command.')
-              continue
-            }
-            if (!canUseMedia) {
-              const replyResult = await replyLineMessage(
-                replyToken,
-                '保存メディアのURLを出すには、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
-                lineAccessToken,
-              )
-              if (!replyResult.ok) {
-                console.error('Failed to reply saved media URL permission:', replyResult.error)
-              }
-              continue
-            }
-            const urlReply = await buildSavedMediaUrlReply(supabase, roomId, savedMediaUrlCmd.count)
-            const replyResult = await replyLineMessage(replyToken, urlReply, lineAccessToken)
-            if (!replyResult.ok) {
-              console.error('Failed to reply saved media URL command:', replyResult.error)
-            }
-            continue
           }
 
           if (!!groqApiKey && text && !isExplicitBotCommandText(text)) {
@@ -2342,16 +2359,21 @@ function isExplicitBotCommandText(rawText: string): boolean {
 function parseSavedMediaUrlCommand(rawText: string): { count: number } | null {
   const normalized = normalizeForRuleParsing(String(rawText ?? '')).trim()
   if (!normalized) return null
-  if (!/^メディアURL\b/i.test(normalized) && !/^保存メディアURL\b/i.test(normalized)) {
+  const compact = normalized.replace(/\s+/g, '')
+  const PREFIX_SAVE = '保存メディアURL'
+  /** メディア + URL（ASCII の大小は許容。先頭7文字相当で slice） */
+  const mediaPrefixLen = 'メディアURL'.length
+  let rest = ''
+  if (compact.startsWith(PREFIX_SAVE)) {
+    rest = compact.slice(PREFIX_SAVE.length)
+  } else if (compact.length >= mediaPrefixLen && compact.slice(0, mediaPrefixLen).toLowerCase() === 'メディアurl') {
+    rest = compact.slice(mediaPrefixLen)
+  } else {
     return null
   }
-  const withoutPrefix = normalized
-    .replace(/^保存メディアURL\s*/i, '')
-    .replace(/^メディアURL\s*/i, '')
-    .trim()
-  if (!withoutPrefix) return { count: 1 }
-  if (!/^\d+$/.test(withoutPrefix)) return null
-  const n = Number(withoutPrefix)
+  if (!rest) return { count: 1 }
+  if (!/^\d+$/.test(rest)) return null
+  const n = Number(rest)
   if (!Number.isInteger(n) || n < 1) return null
   return { count: Math.min(n, SAVED_MEDIA_URL_COMMAND_MAX) }
 }
