@@ -298,6 +298,9 @@ const LINE_MEDIA_BUCKET = 'line-media'
 const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
 /** 「メディアURL [件数]」で返す最大件数（トーク文字数・メッセージ数の上限を考慮） */
 const SAVED_MEDIA_URL_COMMAND_MAX = 3
+/** 横断取得時に走査する最大行（新しい順にフィルタするため多めに読む） */
+const SAVED_MEDIA_URL_ALL_ROOMS_FETCH_CAP = 800
+type SavedMediaUrlScope = 'current_room' | 'all_rooms'
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
@@ -591,7 +594,13 @@ Deno.serve(async (req) => {
             }
             continue
           }
-          const urlReplyEarly = await buildSavedMediaUrlReply(supabase, roomId, savedMediaUrlCmdEarly.count)
+          const urlReplyEarly = await buildSavedMediaUrlReply(
+            supabase,
+            roomId,
+            savedMediaUrlCmdEarly.count,
+            savedMediaUrlCmdEarly.scope,
+            lineUserPermission.excludedMessageSearchRoomIds,
+          )
           const replyResultEarly = await replyLineMessage(replyToken, urlReplyEarly, lineAccessToken)
           if (!replyResultEarly.ok) {
             console.error('Failed to reply saved media URL command:', replyResultEarly.error)
@@ -1461,34 +1470,86 @@ async function createSignedMediaDownloadUrlForWebhook(
   }
 }
 
+/** LINE のグループ／複数人トーク ID（友だち 1:1 の U 始まりは横断対象外） */
+function isLineGroupOrMultiRoomChatId(roomId: string): boolean {
+  const r = String(roomId ?? '').trim()
+  return r.startsWith('C') || r.startsWith('R')
+}
+
 async function buildSavedMediaUrlReply(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
   count: number,
+  scope: SavedMediaUrlScope,
+  excludedRoomIds: string[],
 ): Promise<string | string[]> {
   const limit = Math.max(1, Math.min(count, SAVED_MEDIA_URL_COMMAND_MAX))
-  const { data, error } = await supabase
-    .from('line_message_media')
-    .select(
-      'line_message_id, storage_bucket, storage_path, original_file_name, media_type, created_at',
-    )
-    .eq('room_id', roomId)
-    .order('created_at', { ascending: false })
-    .limit(limit)
+  const excluded = new Set(
+    (excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0),
+  )
 
-  if (error) {
-    console.error('Saved media URL list failed:', error.message)
-    return '保存メディアの取得に失敗しました。しばらくしてから再度お試しください。'
+  let rows: Record<string, unknown>[] = []
+  if (scope === 'current_room') {
+    const { data, error } = await supabase
+      .from('line_message_media')
+      .select(
+        'room_id, line_message_id, storage_bucket, storage_path, original_file_name, media_type, created_at',
+      )
+      .eq('room_id', roomId)
+      .order('created_at', { ascending: false })
+      .limit(limit)
+
+    if (error) {
+      console.error('Saved media URL list failed:', error.message)
+      return '保存メディアの取得に失敗しました。しばらくしてから再度お試しください。'
+    }
+    rows = Array.isArray(data) ? data as Record<string, unknown>[] : []
+  } else {
+    const { data, error } = await supabase
+      .from('line_message_media')
+      .select(
+        'room_id, line_message_id, storage_bucket, storage_path, original_file_name, media_type, created_at',
+      )
+      .order('created_at', { ascending: false })
+      .limit(SAVED_MEDIA_URL_ALL_ROOMS_FETCH_CAP)
+
+    if (error) {
+      console.error('Saved media URL list (all rooms) failed:', error.message)
+      return '保存メディアの取得に失敗しました。しばらくしてから再度お試しください。'
+    }
+    const raw = Array.isArray(data) ? data as Record<string, unknown>[] : []
+    for (const row of raw) {
+      const rid = String(row.room_id ?? '').trim()
+      if (!rid || excluded.has(rid)) continue
+      if (!isLineGroupOrMultiRoomChatId(rid)) continue
+      rows.push(row)
+      if (rows.length >= limit) break
+    }
   }
-  const rows = Array.isArray(data) ? data : []
+
   if (rows.length === 0) {
+    if (scope === 'all_rooms') {
+      return [
+        'グループ／複数人トークに保存されたメディアがまだありません。',
+        '（「全ルーム」は友だち 1:1 を除き、管理画面で検索対象外にしたルームも除きます）',
+        'このトークだけの保存メディアは「メディアURL」と送ってください。',
+      ].join('\n')
+    }
     return 'このルームには、まだ保存されたメディアがありません。'
   }
 
-  const header = [
+  const roomLabelMap = scope === 'all_rooms'
+    ? await loadRoomLabelsForHits(supabase, rows.map((row) => ({ room_id: String(row.room_id ?? '') })))
+    : new Map<string, string>()
+
+  const headerLines = [
     '保存メディアのダウンロードURLです（短期で失効します）。',
     `※${Math.floor(MEDIA_SIGNED_URL_EXPIRES_SEC / 60)}分以内にタップして保存・閲覧してください。`,
-  ].join('\n')
+  ]
+  if (scope === 'all_rooms') {
+    headerLines.push('※対象: グループ／複数人トーク（友だち 1:1 の保存分は「メディアURL」で取得）')
+  }
+  const header = headerLines.join('\n')
 
   const chunks: string[] = []
   for (let i = 0; i < rows.length; i += 1) {
@@ -1500,7 +1561,14 @@ async function buildSavedMediaUrlReply(
     const path = String(row.storage_path ?? '').trim()
     if (!path) continue
     const url = await createSignedMediaDownloadUrlForWebhook(supabase, bucket, path, displayName)
-    const label = `${i + 1}. ${displayName}`
+    const rid = String(row.room_id ?? '').trim()
+    const roomLabel = scope === 'all_rooms'
+      ? (roomLabelMap.get(rid) ?? rid.slice(0, 12))
+      : ''
+    const titlePrefix = scope === 'all_rooms'
+      ? `${i + 1}. [${roomLabel}] `
+      : `${i + 1}. `
+    const label = `${titlePrefix}${displayName}`
     if (!url) {
       chunks.push(`${label}\n（URL の作成に失敗しました）`)
       continue
@@ -2343,13 +2411,27 @@ function isExplicitBotCommandText(rawText: string): boolean {
   return false
 }
 
-/** `メディアURL` / `保存メディアURL` のあとに任意で件数（1〜3）。件数省略時は 1 件。 */
-function parseSavedMediaUrlCommand(rawText: string): { count: number } | null {
+/** `メディアURL` / `保存メディアURL` + 任意の件数 + 任意の「全ルーム」（会話検索の除外ルームを尊重） */
+function parseSavedMediaUrlRest(rest: string): { count: number; scope: SavedMediaUrlScope } | null {
+  const ALL = '全ルーム'
+  if (!rest) return { count: 1, scope: 'current_room' }
+  const hasAll = rest.includes(ALL)
+  const digitsPart = rest.split(ALL).join('')
+  if (!/^(\d*)$/.test(digitsPart)) return null
+  if (digitsPart === '0') return null
+  const n = digitsPart ? Number(digitsPart) : 1
+  if (digitsPart && (!Number.isInteger(n) || n < 1)) return null
+  return {
+    count: Math.min(n, SAVED_MEDIA_URL_COMMAND_MAX),
+    scope: hasAll ? 'all_rooms' : 'current_room',
+  }
+}
+
+function parseSavedMediaUrlCommand(rawText: string): { count: number; scope: SavedMediaUrlScope } | null {
   const normalized = normalizeForRuleParsing(String(rawText ?? '')).trim()
   if (!normalized) return null
   const compact = normalized.replace(/\s+/g, '')
   const PREFIX_SAVE = '保存メディアURL'
-  /** メディア + URL（ASCII の大小は許容。先頭7文字相当で slice） */
   const mediaPrefixLen = 'メディアURL'.length
   let rest = ''
   if (compact.startsWith(PREFIX_SAVE)) {
@@ -2359,11 +2441,7 @@ function parseSavedMediaUrlCommand(rawText: string): { count: number } | null {
   } else {
     return null
   }
-  if (!rest) return { count: 1 }
-  if (!/^\d+$/.test(rest)) return null
-  const n = Number(rest)
-  if (!Number.isInteger(n) || n < 1) return null
-  return { count: Math.min(n, SAVED_MEDIA_URL_COMMAND_MAX) }
+  return parseSavedMediaUrlRest(rest)
 }
 
 function detectMessageSearchDays(compactText: string): MessageRetentionDays | null {
