@@ -125,6 +125,14 @@
 
 モーダル下部の注記: **資料ライブラリの閲覧権限**はルームではなく、**メディア閲覧画面で資料ごと**に設定します。
 
+#### Gmail予約通知の運用仕様（2026-04 更新）
+
+- 通知対象メールは **一休.comレストラン / 食べログ** のみ（他サービス・一般メールは通知対象外）。
+- 上記2サービスでも、**予約通知と判定できるメールのみ**を対象に送信（セキュリティ通知・レビュー促進などは除外）。
+- LINE テンプレートの `要望` は、提携定型文（例: 「上記予約情報を店舗様でお使いの予約台帳に転記…」）を除外し、該当時は `なし` 表示。
+- 食べログ表示は `予約番号` を非表示。
+- 食べログ表示の `予約回数` は、AI推定ではなく DB ロジック集計（`名前 + 電話番号`）で `N回` 表示。
+
 ### 4.5 新規ルーム追加時の設定モーダル
 
 ルーム設定モーダルと同種のチェックに加え、**最終回: 継承 / 各回独立 / 1日まとめ**を選びます。  
@@ -307,6 +315,9 @@
 | 内部「ルーム有効」 | `room_summary_settings.is_enabled`（**モーダル内機能の OR で自動計算**） |
 | 低確度の確認返信 | `room_summary_settings.calendar_low_confidence_confirm_reply_enabled` |
 | 登録内容をLINEで返信（高確度） | `room_summary_settings.calendar_registration_reply_enabled` |
+| Gmail予約通知の送達履歴 | `gmail_reservation_alert_logs` |
+| 食べログ 来店履歴（集計） | `tabelog_reservation_visit_summaries` |
+| 食べログ 来店履歴（イベント） | `tabelog_reservation_visit_events` |
 | 利用可（ユーザー） | `line_user_permissions.is_active` |
 | 会話検索 / 資料検索 | `can_message_search` / `can_library_search` |
 | 予定閲覧 / 予定作成 / 予定更新 | `can_calendar_view` / `can_calendar_create` / `can_calendar_update` |
@@ -338,5 +349,9 @@
 | 新規ルーム UI 既定 | `applyNewRoomDefaultCheckboxes` のフォールバックを §4.5 の表と一致（LocalStorage 未設定時）。 |
 | line-webhook | 保存メディア検索のキーワードを日本語でもヒットしやすくするトークン化（助詞区切り等）。ファイルの LINE 表示「解析:」は `line_media_file_purpose_infer.ts` の推定短文のみ。 |
 | 管理 UI（index.html / admin-ui） | ユーザー権限「除外 N 件」は **現在のルーム一覧に存在する ID のみ**をカウント。ルーム削除直後も **再読み込みで N が連動**（§5.3）。 |
+| gmail-alert-cron | 予約メール通知を **一休.comレストラン / 食べログ** のみに限定。予約通知以外（セキュリティ通知・レビュー系など）を除外。 |
+| gmail-alert-cron | 食べログの `要望` から提携定型文（予約台帳転記依頼）を除外し、該当時は `なし` を表示。 |
+| gmail-alert-cron | 食べログ表示は `予約番号` を非表示、`予約回数` を表示（`N回`）。 |
+| DB + gmail-alert-cron | 食べログ来店履歴のロジック集計を追加。`tabelog_reservation_visit_events`（メール単位の重複防止）と `tabelog_reservation_visit_summaries`（`名前 + 電話番号` の累積回数）を管理し、`record_tabelog_reservation_visit` で加算。 |
 
 ---

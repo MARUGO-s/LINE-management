@@ -275,6 +275,11 @@ Deno.serve(async (req) => {
       return json(documentState, 200)
     }
 
+    if (req.method === "GET" && path === "/reservations/calendar") {
+      const reservationCalendarState = await fetchReservationCalendarState(supabase, url)
+      return json(reservationCalendarState, 200)
+    }
+
     if (req.method === "POST" && path === "/documents") {
       const created = await uploadDocumentFile(req, supabase)
       return json({ success: true, document: created }, 200)
@@ -1714,6 +1719,137 @@ async function fetchDocumentState(
     has_more: nextOffset < safeTotal,
     next_offset: nextOffset < safeTotal ? nextOffset : null,
     generated_at: new Date().toISOString(),
+  }
+}
+
+async function fetchReservationCalendarState(
+  supabase: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const targetMonth = normalizeCalendarMonthParam(url.searchParams.get("month"))
+  const sourceFilter = normalizeReservationSourceFilter(url.searchParams.get("source"))
+  const range = buildJstMonthRange(targetMonth)
+  const sources = sourceFilter === "all" ? ["tabelog", "ikyu"] as const : [sourceFilter] as const
+  const items: Array<Record<string, unknown>> = []
+  const sourceCounts: Record<string, number> = {
+    tabelog: 0,
+    ikyu: 0,
+  }
+
+  for (const source of sources) {
+    const eventTable = source === "tabelog"
+      ? "tabelog_reservation_visit_events"
+      : "ikyu_reservation_visit_events"
+    const summaryTable = source === "tabelog"
+      ? "tabelog_reservation_visit_summaries"
+      : "ikyu_reservation_visit_summaries"
+
+    const [eventsRes, summariesRes] = await Promise.all([
+      supabase
+        .from(eventTable)
+        .select("id, gmail_message_id, customer_name, customer_phone, visit_at, created_at")
+        .gte("visit_at", range.startIso)
+        .lt("visit_at", range.endIso)
+        .order("visit_at", { ascending: true })
+        .limit(2000),
+      supabase
+        .from(summaryTable)
+        .select("customer_name, customer_phone, visit_count, last_visit_at")
+        .limit(5000),
+    ])
+
+    if (eventsRes.error) {
+      throw { status: 500, message: `Failed to fetch ${source} reservation events: ${eventsRes.error.message}` } satisfies AppError
+    }
+    if (summariesRes.error) {
+      throw { status: 500, message: `Failed to fetch ${source} reservation summaries: ${summariesRes.error.message}` } satisfies AppError
+    }
+
+    const summaryByCustomer = new Map<string, Record<string, unknown>>()
+    for (const row of summariesRes.data ?? []) {
+      const name = String((row as { customer_name?: unknown })?.customer_name ?? "").trim()
+      const phone = String((row as { customer_phone?: unknown })?.customer_phone ?? "").trim()
+      if (!name || !phone) continue
+      summaryByCustomer.set(`${name}__${phone}`, row as Record<string, unknown>)
+    }
+
+    for (const row of eventsRes.data ?? []) {
+      const event = row as Record<string, unknown>
+      const name = String(event.customer_name ?? "").trim()
+      const phone = String(event.customer_phone ?? "").trim()
+      const visitAt = toSafeString(event.visit_at)
+      const createdAt = toSafeString(event.created_at)
+      if (!visitAt && !createdAt) continue
+      const summary = summaryByCustomer.get(`${name}__${phone}`)
+      const visitCount = Number(summary?.visit_count ?? 0)
+      items.push({
+        source,
+        id: Number(event.id ?? 0),
+        gmail_message_id: toSafeString(event.gmail_message_id),
+        customer_name: name,
+        customer_phone: phone,
+        visit_at: visitAt || createdAt,
+        created_at: createdAt || visitAt,
+        visit_count: Number.isFinite(visitCount) && visitCount > 0 ? Math.floor(visitCount) : 0,
+        last_visit_at: toSafeString(summary?.last_visit_at),
+      })
+      sourceCounts[source] += 1
+    }
+  }
+
+  items.sort((a, b) => String(a.visit_at ?? "").localeCompare(String(b.visit_at ?? "")))
+
+  return {
+    month: targetMonth,
+    month_start_iso: range.startIso,
+    month_end_iso: range.endIso,
+    source_filter: sourceFilter,
+    total: items.length,
+    source_counts: sourceCounts,
+    items,
+    generated_at: new Date().toISOString(),
+  }
+}
+
+function normalizeCalendarMonthParam(value: string | null): string {
+  const src = String(value ?? "").trim()
+  if (/^\d{4}-(0[1-9]|1[0-2])$/.test(src)) return src
+  const now = new Date()
+  const formatter = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+  })
+  const parts = formatter.formatToParts(now)
+  const year = parts.find((part) => part.type === "year")?.value ?? String(now.getUTCFullYear())
+  const month = parts.find((part) => part.type === "month")?.value ?? "01"
+  return `${year}-${month}`
+}
+
+function normalizeReservationSourceFilter(value: string | null): "all" | "tabelog" | "ikyu" {
+  const normalized = String(value ?? "").trim().toLowerCase()
+  if (normalized === "tabelog") return "tabelog"
+  if (normalized === "ikyu") return "ikyu"
+  return "all"
+}
+
+function buildJstMonthRange(month: string): { startIso: string; endIso: string } {
+  const matched = month.match(/^(\d{4})-(\d{2})$/)
+  if (!matched) {
+    const fallbackStart = new Date()
+    const fallbackEnd = new Date(fallbackStart.getTime() + 31 * 24 * 60 * 60 * 1000)
+    return {
+      startIso: fallbackStart.toISOString(),
+      endIso: fallbackEnd.toISOString(),
+    }
+  }
+  const year = Number(matched[1])
+  const monthNumber = Number(matched[2])
+  const startUtc = Date.UTC(year, monthNumber - 1, 1, -9, 0, 0)
+  const endUtc = Date.UTC(year, monthNumber, 1, -9, 0, 0)
+  return {
+    startIso: new Date(startUtc).toISOString(),
+    endIso: new Date(endUtc).toISOString(),
   }
 }
 

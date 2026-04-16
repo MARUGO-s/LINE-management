@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>LINE Reservation Calendar</title>
+  <style>
+    :root {
+      --bg0: #061320;
+      --bg1: #173247;
+      --card: rgba(8, 21, 35, 0.84);
+      --line: rgba(155, 220, 255, 0.25);
+      --txt: #e7f6ff;
+      --sub: #a6cadf;
+      --ok: #69edbf;
+      --accent: #57d8ff;
+      --radius: 16px;
+      --shadow: 0 20px 45px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--txt);
+      font-family: "Zen Kaku Gothic New", sans-serif;
+      background:
+        radial-gradient(900px 500px at -20% -10%, #215f84 0%, transparent 60%),
+        radial-gradient(900px 500px at 120% 0%, #185273 0%, transparent 55%),
+        linear-gradient(145deg, var(--bg0), var(--bg1));
+      padding: 20px;
+    }
+
+    .app {
+      max-width: 1360px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    .hero, .card {
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .hero {
+      padding: 18px 20px;
+      background: linear-gradient(160deg, rgba(87, 216, 255, 0.15), rgba(8, 21, 35, 0.65));
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-family: "Barlow Condensed", sans-serif;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      font-size: clamp(2rem, 3.2vw, 2.8rem);
+      line-height: 0.95;
+    }
+
+    .hero p {
+      margin: 10px 0 0;
+      color: var(--sub);
+    }
+
+    .status {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      color: var(--sub);
+      font-size: 0.88rem;
+      align-items: center;
+    }
+
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: rgba(8, 21, 35, 0.6);
+    }
+
+    .pill.ok {
+      color: var(--ok);
+      border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+    }
+
+    .pill.link {
+      color: #9be8ff;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .card {
+      background: var(--card);
+      padding: 16px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 9px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .input, .select, .button {
+      min-height: 39px;
+      border-radius: 11px;
+      border: 1px solid var(--line);
+      background: rgba(8, 21, 35, 0.6);
+      color: var(--txt);
+      padding: 0 11px;
+      font: inherit;
+    }
+
+    .button {
+      cursor: pointer;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
+    .button.primary {
+      border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+      background: linear-gradient(180deg, rgba(87, 216, 255, 0.32), rgba(10, 116, 158, 0.32));
+    }
+
+    .button.link {
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .meta {
+      margin-top: 8px;
+      color: var(--sub);
+      font-size: 0.87rem;
+    }
+
+    .month-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    .month-title {
+      margin: 0;
+      font-size: 1.25rem;
+      letter-spacing: 0.02em;
+    }
+
+    .calendar {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .weekday {
+      text-align: center;
+      color: #a7d2ea;
+      font-size: 0.78rem;
+      padding: 6px 0;
+      border: 1px solid rgba(155, 220, 255, 0.15);
+      border-radius: 10px;
+      background: rgba(8, 21, 35, 0.45);
+    }
+
+    .day-cell {
+      min-height: 130px;
+      border: 1px solid rgba(155, 220, 255, 0.2);
+      border-radius: 12px;
+      padding: 8px;
+      background: rgba(5, 17, 28, 0.55);
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .day-cell.outside {
+      opacity: 0.45;
+    }
+
+    .day-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .day-number {
+      font-size: 0.83rem;
+      color: #d9f0ff;
+      font-weight: 700;
+    }
+
+    .count-chip {
+      font-size: 0.7rem;
+      border-radius: 999px;
+      padding: 2px 7px;
+      border: 1px solid rgba(155, 220, 255, 0.3);
+      color: #b8e5ff;
+    }
+
+    .day-items {
+      display: grid;
+      gap: 5px;
+      align-content: start;
+      overflow: auto;
+      max-height: 88px;
+      padding-right: 2px;
+    }
+
+    .resv {
+      border-radius: 8px;
+      border: 1px solid rgba(155, 220, 255, 0.22);
+      background: rgba(10, 35, 54, 0.62);
+      padding: 5px 6px;
+      font-size: 0.72rem;
+      line-height: 1.35;
+    }
+
+    .resv.source-tabelog {
+      border-color: rgba(131, 223, 255, 0.45);
+    }
+
+    .resv.source-ikyu {
+      border-color: rgba(143, 244, 183, 0.4);
+    }
+
+    .resv-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      color: #bde4f8;
+    }
+
+    .resv-name {
+      color: #e4f5ff;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .resv-sub {
+      color: #9bc8df;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    @media (max-width: 980px) {
+      .calendar {
+        grid-template-columns: repeat(1, minmax(0, 1fr));
+      }
+      .weekday {
+        display: none;
+      }
+      .day-cell {
+        min-height: auto;
+      }
+      .day-items {
+        max-height: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="hero">
+      <h1>LINE Reservation Calendar</h1>
+      <p>食べログ / 一休の予約履歴を月間カレンダーで確認します（閲覧専用）。</p>
+      <div class="status">
+        <span id="authState" class="pill">未接続</span>
+        <span id="lastRefresh" class="pill">最終更新: なし</span>
+        <a href="./index.html" class="pill link">管理画面</a>
+        <a href="./media.html" class="pill link">メディア閲覧</a>
+      </div>
+    </header>
+
+    <section class="card">
+      <h2>接続</h2>
+      <div class="controls">
+        <input id="projectUrlInput" class="input" style="min-width:320px" type="text" readonly tabindex="-1" aria-readonly="true">
+        <input id="tokenInput" class="input" type="password" placeholder="ADMIN_DASHBOARD_TOKEN">
+        <button id="saveTokenBtn" class="button primary">保存して接続</button>
+        <button id="clearTokenBtn" class="button">削除</button>
+      </div>
+      <div class="meta">管理トークンはブラウザの LocalStorage に保存されます。</div>
+    </section>
+
+    <section class="card">
+      <div class="month-head">
+        <h2 class="month-title" id="monthTitle">予約表</h2>
+        <div class="controls">
+          <button id="prevMonthBtn" class="button">前月</button>
+          <button id="thisMonthBtn" class="button">今月</button>
+          <button id="nextMonthBtn" class="button">翌月</button>
+          <select id="sourceFilter" class="select" aria-label="予約ソース絞り込み">
+            <option value="all">全て</option>
+            <option value="tabelog">食べログ</option>
+            <option value="ikyu">一休</option>
+          </select>
+          <button id="reloadBtn" class="button primary">再読み込み</button>
+        </div>
+      </div>
+      <div id="summary" class="meta">未取得</div>
+      <div id="calendar" class="calendar"></div>
+    </section>
+  </div>
+
+  <script>
+    const STORE_TOKEN_KEY = 'line_summary_admin_token';
+    const FIXED_PROJECT_URL = 'https://jhpmzqxqvapdkyvvhyra.supabase.co';
+    const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
+    const JST = 'Asia/Tokyo';
+
+    const state = {
+      currentMonth: getCurrentMonthJst(),
+      source: 'all',
+      items: [],
+    };
+
+    const dom = {
+      authState: document.getElementById('authState'),
+      lastRefresh: document.getElementById('lastRefresh'),
+      projectUrlInput: document.getElementById('projectUrlInput'),
+      tokenInput: document.getElementById('tokenInput'),
+      saveTokenBtn: document.getElementById('saveTokenBtn'),
+      clearTokenBtn: document.getElementById('clearTokenBtn'),
+      monthTitle: document.getElementById('monthTitle'),
+      prevMonthBtn: document.getElementById('prevMonthBtn'),
+      thisMonthBtn: document.getElementById('thisMonthBtn'),
+      nextMonthBtn: document.getElementById('nextMonthBtn'),
+      sourceFilter: document.getElementById('sourceFilter'),
+      reloadBtn: document.getElementById('reloadBtn'),
+      summary: document.getElementById('summary'),
+      calendar: document.getElementById('calendar'),
+    };
+
+    function getToken() {
+      return localStorage.getItem(STORE_TOKEN_KEY) || '';
+    }
+
+    function setToken(value) {
+      if (value) localStorage.setItem(STORE_TOKEN_KEY, value);
+      else localStorage.removeItem(STORE_TOKEN_KEY);
+      updateAuthState();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function getCurrentMonthJst() {
+      const now = new Date();
+      const parts = new Intl.DateTimeFormat('ja-JP', { timeZone: JST, year: 'numeric', month: '2-digit' }).formatToParts(now);
+      const y = parts.find((part) => part.type === 'year')?.value || String(now.getUTCFullYear());
+      const m = parts.find((part) => part.type === 'month')?.value || '01';
+      return y + '-' + m;
+    }
+
+    function formatMonthLabel(month) {
+      const m = String(month || '');
+      const hit = m.match(/^(\d{4})-(\d{2})$/);
+      if (!hit) return m;
+      return hit[1] + '年' + Number(hit[2]) + '月';
+    }
+
+    function parseMonth(month) {
+      const hit = String(month || '').match(/^(\d{4})-(\d{2})$/);
+      if (!hit) return null;
+      return { year: Number(hit[1]), month: Number(hit[2]) };
+    }
+
+    function shiftMonth(month, delta) {
+      const parsed = parseMonth(month);
+      if (!parsed) return month;
+      const date = new Date(Date.UTC(parsed.year, parsed.month - 1 + delta, 1));
+      const y = date.getUTCFullYear();
+      const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+      return y + '-' + m;
+    }
+
+    function formatDateJst(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '-';
+      return new Intl.DateTimeFormat('ja-JP', {
+        timeZone: JST,
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(date);
+    }
+
+    function formatDayKeyJst(value) {
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return '';
+      const parts = new Intl.DateTimeFormat('ja-JP', { timeZone: JST, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+      const y = parts.find((part) => part.type === 'year')?.value;
+      const m = parts.find((part) => part.type === 'month')?.value;
+      const d = parts.find((part) => part.type === 'day')?.value;
+      if (!y || !m || !d) return '';
+      return y + '-' + m + '-' + d;
+    }
+
+    async function api(path) {
+      const token = getToken();
+      if (!token) throw new Error('先に管理トークンを保存してください。');
+      const url = FIXED_PROJECT_URL.replace(/\/+$/, '') + '/functions/v1/admin-api' + path;
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { 'x-admin-token': token },
+        referrerPolicy: 'no-referrer',
+        cache: 'no-store',
+      });
+      const text = await res.text();
+      let body = {};
+      try { body = text ? JSON.parse(text) : {}; } catch (_) { body = { raw: text }; }
+      if (!res.ok) {
+        throw new Error(body.error || ('API error: ' + res.status));
+      }
+      return body;
+    }
+
+    function updateAuthState() {
+      const hasToken = !!getToken();
+      dom.authState.textContent = hasToken ? '接続準備OK' : '未接続';
+      dom.authState.className = hasToken ? 'pill ok' : 'pill';
+    }
+
+    function renderCalendar(items) {
+      const parsed = parseMonth(state.currentMonth);
+      if (!parsed) {
+        dom.calendar.innerHTML = '<div class="meta">月の形式が不正です。</div>';
+        return;
+      }
+
+      const first = new Date(Date.UTC(parsed.year, parsed.month - 1, 1));
+      const firstWeekday = (first.getUTCDay() + 0) % 7;
+      const daysInMonth = new Date(Date.UTC(parsed.year, parsed.month, 0)).getUTCDate();
+      const daysPrevMonth = new Date(Date.UTC(parsed.year, parsed.month - 1, 0)).getUTCDate();
+
+      const byDay = new Map();
+      for (const item of items) {
+        const key = formatDayKeyJst(item.visit_at);
+        if (!key) continue;
+        if (!byDay.has(key)) byDay.set(key, []);
+        byDay.get(key).push(item);
+      }
+
+      const html = [];
+      for (const weekday of WEEKDAYS) {
+        html.push('<div class="weekday">' + escapeHtml(weekday) + '</div>');
+      }
+
+      for (let cell = 0; cell < 42; cell += 1) {
+        const dayNum = cell - firstWeekday + 1;
+        let y = parsed.year;
+        let m = parsed.month;
+        let d = dayNum;
+        let outside = false;
+        if (dayNum <= 0) {
+          outside = true;
+          m = parsed.month - 1;
+          if (m <= 0) { m = 12; y -= 1; }
+          d = daysPrevMonth + dayNum;
+        } else if (dayNum > daysInMonth) {
+          outside = true;
+          m = parsed.month + 1;
+          if (m > 12) { m = 1; y += 1; }
+          d = dayNum - daysInMonth;
+        }
+        const key = String(y).padStart(4, '0') + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+        const dayItems = byDay.get(key) || [];
+        const itemHtml = dayItems.map((item) => {
+          const source = String(item.source || '');
+          const sourceLabel = source === 'tabelog' ? '食べログ' : (source === 'ikyu' ? '一休' : source);
+          return [
+            '<div class="resv source-' + escapeHtml(source) + '">',
+            '<div class="resv-top"><span>' + escapeHtml(sourceLabel) + '</span><span>' + escapeHtml(formatDateJst(item.visit_at).slice(-5)) + '</span></div>',
+            '<div class="resv-name" title="' + escapeHtml(String(item.customer_name || '-')) + '">' + escapeHtml(String(item.customer_name || '-')) + '</div>',
+            '<div class="resv-sub" title="' + escapeHtml(String(item.customer_phone || '-')) + '">TEL: ' + escapeHtml(String(item.customer_phone || '-')) + '</div>',
+            '<div class="resv-sub">予約回数: ' + escapeHtml(String(item.visit_count || 0)) + '回</div>',
+            '</div>',
+          ].join('');
+        }).join('');
+        html.push([
+          '<div class="day-cell' + (outside ? ' outside' : '') + '">',
+          '<div class="day-head"><span class="day-number">' + escapeHtml(String(d)) + '</span><span class="count-chip">' + dayItems.length + '件</span></div>',
+          '<div></div>',
+          '<div class="day-items">' + itemHtml + '</div>',
+          '</div>',
+        ].join(''));
+      }
+
+      dom.calendar.innerHTML = html.join('');
+    }
+
+    async function loadCalendar() {
+      const params = new URLSearchParams();
+      params.set('month', state.currentMonth);
+      params.set('source', state.source);
+      params.set('_ts', String(Date.now()));
+      const data = await api('/reservations/calendar?' + params.toString());
+      const items = Array.isArray(data.items) ? data.items : [];
+      state.items = items;
+      dom.monthTitle.textContent = '予約表 ' + formatMonthLabel(state.currentMonth);
+      dom.summary.textContent =
+        '総件数: ' + Number(data.total || items.length) + '件'
+        + ' | 食べログ: ' + Number(data.source_counts && data.source_counts.tabelog || 0) + '件'
+        + ' | 一休: ' + Number(data.source_counts && data.source_counts.ikyu || 0) + '件';
+      dom.lastRefresh.textContent = '最終更新: ' + formatDateJst(data.generated_at || new Date().toISOString());
+      renderCalendar(items);
+    }
+
+    dom.saveTokenBtn.addEventListener('click', async function() {
+      setToken(String(dom.tokenInput.value || '').trim());
+      dom.tokenInput.value = '';
+      try {
+        await loadCalendar();
+      } catch (error) {
+        alert(error.message || String(error));
+      }
+    });
+
+    dom.clearTokenBtn.addEventListener('click', function() {
+      setToken('');
+      dom.calendar.innerHTML = '';
+      dom.summary.textContent = '未取得';
+      dom.lastRefresh.textContent = '最終更新: なし';
+    });
+
+    dom.prevMonthBtn.addEventListener('click', async function() {
+      state.currentMonth = shiftMonth(state.currentMonth, -1);
+      try { await loadCalendar(); } catch (error) { alert(error.message || String(error)); }
+    });
+
+    dom.thisMonthBtn.addEventListener('click', async function() {
+      state.currentMonth = getCurrentMonthJst();
+      try { await loadCalendar(); } catch (error) { alert(error.message || String(error)); }
+    });
+
+    dom.nextMonthBtn.addEventListener('click', async function() {
+      state.currentMonth = shiftMonth(state.currentMonth, 1);
+      try { await loadCalendar(); } catch (error) { alert(error.message || String(error)); }
+    });
+
+    dom.sourceFilter.addEventListener('change', async function() {
+      state.source = String(dom.sourceFilter.value || 'all');
+      try { await loadCalendar(); } catch (error) { alert(error.message || String(error)); }
+    });
+
+    dom.reloadBtn.addEventListener('click', async function() {
+      try { await loadCalendar(); } catch (error) { alert(error.message || String(error)); }
+    });
+
+    (function init() {
+      dom.projectUrlInput.value = FIXED_PROJECT_URL;
+      dom.sourceFilter.value = state.source;
+      updateAuthState();
+      dom.monthTitle.textContent = '予約表 ' + formatMonthLabel(state.currentMonth);
+      if (getToken()) {
+        loadCalendar().catch(function(error) {
+          alert(error.message || String(error));
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

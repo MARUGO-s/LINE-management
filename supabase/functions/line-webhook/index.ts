@@ -4311,6 +4311,8 @@ async function extractPrimaryIntentWithGroq(
               '2) @All を含む全体周知、長文の通達、資料共有（画像/PDF/動画/ファイル）は基本 none。',
               '3) create_calendar は、本文の主目的が「1件の予定告知/設定」である時だけ。会議資料の文脈や提出期限連絡は none。',
               '3-1) 「参加希望は連絡ください」「ヘルプ募集」「使用店舗ありますか」「在庫共有」「締切案内」など募集・調整の業務連絡は none。',
+              '3-2) ただし「4月ミーティングを28日15:45に行いたいのですがよろしいでしょうか」のような、日時が明確な単発開催提案は create_calendar。',
+              '3-3) 議題の箇条書きや「共有」語が本文に含まれていても、予定本体が1件なら create_calendar を優先。',
               '4) list_calendar は、予定を尋ねる明確な質問語（いつ/ある/ありますか/教えて/確認）を伴う時のみ。',
               '5) search_messages は、会話・履歴・過去発言の検索意図が明確な時のみ。',
               '6) 少しでも迷う場合は none を選び、confidence を低めにする（0.55以下）。',
@@ -5844,6 +5846,17 @@ function looksLikeCalendarCandidate(text: string): boolean {
   return (hasDateHint && hasTimeHint) || (hasIntentWord && (hasDateHint || hasTimeHint))
 }
 
+function hasConcreteSingleScheduleProposalCue(compactText: string): boolean {
+  if (!compactText) return false
+  const hasDateHint =
+    /(\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}[\/.\-]\d{1,2}|(?:\d{1,2}月)?\d{1,2}日|今日|明日|明後日|来週|今週|来月|今月)/.test(compactText)
+  const hasTimeHint = /(\d{1,2}:\d{2}|\d{1,2}時(?:\d{1,2}分)?)/.test(compactText)
+  const hasEventWord = /(予定|会議|打ち合わせ|打合せ|ミーティング|meeting|mtg|予約|アポ|面談|イベント|講習会|セミナー)/i.test(compactText)
+  const hasProposalTone =
+    /(行いたい|行います|開催したい|開催します|実施したい|実施します|したいのですが|よろしいでしょうか|よろしいですか|いかがでしょうか|可能でしょうか|可能ですか|お願いできますか|お願いします)/.test(compactText)
+  return hasDateHint && hasTimeHint && hasEventWord && hasProposalTone
+}
+
 function looksLikeOperationalCoordinationText(text: string): boolean {
   const compact = normalizeForRuleParsing(text).replace(/\s+/g, '')
   if (!compact) return false
@@ -5851,6 +5864,7 @@ function looksLikeOperationalCoordinationText(text: string): boolean {
   const hasCoordinationCue =
     /(ヘルプ|参加者|参加希望|募集|使用店舗|希望店舗|使っていただける店舗|ご連絡|連絡お願いします|ご検討|共有|周知|案内|締切|締め切り|提出期限|回収|ピックアップ|納品|発注|在庫|欠品|配達|取りに来)/.test(compact)
   if (!hasCoordinationCue) return false
+  if (hasConcreteSingleScheduleProposalCue(compact)) return false
 
   const hasExplicitCalendarCreateIntent =
     /(予定登録|予定追加|予定作成|カレンダー登録|登録して|登録お願いします|入れて|追加して)/.test(compact)
@@ -6090,6 +6104,8 @@ async function extractCalendarIntentWithGroq(
               '「次回会議は6月12日、14:30～15:30にオンライン会議」のような文は title=会議, location=オンライン にしてください。',
               '提出期限など別目的の日付が混在していても、予定本体（会議/試飲会など）の日時を優先して抽出してください。',
               'ただし、次のような「募集・調整・共有」文脈は should_create=false にしてください: 「参加希望者はご連絡ください」「ヘルプ募集」「使用店舗ありますか」「在庫共有」「締切案内」。',
+              '一方で、日時・時刻が具体な単発開催提案（例: 「4月ミーティングを28日15:45に行いたいのですがよろしいでしょうか」）は should_create=true。',
+              '議題の箇条書きや「共有」語が混ざっても、予定本体が1件なら should_create=true で抽出してください。',
               '「〜のご案内」「よろしくお願いします」「皆様ぜひ〜」等の周知文は title に含めないでください。',
               `現在時刻は ${nowText} (${timezone})。相対表現（今日/明日/来週）を絶対日付に変換してください。`,
               '「18日の18時」のように月が未指定で日付だけある場合は、現在月（現在年）として解釈してください。',
