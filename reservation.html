@@ -496,6 +496,7 @@
       source: 'all',
       items: [],
       popupItems: {},
+      searchHits: [],
       nameQuery: '',
       visibleCount: 0,
       apiTotal: 0,
@@ -727,59 +728,144 @@
       dom.searchHitsOverlay.setAttribute('aria-hidden', 'true');
       dom.searchHitsList.innerHTML = '';
       dom.searchHitsSummary.textContent = '';
+      state.searchHits = [];
     }
 
-    function buildSearchHitRows() {
-      const rows = Object.entries(state.popupItems).map(([popupId, item]) => {
+    function buildSearchHitRows(items) {
+      const rows = Array.isArray(items) ? items.map((item) => {
         const summary = buildReservationSummary(item);
         const sourceLabel = sourceLabelFromItem(item);
         const visitDateTime = formatDateTimeDetailJst(item.visit_at);
+        const eventId = String(item && item.id != null ? item.id : '');
+        const month = String(item && item.visit_month || '').trim() || formatMonthKeyJst(item && item.visit_at);
         return {
-          popupId,
+          item,
+          source: String(item && item.source || '').trim(),
+          eventId,
+          month,
           sourceLabel,
           summary,
           visitDateTime,
           visitAt: String(item && item.visit_at || ''),
         };
-      });
-      rows.sort((a, b) => String(a.visitAt).localeCompare(String(b.visitAt)));
+      }) : [];
+      rows.sort((a, b) => String(b.visitAt).localeCompare(String(a.visitAt)));
       return rows;
     }
 
-    function buildSearchHitHtml(hit) {
+    function buildSearchHitHtml(hit, index) {
       const title = escapeHtml(hit.summary.customerName + ' / ' + hit.summary.visitTime + ' / ' + hit.summary.partySize);
       const sub = escapeHtml(hit.sourceLabel + ' / ' + hit.visitDateTime);
       return [
-        '<button type="button" class="search-hit-item" data-popup-id="' + escapeHtml(hit.popupId) + '">',
+        '<button type="button" class="search-hit-item" data-hit-index="' + escapeHtml(String(index)) + '">',
         '<div class="search-hit-title">' + title + '</div>',
         '<div class="search-hit-sub">' + sub + '</div>',
         '</button>',
       ].join('');
     }
 
-    function openSearchHitsModal() {
-      const query = String(state.nameQuery || '').trim();
+    async function openSearchHitsModal() {
+      const query = String(dom.nameFilterInput.value || state.nameQuery || '').trim();
       if (!query) {
         alert('名前を入力してください。');
         dom.nameFilterInput.focus();
         return;
       }
-      const hits = buildSearchHitRows();
-      if (hits.length === 0) {
-        alert('該当する予約はありません。');
-        return;
-      }
+      state.nameQuery = query;
       dom.searchHitsTitle.textContent = '名前検索結果';
-      dom.searchHitsSummary.textContent = '検索: ' + query + ' / ' + String(hits.length) + '件';
-      dom.searchHitsList.innerHTML = hits.map((hit) => buildSearchHitHtml(hit)).join('');
+      dom.searchHitsSummary.textContent = '検索中...';
+      dom.searchHitsList.innerHTML = '<div class="meta">検索中...</div>';
       dom.searchHitsOverlay.classList.add('open');
       dom.searchHitsOverlay.setAttribute('aria-hidden', 'false');
+
+      const params = new URLSearchParams();
+      params.set('q', query);
+      params.set('source', 'all');
+      params.set('limit', '160');
+      params.set('_ts', String(Date.now()));
+
+      try {
+        const data = await api('/reservations/search?' + params.toString());
+        const items = Array.isArray(data.items) ? data.items : [];
+        const hits = buildSearchHitRows(items);
+        state.searchHits = hits;
+        const truncated = data && data.truncated === true;
+        const suffix = truncated ? '（上位表示）' : '';
+        dom.searchHitsSummary.textContent = '検索: ' + query + ' / ' + String(hits.length) + '件（全期間）' + suffix;
+        if (hits.length === 0) {
+          dom.searchHitsList.innerHTML = '<div class="meta">該当する予約はありません。</div>';
+          return;
+        }
+        dom.searchHitsList.innerHTML = hits.map((hit, index) => buildSearchHitHtml(hit, index)).join('');
+      } catch (error) {
+        state.searchHits = [];
+        dom.searchHitsSummary.textContent = '検索エラー';
+        dom.searchHitsList.innerHTML = '<div class="meta">検索に失敗しました。</div>';
+        throw error;
+      }
+    }
+
+    function findPopupIdBySourceAndEventId(source, eventId) {
+      if (!source || !eventId) return '';
+      for (const [popupId, item] of Object.entries(state.popupItems)) {
+        const itemSource = String(item && item.source || '').trim();
+        const itemId = String(item && item.id != null ? item.id : '');
+        if (itemSource === source && itemId === eventId) {
+          return popupId;
+        }
+      }
+      return '';
+    }
+
+    function formatMonthKeyJst(value) {
+      const dayKey = formatDayKeyJst(value);
+      return dayKey ? dayKey.slice(0, 7) : '';
+    }
+
+    function syncSourceFilterUi() {
+      dom.sourceFilter.value = state.source;
+    }
+
+    async function jumpToSearchHit(hit) {
+      const source = String(hit && hit.source || '').trim();
+      const eventId = String(hit && hit.eventId || '').trim();
+      const month = String(hit && hit.month || '').trim();
+      let requiresReload = false;
+
+      if (month && month !== state.currentMonth) {
+        state.currentMonth = month;
+        requiresReload = true;
+      }
+
+      if (source && state.source !== 'all' && state.source !== source) {
+        state.source = source;
+        requiresReload = true;
+      }
+
+      if (requiresReload) {
+        syncSourceFilterUi();
+        await loadCalendar();
+      }
+
+      let popupId = findPopupIdBySourceAndEventId(source, eventId);
+      if (!popupId && state.source !== 'all') {
+        state.source = 'all';
+        syncSourceFilterUi();
+        await loadCalendar();
+        popupId = findPopupIdBySourceAndEventId(source, eventId);
+      }
+
+      if (!popupId) {
+        alert('対象予約が見つかりませんでした。');
+        return;
+      }
+      jumpToReservationCardByPopupId(popupId);
     }
 
     function jumpToReservationCardByPopupId(popupId) {
       const selector = '.js-resv-card[data-popup-id="' + String(popupId) + '"]';
       const card = dom.calendar.querySelector(selector);
-      if (!card) return;
+      if (!card) return false;
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
       card.classList.add('jump-target');
       if (state.jumpTimerId) {
@@ -790,6 +876,7 @@
         state.jumpTimerId = null;
       }, 1300);
       openReservationModalById(popupId);
+      return true;
     }
 
     function closeReservationModal() {
@@ -1035,12 +1122,16 @@
     dom.nameFilterInput.addEventListener('keydown', function(event) {
       if (event.key === 'Enter') {
         event.preventDefault();
-        openSearchHitsModal();
+        openSearchHitsModal().catch(function(error) {
+          alert(error && error.message ? error.message : String(error));
+        });
       }
     });
 
     dom.openSearchHitsBtn.addEventListener('click', function() {
-      openSearchHitsModal();
+      openSearchHitsModal().catch(function(error) {
+        alert(error && error.message ? error.message : String(error));
+      });
     });
 
     dom.reloadBtn.addEventListener('click', async function() {
@@ -1069,13 +1160,17 @@
 
     dom.searchHitsList.addEventListener('click', function(event) {
       const button = event.target && event.target.closest
-        ? event.target.closest('.search-hit-item[data-popup-id]')
+        ? event.target.closest('.search-hit-item[data-hit-index]')
         : null;
       if (!button) return;
-      const popupId = String(button.getAttribute('data-popup-id') || '');
-      if (!popupId) return;
+      const index = Number(button.getAttribute('data-hit-index'));
+      if (!Number.isInteger(index) || index < 0) return;
+      const hit = state.searchHits[index];
+      if (!hit) return;
       closeSearchHitsModal();
-      jumpToReservationCardByPopupId(popupId);
+      jumpToSearchHit(hit).catch(function(error) {
+        alert(error && error.message ? error.message : String(error));
+      });
     });
 
     document.addEventListener('keydown', function(event) {

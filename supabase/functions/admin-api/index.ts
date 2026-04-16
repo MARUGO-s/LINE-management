@@ -139,6 +139,9 @@ const USER_PERMISSION_LIST_DEFAULT_LIMIT = 100
 const USER_PERMISSION_LIST_MAX_LIMIT = 300
 /** Max rows fetched before in-memory sort (pagination applied after sort). */
 const USER_PERMISSION_SORT_FETCH_CAP = 10000
+const RESERVATION_SEARCH_DEFAULT_LIMIT = 120
+const RESERVATION_SEARCH_MAX_LIMIT = 300
+const RESERVATION_SEARCH_SOURCE_FETCH_CAP = 400
 
 type LineUserPermissionSortable = {
   display_name?: string | null
@@ -278,6 +281,10 @@ Deno.serve(async (req) => {
     if (req.method === "GET" && path === "/reservations/calendar") {
       const reservationCalendarState = await fetchReservationCalendarState(supabase, url)
       return json(reservationCalendarState, 200)
+    }
+    if (req.method === "GET" && path === "/reservations/search") {
+      const reservationSearchState = await fetchReservationSearchState(supabase, url)
+      return json(reservationSearchState, 200)
     }
 
     if (req.method === "POST" && path === "/documents") {
@@ -1737,12 +1744,7 @@ async function fetchReservationCalendarState(
   }
 
   for (const source of sources) {
-    const eventTable = source === "tabelog"
-      ? "tabelog_reservation_visit_events"
-      : "ikyu_reservation_visit_events"
-    const summaryTable = source === "tabelog"
-      ? "tabelog_reservation_visit_summaries"
-      : "ikyu_reservation_visit_summaries"
+    const { eventTable, summaryTable } = getReservationSourceTables(source)
 
     const [eventsRes, summariesRes] = await Promise.all([
       supabase
@@ -1765,36 +1767,16 @@ async function fetchReservationCalendarState(
       throw { status: 500, message: `Failed to fetch ${source} reservation summaries: ${summariesRes.error.message}` } satisfies AppError
     }
 
-    const summaryByCustomer = new Map<string, Record<string, unknown>>()
-    for (const row of summariesRes.data ?? []) {
-      const name = String((row as { customer_name?: unknown })?.customer_name ?? "").trim()
-      const phone = String((row as { customer_phone?: unknown })?.customer_phone ?? "").trim()
-      if (!name || !phone) continue
-      summaryByCustomer.set(`${name}__${phone}`, row as Record<string, unknown>)
-    }
+    const summaryByCustomer = buildReservationSummaryLookup(summariesRes.data)
 
     for (const row of eventsRes.data ?? []) {
-      const event = row as Record<string, unknown>
-      const name = String(event.customer_name ?? "").trim()
-      const phone = String(event.customer_phone ?? "").trim()
-      const visitAt = toSafeString(event.visit_at)
-      const createdAt = toSafeString(event.created_at)
-      if (!visitAt && !createdAt) continue
-      const summary = summaryByCustomer.get(`${name}__${phone}`)
-      const visitCount = Number(summary?.visit_count ?? 0)
-      items.push({
+      const item = buildReservationCalendarItem(
         source,
-        id: Number(event.id ?? 0),
-        gmail_message_id: toSafeString(event.gmail_message_id),
-        customer_name: name,
-        customer_phone: phone,
-        visit_at: visitAt || createdAt,
-        created_at: createdAt || visitAt,
-        visit_count: Number.isFinite(visitCount) && visitCount > 0 ? Math.floor(visitCount) : 0,
-        last_visit_at: toSafeString(summary?.last_visit_at),
-        reservation_type: toSafeString(event.reservation_type) || "unknown",
-        reservation_detail: toSafeString(event.reservation_detail),
-      })
+        row as Record<string, unknown>,
+        summaryByCustomer,
+      )
+      if (!item) continue
+      items.push(item)
       sourceCounts[source] += 1
     }
   }
@@ -1811,6 +1793,285 @@ async function fetchReservationCalendarState(
     items,
     generated_at: new Date().toISOString(),
   }
+}
+
+async function fetchReservationSearchState(
+  supabase: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const query = normalizeReservationSearchQuery(url.searchParams.get("q"))
+  if (!query) {
+    throw { status: 400, message: "q is required." } satisfies AppError
+  }
+
+  const sourceFilter = normalizeReservationSourceFilter(url.searchParams.get("source"))
+  const limit = clampInt(
+    url.searchParams.get("limit"),
+    RESERVATION_SEARCH_DEFAULT_LIMIT,
+    1,
+    RESERVATION_SEARCH_MAX_LIMIT,
+  )
+  const sources = sourceFilter === "all" ? ["tabelog", "ikyu"] as const : [sourceFilter] as const
+  const sourceFetchLimit = Math.min(
+    RESERVATION_SEARCH_SOURCE_FETCH_CAP,
+    Math.max(limit, Math.ceil(limit * (sourceFilter === "all" ? 1.5 : 1))),
+  )
+  const searchPatterns = buildReservationNameSearchPatterns(query)
+
+  const items: Array<Record<string, unknown>> = []
+  const sourceCounts: Record<string, number> = {
+    tabelog: 0,
+    ikyu: 0,
+  }
+  const sourceLimitReached: Record<string, boolean> = {
+    tabelog: false,
+    ikyu: false,
+  }
+
+  for (const source of sources) {
+    const { eventTable, summaryTable } = getReservationSourceTables(source)
+
+    let eventsQuery = supabase
+      .from(eventTable)
+      .select("id, gmail_message_id, customer_name, customer_phone, visit_at, created_at, reservation_type, reservation_detail")
+      .order("visit_at", { ascending: false })
+      .limit(sourceFetchLimit)
+
+    const escapedPatterns = searchPatterns
+      .map((pattern) => escapeLikePattern(pattern))
+      .filter((pattern) => pattern.length > 0)
+
+    if (escapedPatterns.length === 1) {
+      eventsQuery = eventsQuery.ilike("customer_name", `%${escapedPatterns[0]}%`)
+    } else if (escapedPatterns.length > 1) {
+      const filters = escapedPatterns.map((pattern) => `customer_name.ilike.%${pattern}%`)
+      eventsQuery = eventsQuery.or(filters.join(","))
+    }
+
+    const [eventsRes, summariesRes] = await Promise.all([
+      eventsQuery,
+      supabase
+        .from(summaryTable)
+        .select("customer_name, customer_phone, visit_count, last_visit_at")
+        .limit(5000),
+    ])
+
+    if (eventsRes.error) {
+      throw { status: 500, message: `Failed to search ${source} reservations: ${eventsRes.error.message}` } satisfies AppError
+    }
+    if (summariesRes.error) {
+      throw { status: 500, message: `Failed to fetch ${source} reservation summaries: ${summariesRes.error.message}` } satisfies AppError
+    }
+
+    const eventRows = Array.isArray(eventsRes.data) ? eventsRes.data : []
+    if (eventRows.length >= sourceFetchLimit) {
+      sourceLimitReached[source] = true
+    }
+
+    const summaryByCustomer = buildReservationSummaryLookup(summariesRes.data)
+    for (const row of eventRows) {
+      const item = buildReservationCalendarItem(
+        source,
+        row as Record<string, unknown>,
+        summaryByCustomer,
+      )
+      if (!item) continue
+      items.push(item)
+      sourceCounts[source] += 1
+    }
+  }
+
+  items.sort((a, b) => String(b.visit_at ?? "").localeCompare(String(a.visit_at ?? "")))
+  const truncated = items.length > limit || sourceLimitReached.tabelog || sourceLimitReached.ikyu
+
+  return {
+    query,
+    source_filter: sourceFilter,
+    limit,
+    total: items.length,
+    truncated,
+    source_counts: sourceCounts,
+    items: items.slice(0, limit),
+    generated_at: new Date().toISOString(),
+  }
+}
+
+function getReservationSourceTables(
+  source: "tabelog" | "ikyu",
+): { eventTable: "tabelog_reservation_visit_events" | "ikyu_reservation_visit_events"; summaryTable: "tabelog_reservation_visit_summaries" | "ikyu_reservation_visit_summaries" } {
+  if (source === "tabelog") {
+    return {
+      eventTable: "tabelog_reservation_visit_events",
+      summaryTable: "tabelog_reservation_visit_summaries",
+    }
+  }
+  return {
+    eventTable: "ikyu_reservation_visit_events",
+    summaryTable: "ikyu_reservation_visit_summaries",
+  }
+}
+
+function buildReservationSummaryLookup(rows: unknown): Map<string, Record<string, unknown>> {
+  const map = new Map<string, Record<string, unknown>>()
+  const list = Array.isArray(rows) ? rows : []
+  for (const row of list) {
+    if (!isRecord(row)) continue
+    const name = toSafeString(row.customer_name)
+    const phone = toSafeString(row.customer_phone)
+    if (!name || !phone) continue
+    map.set(`${name}__${phone}`, row)
+  }
+  return map
+}
+
+function buildReservationCalendarItem(
+  source: "tabelog" | "ikyu",
+  event: Record<string, unknown>,
+  summaryByCustomer: Map<string, Record<string, unknown>>,
+): Record<string, unknown> | null {
+  const name = String(event.customer_name ?? "").trim()
+  const phone = String(event.customer_phone ?? "").trim()
+  const visitAt = toSafeString(event.visit_at)
+  const createdAt = toSafeString(event.created_at)
+  if (!visitAt && !createdAt) return null
+
+  const visitAtValue = visitAt || createdAt
+  const createdAtValue = createdAt || visitAt
+  const reservationType = toSafeString(event.reservation_type) || "unknown"
+  const reservationDetail = toSafeString(event.reservation_detail)
+  const parsedDetail = parseReservationCalendarDetail(reservationDetail)
+  const routeLabel = normalizeCalendarText(
+    parsedDetail?.route ??
+      parsedDetail?.reservationSite ??
+      (source === "tabelog" ? "食べログ" : "一休.comレストラン"),
+    80,
+  ) ?? (source === "tabelog" ? "食べログ" : "一休.comレストラン")
+  const customerNameLabel = normalizeCalendarText(parsedDetail?.customerName, 80) ?? (name || null)
+  const planLabel = normalizeCalendarText(parsedDetail?.plan, 220) ??
+    (parsedDetail ? null : normalizeCalendarText(reservationDetail, 220))
+  const partySizeLabel = normalizeCalendarPartySize(parsedDetail?.partySize)
+  const allergyLabel = normalizeCalendarAllergy(parsedDetail?.allergy)
+  const visitTimeLabel = buildCalendarVisitTimeLabel(parsedDetail?.visitDateTime, visitAtValue)
+  const visitMonth = buildCalendarVisitMonthLabel(visitAtValue)
+  const summary = summaryByCustomer.get(`${name}__${phone}`)
+  const visitCount = Number(summary?.visit_count ?? 0)
+
+  return {
+    source,
+    id: Number(event.id ?? 0),
+    gmail_message_id: toSafeString(event.gmail_message_id),
+    customer_name: name,
+    customer_phone: phone,
+    visit_at: visitAtValue,
+    visit_month: visitMonth,
+    created_at: createdAtValue,
+    visit_count: Number.isFinite(visitCount) && visitCount > 0 ? Math.floor(visitCount) : 0,
+    last_visit_at: toSafeString(summary?.last_visit_at),
+    reservation_type: reservationType,
+    reservation_detail: reservationDetail,
+    route_label: routeLabel,
+    customer_name_label: customerNameLabel,
+    visit_time_label: visitTimeLabel,
+    plan_label: planLabel,
+    party_size_label: partySizeLabel,
+    allergy_label: allergyLabel,
+  }
+}
+
+function parseReservationCalendarDetail(detail: string): Record<string, unknown> | null {
+  const text = String(detail ?? "").trim()
+  if (!text || !text.startsWith("{")) return null
+  try {
+    const parsed = JSON.parse(text)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function normalizeCalendarText(value: unknown, maxLength = 160): string | null {
+  const normalized = toSafeString(value)
+  if (!normalized) return null
+  if (normalized === "不明" || normalized === "なし") return null
+  if (normalized.length > maxLength) return `${normalized.slice(0, maxLength)}...`
+  return normalized
+}
+
+function normalizeCalendarPartySize(value: unknown): string | null {
+  const text = normalizeCalendarText(value, 40)
+  if (!text) return null
+  const numberHit = text.match(/([0-9０-９]+)/)
+  if (!numberHit) return text
+  const digits = numberHit[1].replace(/[０-９]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+  return `${digits}名`
+}
+
+function normalizeCalendarAllergy(value: unknown): string | null {
+  const text = normalizeCalendarText(value, 120)
+  if (!text) return null
+  if (/^(なし|無|無し|ありません|特になし|該当なし|なしです|不要|記載なし)$/i.test(text)) return null
+  return text
+}
+
+function buildCalendarVisitTimeLabel(visitDateTime: unknown, visitAtIso: string): string | null {
+  const rawVisitDateTime = toSafeString(visitDateTime)
+  if (rawVisitDateTime) {
+    const hit = rawVisitDateTime.match(/([0-2]?\d):([0-5]\d)/)
+    if (hit) return `${String(Number(hit[1])).padStart(2, "0")}:${hit[2]}`
+  }
+
+  const fallback = toSafeString(visitAtIso)
+  if (!fallback) return null
+  const date = new Date(fallback)
+  if (Number.isNaN(date.getTime())) return null
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date)
+  const hour = parts.find((part) => part.type === "hour")?.value
+  const minute = parts.find((part) => part.type === "minute")?.value
+  if (!hour || !minute) return null
+  return `${hour}:${minute}`
+}
+
+function buildCalendarVisitMonthLabel(visitAtIso: string): string | null {
+  const iso = toSafeString(visitAtIso)
+  if (!iso) return null
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return null
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(date)
+  const year = parts.find((part) => part.type === "year")?.value
+  const month = parts.find((part) => part.type === "month")?.value
+  if (!year || !month) return null
+  return `${year}-${month}`
+}
+
+function normalizeReservationSearchQuery(value: string | null): string {
+  const query = toSafeString(value).replace(/\u3000/g, " ").replace(/\s+/g, " ").trim()
+  return query
+}
+
+function buildReservationNameSearchPatterns(query: string): string[] {
+  const compact = query.replace(/\s+/g, "").replace(/様/g, "").trim()
+  const noHonorific = query.replace(/様/g, "").trim()
+  return [...new Set([
+    query,
+    noHonorific,
+    compact,
+  ].map((value) => value.trim()).filter((value) => value.length > 0))]
+}
+
+function escapeLikePattern(value: string): string {
+  return String(value)
+    .replaceAll("\\", "\\\\")
+    .replaceAll("%", "\\%")
+    .replaceAll("_", "\\_")
 }
 
 function normalizeCalendarMonthParam(value: string | null): string {
