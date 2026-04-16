@@ -357,12 +357,16 @@ async function maybeAccumulatePartnerVisitHistory(
   if (!normalizedName || !normalizedPhone) return alert
 
   const visitAtIso = parseHistoryVisitDateIso(alert.reservation?.visitDateTime, alert.internalDateIso)
+  const reservationType = inferReservationTypeLabel(alert.reservation?.plan, alert.reservation?.seatName)
+  const reservationDetail = buildReservationDetailLabel(alert.reservation?.plan, alert.reservation?.seatName)
   try {
     const { data, error } = await supabase.rpc(historyConfig.rpcName, {
       p_gmail_message_id: alert.id,
       p_customer_name: normalizedName,
       p_customer_phone: normalizedPhone,
       p_visit_at: visitAtIso,
+      p_reservation_type: reservationType,
+      p_reservation_detail: reservationDetail,
     })
     if (error) {
       console.error(`Failed to record ${historyConfig.partnerKey} reservation visit:`, error.message)
@@ -429,8 +433,25 @@ function normalizeHistoryPhoneNumber(value: string | null | undefined): string |
 function parseHistoryVisitDateIso(value: string | null | undefined, fallbackIso: string | null): string | null {
   const parsed = parseReservationDateTime(normalizeInlineText(String(value ?? "")), fallbackIso)
   if (!parsed) return fallbackIso
-  const iso = new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day, parsed.hour, parsed.minute)).toISOString()
+  // Parsed values are JST-local reservation times; convert to UTC for storage.
+  const iso = new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day, parsed.hour - 9, parsed.minute)).toISOString()
   return iso
+}
+
+function inferReservationTypeLabel(plan: string | null | undefined, seatName: string | null | undefined): string {
+  const normalizedPlan = normalizeInlineText(String(plan ?? ""))
+  if (normalizedPlan && normalizedPlan !== "不明" && normalizedPlan !== "なし") return "course"
+  const normalizedSeat = normalizeInlineText(String(seatName ?? ""))
+  if (normalizedSeat && normalizedSeat !== "不明" && normalizedSeat !== "なし") return "seat_only"
+  return "unknown"
+}
+
+function buildReservationDetailLabel(plan: string | null | undefined, seatName: string | null | undefined): string | null {
+  const normalizedPlan = normalizeInlineText(String(plan ?? ""))
+  if (normalizedPlan && normalizedPlan !== "不明" && normalizedPlan !== "なし") return truncateForLine(normalizedPlan, 160)
+  const normalizedSeat = normalizeInlineText(String(seatName ?? ""))
+  if (normalizedSeat && normalizedSeat !== "不明" && normalizedSeat !== "なし") return truncateForLine(normalizedSeat, 160)
+  return null
 }
 
 async function resolveGmailAlertTargetRooms(

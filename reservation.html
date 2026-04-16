@@ -226,11 +226,13 @@
     }
 
     .resv.source-tabelog {
-      border-color: rgba(131, 223, 255, 0.45);
+      border-color: rgba(255, 190, 122, 0.7);
+      background: rgba(91, 48, 8, 0.62);
     }
 
     .resv.source-ikyu {
-      border-color: rgba(143, 244, 183, 0.4);
+      border-color: rgba(133, 238, 173, 0.75);
+      background: rgba(16, 78, 45, 0.62);
     }
 
     .resv-top {
@@ -250,6 +252,13 @@
 
     .resv-sub {
       color: #9bc8df;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .resv-kind {
+      color: #ffe4b8;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -407,6 +416,22 @@
       }).format(date);
     }
 
+    function appendHonorific(name) {
+      const normalized = String(name || '').trim();
+      if (!normalized) return '-';
+      if (/様$/.test(normalized)) return normalized;
+      return normalized + '様';
+    }
+
+    function formatReservationKind(type, detail) {
+      const t = String(type || '').trim().toLowerCase();
+      const d = String(detail || '').trim();
+      if (t === 'course') return d ? ('コース: ' + d) : 'コース予約';
+      if (t === 'seat_only') return d ? ('席のみ: ' + d) : '席のみ予約';
+      if (d) return d;
+      return '種別不明';
+    }
+
     function formatDayKeyJst(value) {
       const date = new Date(value);
       if (Number.isNaN(date.getTime())) return '';
@@ -490,11 +515,15 @@
         const itemHtml = dayItems.map((item) => {
           const source = String(item.source || '');
           const sourceLabel = source === 'tabelog' ? '食べログ' : (source === 'ikyu' ? '一休' : source);
+          const timeLabel = escapeHtml(formatDateJst(item.visit_at).slice(-5));
+          const nameLabel = escapeHtml(appendHonorific(item.customer_name));
+          const kindLabel = escapeHtml(formatReservationKind(item.reservation_type, item.reservation_detail));
           return [
             '<div class="resv source-' + escapeHtml(source) + '">',
-            '<div class="resv-top"><span>' + escapeHtml(sourceLabel) + '</span><span>' + escapeHtml(formatDateJst(item.visit_at).slice(-5)) + '</span></div>',
-            '<div class="resv-name" title="' + escapeHtml(String(item.customer_name || '-')) + '">' + escapeHtml(String(item.customer_name || '-')) + '</div>',
+            '<div class="resv-top"><span>' + escapeHtml(sourceLabel) + '</span><span>' + timeLabel + '</span></div>',
+            '<div class="resv-name" title="' + nameLabel + '">' + nameLabel + '</div>',
             '<div class="resv-sub" title="' + escapeHtml(String(item.customer_phone || '-')) + '">TEL: ' + escapeHtml(String(item.customer_phone || '-')) + '</div>',
+            '<div class="resv-kind" title="' + kindLabel + '">' + kindLabel + '</div>',
             '<div class="resv-sub">予約回数: ' + escapeHtml(String(item.visit_count || 0)) + '回</div>',
             '</div>',
           ].join('');

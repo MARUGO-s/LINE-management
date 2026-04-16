@@ -1747,7 +1747,7 @@ async function fetchReservationCalendarState(
     const [eventsRes, summariesRes] = await Promise.all([
       supabase
         .from(eventTable)
-        .select("id, gmail_message_id, customer_name, customer_phone, visit_at, created_at")
+        .select("id, gmail_message_id, customer_name, customer_phone, visit_at, created_at, reservation_type, reservation_detail")
         .gte("visit_at", range.startIso)
         .lt("visit_at", range.endIso)
         .order("visit_at", { ascending: true })
@@ -1792,6 +1792,8 @@ async function fetchReservationCalendarState(
         created_at: createdAt || visitAt,
         visit_count: Number.isFinite(visitCount) && visitCount > 0 ? Math.floor(visitCount) : 0,
         last_visit_at: toSafeString(summary?.last_visit_at),
+        reservation_type: toSafeString(event.reservation_type) || "unknown",
+        reservation_detail: toSafeString(event.reservation_detail),
       })
       sourceCounts[source] += 1
     }
