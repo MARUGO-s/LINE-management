@@ -231,6 +231,17 @@
       outline-offset: 1px;
     }
 
+    .resv.jump-target {
+      box-shadow: 0 0 0 2px rgba(147, 233, 255, 0.95), 0 0 24px rgba(120, 216, 255, 0.5);
+      animation: jumpPulse 1.2s ease-out;
+    }
+
+    @keyframes jumpPulse {
+      0% { transform: scale(1); }
+      35% { transform: scale(1.02); }
+      100% { transform: scale(1); }
+    }
+
     .resv.source-tabelog {
       border-color: rgba(255, 190, 122, 0.7);
       background: rgba(91, 48, 8, 0.62);
@@ -346,6 +357,45 @@
       overflow-wrap: anywhere;
     }
 
+    .search-hit-summary {
+      color: #9fc9df;
+      font-size: 0.82rem;
+      margin-bottom: 8px;
+    }
+
+    .search-hit-list {
+      display: grid;
+      gap: 7px;
+    }
+
+    .search-hit-item {
+      width: 100%;
+      text-align: left;
+      border-radius: 10px;
+      border: 1px solid rgba(155, 220, 255, 0.2);
+      background: rgba(9, 31, 49, 0.66);
+      color: #e8f7ff;
+      font: inherit;
+      padding: 8px 9px;
+      cursor: pointer;
+    }
+
+    .search-hit-item:hover {
+      border-color: rgba(155, 220, 255, 0.44);
+      background: rgba(12, 43, 66, 0.78);
+    }
+
+    .search-hit-title {
+      font-weight: 700;
+      margin-bottom: 2px;
+      color: #eaf8ff;
+    }
+
+    .search-hit-sub {
+      color: #9cc6de;
+      font-size: 0.8rem;
+    }
+
     @media (max-width: 980px) {
       .calendar {
         grid-template-columns: repeat(1, minmax(0, 1fr));
@@ -402,6 +452,7 @@
             <option value="ikyu">一休</option>
           </select>
           <input id="nameFilterInput" class="input" type="text" placeholder="名前検索（例: 石田）" aria-label="予約者名検索">
+          <button id="openSearchHitsBtn" class="button">候補一覧</button>
           <button id="reloadBtn" class="button primary">再読み込み</button>
         </div>
       </div>
@@ -421,6 +472,18 @@
       <div id="resvModalRows" class="resv-modal-rows"></div>
     </div>
   </div>
+  <div id="searchHitsOverlay" class="resv-modal-overlay" aria-hidden="true">
+    <div class="resv-modal" role="dialog" aria-modal="true" aria-labelledby="searchHitsTitle">
+      <div class="resv-modal-head">
+        <div>
+          <h3 id="searchHitsTitle" class="resv-modal-title">名前検索結果</h3>
+          <div id="searchHitsSummary" class="search-hit-summary"></div>
+        </div>
+        <button id="searchHitsClose" type="button" class="resv-modal-close">閉じる</button>
+      </div>
+      <div id="searchHitsList" class="search-hit-list"></div>
+    </div>
+  </div>
 
   <script>
     const STORE_TOKEN_KEY = 'line_summary_admin_token';
@@ -437,6 +500,7 @@
       visibleCount: 0,
       apiTotal: 0,
       apiSourceCounts: { tabelog: 0, ikyu: 0 },
+      jumpTimerId: null,
     };
 
     const dom = {
@@ -452,6 +516,7 @@
       nextMonthBtn: document.getElementById('nextMonthBtn'),
       sourceFilter: document.getElementById('sourceFilter'),
       nameFilterInput: document.getElementById('nameFilterInput'),
+      openSearchHitsBtn: document.getElementById('openSearchHitsBtn'),
       reloadBtn: document.getElementById('reloadBtn'),
       summary: document.getElementById('summary'),
       calendar: document.getElementById('calendar'),
@@ -460,6 +525,11 @@
       resvModalSub: document.getElementById('resvModalSub'),
       resvModalRows: document.getElementById('resvModalRows'),
       resvModalClose: document.getElementById('resvModalClose'),
+      searchHitsOverlay: document.getElementById('searchHitsOverlay'),
+      searchHitsTitle: document.getElementById('searchHitsTitle'),
+      searchHitsSummary: document.getElementById('searchHitsSummary'),
+      searchHitsList: document.getElementById('searchHitsList'),
+      searchHitsClose: document.getElementById('searchHitsClose'),
     };
 
     function getToken() {
@@ -652,6 +722,76 @@
       return '<div class="resv-modal-row"><div class="resv-modal-label">' + safeLabel + '</div><div class="resv-modal-value">' + safeValue + '</div></div>';
     }
 
+    function closeSearchHitsModal() {
+      dom.searchHitsOverlay.classList.remove('open');
+      dom.searchHitsOverlay.setAttribute('aria-hidden', 'true');
+      dom.searchHitsList.innerHTML = '';
+      dom.searchHitsSummary.textContent = '';
+    }
+
+    function buildSearchHitRows() {
+      const rows = Object.entries(state.popupItems).map(([popupId, item]) => {
+        const summary = buildReservationSummary(item);
+        const sourceLabel = sourceLabelFromItem(item);
+        const visitDateTime = formatDateTimeDetailJst(item.visit_at);
+        return {
+          popupId,
+          sourceLabel,
+          summary,
+          visitDateTime,
+          visitAt: String(item && item.visit_at || ''),
+        };
+      });
+      rows.sort((a, b) => String(a.visitAt).localeCompare(String(b.visitAt)));
+      return rows;
+    }
+
+    function buildSearchHitHtml(hit) {
+      const title = escapeHtml(hit.summary.customerName + ' / ' + hit.summary.visitTime + ' / ' + hit.summary.partySize);
+      const sub = escapeHtml(hit.sourceLabel + ' / ' + hit.visitDateTime);
+      return [
+        '<button type="button" class="search-hit-item" data-popup-id="' + escapeHtml(hit.popupId) + '">',
+        '<div class="search-hit-title">' + title + '</div>',
+        '<div class="search-hit-sub">' + sub + '</div>',
+        '</button>',
+      ].join('');
+    }
+
+    function openSearchHitsModal() {
+      const query = String(state.nameQuery || '').trim();
+      if (!query) {
+        alert('名前を入力してください。');
+        dom.nameFilterInput.focus();
+        return;
+      }
+      const hits = buildSearchHitRows();
+      if (hits.length === 0) {
+        alert('該当する予約はありません。');
+        return;
+      }
+      dom.searchHitsTitle.textContent = '名前検索結果';
+      dom.searchHitsSummary.textContent = '検索: ' + query + ' / ' + String(hits.length) + '件';
+      dom.searchHitsList.innerHTML = hits.map((hit) => buildSearchHitHtml(hit)).join('');
+      dom.searchHitsOverlay.classList.add('open');
+      dom.searchHitsOverlay.setAttribute('aria-hidden', 'false');
+    }
+
+    function jumpToReservationCardByPopupId(popupId) {
+      const selector = '.js-resv-card[data-popup-id="' + String(popupId) + '"]';
+      const card = dom.calendar.querySelector(selector);
+      if (!card) return;
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.add('jump-target');
+      if (state.jumpTimerId) {
+        clearTimeout(state.jumpTimerId);
+      }
+      state.jumpTimerId = setTimeout(function() {
+        card.classList.remove('jump-target');
+        state.jumpTimerId = null;
+      }, 1300);
+      openReservationModalById(popupId);
+    }
+
     function closeReservationModal() {
       dom.resvModalOverlay.classList.remove('open');
       dom.resvModalOverlay.setAttribute('aria-hidden', 'true');
@@ -743,10 +883,12 @@
       if (!parsed) {
         dom.calendar.innerHTML = '<div class="meta">月の形式が不正です。</div>';
         state.popupItems = {};
+        closeSearchHitsModal();
         closeReservationModal();
         return 0;
       }
 
+      closeSearchHitsModal();
       closeReservationModal();
 
       const first = new Date(Date.UTC(parsed.year, parsed.month - 1, 1));
@@ -860,6 +1002,7 @@
       state.apiSourceCounts = { tabelog: 0, ikyu: 0 };
       state.visibleCount = 0;
       state.popupItems = {};
+      closeSearchHitsModal();
       closeReservationModal();
     });
 
@@ -889,6 +1032,17 @@
       updateSummaryText();
     });
 
+    dom.nameFilterInput.addEventListener('keydown', function(event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        openSearchHitsModal();
+      }
+    });
+
+    dom.openSearchHitsBtn.addEventListener('click', function() {
+      openSearchHitsModal();
+    });
+
     dom.reloadBtn.addEventListener('click', async function() {
       try { await loadCalendar(); } catch (error) { alert(error.message || String(error)); }
     });
@@ -903,7 +1057,32 @@
       }
     });
 
+    dom.searchHitsClose.addEventListener('click', function() {
+      closeSearchHitsModal();
+    });
+
+    dom.searchHitsOverlay.addEventListener('click', function(event) {
+      if (event.target === dom.searchHitsOverlay) {
+        closeSearchHitsModal();
+      }
+    });
+
+    dom.searchHitsList.addEventListener('click', function(event) {
+      const button = event.target && event.target.closest
+        ? event.target.closest('.search-hit-item[data-popup-id]')
+        : null;
+      if (!button) return;
+      const popupId = String(button.getAttribute('data-popup-id') || '');
+      if (!popupId) return;
+      closeSearchHitsModal();
+      jumpToReservationCardByPopupId(popupId);
+    });
+
     document.addEventListener('keydown', function(event) {
+      if (event.key === 'Escape' && dom.searchHitsOverlay.classList.contains('open')) {
+        closeSearchHitsModal();
+        return;
+      }
       if (event.key === 'Escape' && dom.resvModalOverlay.classList.contains('open')) {
         closeReservationModal();
       }
