@@ -544,8 +544,9 @@
     function withHonorificName(value) {
       const name = normalizeCardField(value, '不明');
       if (name === '不明') return name;
-      if (/様$/.test(name)) return name;
-      return name + '様';
+      const baseName = name.replace(/\s*様$/, '').trim();
+      if (!baseName) return '不明';
+      return baseName + ' 様';
     }
 
     function formatDateTimeDetailJst(value) {
