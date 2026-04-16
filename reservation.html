@@ -541,6 +541,13 @@
       return text;
     }
 
+    function withHonorificName(value) {
+      const name = normalizeCardField(value, '不明');
+      if (name === '不明') return name;
+      if (/様$/.test(name)) return name;
+      return name + '様';
+    }
+
     function formatDateTimeDetailJst(value) {
       if (!value) return '不明';
       const date = new Date(value);
@@ -573,7 +580,7 @@
     }
 
     function buildReservationSummary(item) {
-      const customerName = normalizeCardField(item.customer_name_label || item.customer_name, '不明');
+      const customerName = withHonorificName(item.customer_name_label || item.customer_name);
       const visitTime = normalizeCardField(item.visit_time_label || formatTimeJst(item.visit_at), '不明');
       const partySize = normalizeCardField(item.party_size_label, '不明');
       return {
@@ -586,7 +593,7 @@
     function buildReservationDetailRows(item) {
       const sourceLabel = sourceLabelFromItem(item);
       const route = normalizeCardField(item.route_label, sourceLabel);
-      const customerName = normalizeCardField(item.customer_name_label || item.customer_name, '不明');
+      const customerName = withHonorificName(item.customer_name_label || item.customer_name);
       const dateTime = formatDateTimeDetailJst(item.visit_at);
       const visitTime = normalizeCardField(item.visit_time_label || formatTimeJst(item.visit_at), '不明');
       const partySize = normalizeCardField(item.party_size_label, '不明');
