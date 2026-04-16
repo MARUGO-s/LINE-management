@@ -139,9 +139,9 @@ const USER_PERMISSION_LIST_DEFAULT_LIMIT = 100
 const USER_PERMISSION_LIST_MAX_LIMIT = 300
 /** Max rows fetched before in-memory sort (pagination applied after sort). */
 const USER_PERMISSION_SORT_FETCH_CAP = 10000
-const RESERVATION_SEARCH_DEFAULT_LIMIT = 120
-const RESERVATION_SEARCH_MAX_LIMIT = 300
-const RESERVATION_SEARCH_SOURCE_FETCH_CAP = 400
+const RESERVATION_SEARCH_DEFAULT_LIMIT = 100
+const RESERVATION_SEARCH_MAX_LIMIT = 200
+const RESERVATION_SEARCH_SOURCE_FETCH_CAP = 240
 
 type LineUserPermissionSortable = {
   display_name?: string | null
@@ -1814,7 +1814,7 @@ async function fetchReservationSearchState(
   const sources = sourceFilter === "all" ? ["tabelog", "ikyu"] as const : [sourceFilter] as const
   const sourceFetchLimit = Math.min(
     RESERVATION_SEARCH_SOURCE_FETCH_CAP,
-    Math.max(limit, Math.ceil(limit * (sourceFilter === "all" ? 1.5 : 1))),
+    Math.max(limit, Math.ceil(limit * 2)),
   )
   const searchPatterns = buildReservationNameSearchPatterns(query)
 
@@ -1829,7 +1829,7 @@ async function fetchReservationSearchState(
   }
 
   for (const source of sources) {
-    const { eventTable, summaryTable } = getReservationSourceTables(source)
+    const { eventTable } = getReservationSourceTables(source)
 
     let eventsQuery = supabase
       .from(eventTable)
@@ -1855,32 +1855,22 @@ async function fetchReservationSearchState(
       eventsQuery = eventsQuery.or(filters.join(","))
     }
 
-    const [eventsRes, summariesRes] = await Promise.all([
-      eventsQuery,
-      supabase
-        .from(summaryTable)
-        .select("customer_name, customer_phone, visit_count, last_visit_at")
-        .limit(5000),
-    ])
+    const { data, error } = await eventsQuery
 
-    if (eventsRes.error) {
-      throw { status: 500, message: `Failed to search ${source} reservations: ${eventsRes.error.message}` } satisfies AppError
-    }
-    if (summariesRes.error) {
-      throw { status: 500, message: `Failed to fetch ${source} reservation summaries: ${summariesRes.error.message}` } satisfies AppError
+    if (error) {
+      throw { status: 500, message: `Failed to search ${source} reservations: ${error.message}` } satisfies AppError
     }
 
-    const eventRows = Array.isArray(eventsRes.data) ? eventsRes.data : []
+    const eventRows = Array.isArray(data) ? data : []
     if (eventRows.length >= sourceFetchLimit) {
       sourceLimitReached[source] = true
     }
 
-    const summaryByCustomer = buildReservationSummaryLookup(summariesRes.data)
     for (const row of eventRows) {
       const item = buildReservationCalendarItem(
         source,
         row as Record<string, unknown>,
-        summaryByCustomer,
+        null,
       )
       if (!item) continue
       if (!matchesReservationSearchItem(item, query)) continue
@@ -1935,7 +1925,7 @@ function buildReservationSummaryLookup(rows: unknown): Map<string, Record<string
 function buildReservationCalendarItem(
   source: "tabelog" | "ikyu",
   event: Record<string, unknown>,
-  summaryByCustomer: Map<string, Record<string, unknown>>,
+  summaryByCustomer: Map<string, Record<string, unknown>> | null,
 ): Record<string, unknown> | null {
   const name = String(event.customer_name ?? "").trim()
   const phone = String(event.customer_phone ?? "").trim()
@@ -1961,7 +1951,7 @@ function buildReservationCalendarItem(
   const allergyLabel = normalizeCalendarAllergy(parsedDetail?.allergy)
   const visitTimeLabel = buildCalendarVisitTimeLabel(parsedDetail?.visitDateTime, visitAtValue)
   const visitMonth = buildCalendarVisitMonthLabel(visitAtValue)
-  const summary = summaryByCustomer.get(`${name}__${phone}`)
+  const summary = summaryByCustomer?.get(`${name}__${phone}`)
   const visitCount = Number(summary?.visit_count ?? 0)
 
   return {
