@@ -401,6 +401,7 @@
             <option value="tabelog">食べログ</option>
             <option value="ikyu">一休</option>
           </select>
+          <input id="nameFilterInput" class="input" type="text" placeholder="名前検索（例: 石田）" aria-label="予約者名検索">
           <button id="reloadBtn" class="button primary">再読み込み</button>
         </div>
       </div>
@@ -432,6 +433,10 @@
       source: 'all',
       items: [],
       popupItems: {},
+      nameQuery: '',
+      visibleCount: 0,
+      apiTotal: 0,
+      apiSourceCounts: { tabelog: 0, ikyu: 0 },
     };
 
     const dom = {
@@ -446,6 +451,7 @@
       thisMonthBtn: document.getElementById('thisMonthBtn'),
       nextMonthBtn: document.getElementById('nextMonthBtn'),
       sourceFilter: document.getElementById('sourceFilter'),
+      nameFilterInput: document.getElementById('nameFilterInput'),
       reloadBtn: document.getElementById('reloadBtn'),
       summary: document.getElementById('summary'),
       calendar: document.getElementById('calendar'),
@@ -539,6 +545,28 @@
       const text = String(value || '').trim();
       if (!text) return fallback;
       return text;
+    }
+
+    function normalizeNameSearchKey(value) {
+      return String(value || '')
+        .replace(/\u3000/g, ' ')
+        .replace(/\s+/g, '')
+        .replace(/様/g, '')
+        .trim()
+        .toLowerCase();
+    }
+
+    function matchesNameFilter(item, query) {
+      const queryKey = normalizeNameSearchKey(query);
+      if (!queryKey) return true;
+      const candidates = [
+        item && item.customer_name_label,
+        item && item.customer_name,
+      ];
+      return candidates.some((candidate) => {
+        const key = normalizeNameSearchKey(candidate);
+        return key.includes(queryKey);
+      });
     }
 
     function withHonorificName(value) {
@@ -696,13 +724,27 @@
       dom.authState.className = hasToken ? 'pill ok' : 'pill';
     }
 
+    function updateSummaryText() {
+      const total = Number(state.apiTotal || state.items.length || 0);
+      const tabelogCount = Number(state.apiSourceCounts && state.apiSourceCounts.tabelog || 0);
+      const ikyuCount = Number(state.apiSourceCounts && state.apiSourceCounts.ikyu || 0);
+      let text =
+        '総件数: ' + total + '件'
+        + ' | 食べログ: ' + tabelogCount + '件'
+        + ' | 一休: ' + ikyuCount + '件';
+      if (state.nameQuery && state.nameQuery.trim()) {
+        text += ' | 名前検索表示: ' + Number(state.visibleCount || 0) + '件';
+      }
+      dom.summary.textContent = text;
+    }
+
     function renderCalendar(items) {
       const parsed = parseMonth(state.currentMonth);
       if (!parsed) {
         dom.calendar.innerHTML = '<div class="meta">月の形式が不正です。</div>';
         state.popupItems = {};
         closeReservationModal();
-        return;
+        return 0;
       }
 
       closeReservationModal();
@@ -711,9 +753,12 @@
       const firstWeekday = (first.getUTCDay() + 0) % 7;
       const daysInMonth = new Date(Date.UTC(parsed.year, parsed.month, 0)).getUTCDate();
       const daysPrevMonth = new Date(Date.UTC(parsed.year, parsed.month - 1, 0)).getUTCDate();
+      const filteredItems = Array.isArray(items)
+        ? items.filter((item) => matchesNameFilter(item, state.nameQuery))
+        : [];
 
       const byDay = new Map();
-      for (const item of items) {
+      for (const item of filteredItems) {
         const key = formatDayKeyJst(item.visit_at);
         if (!key) continue;
         if (!byDay.has(key)) byDay.set(key, []);
@@ -774,6 +819,7 @@
       dom.calendar.innerHTML = html.join('');
       state.popupItems = popupItems;
       bindReservationCardPopupEvents();
+      return filteredItems.length;
     }
 
     async function loadCalendar() {
@@ -784,13 +830,15 @@
       const data = await api('/reservations/calendar?' + params.toString());
       const items = Array.isArray(data.items) ? data.items : [];
       state.items = items;
+      state.apiTotal = Number(data.total || items.length || 0);
+      state.apiSourceCounts = {
+        tabelog: Number(data.source_counts && data.source_counts.tabelog || 0),
+        ikyu: Number(data.source_counts && data.source_counts.ikyu || 0),
+      };
       dom.monthTitle.textContent = '予約表 ' + formatMonthLabel(state.currentMonth);
-      dom.summary.textContent =
-        '総件数: ' + Number(data.total || items.length) + '件'
-        + ' | 食べログ: ' + Number(data.source_counts && data.source_counts.tabelog || 0) + '件'
-        + ' | 一休: ' + Number(data.source_counts && data.source_counts.ikyu || 0) + '件';
       dom.lastRefresh.textContent = '最終更新: ' + formatDateJst(data.generated_at || new Date().toISOString());
-      renderCalendar(items);
+      state.visibleCount = renderCalendar(items);
+      updateSummaryText();
     }
 
     dom.saveTokenBtn.addEventListener('click', async function() {
@@ -808,6 +856,9 @@
       dom.calendar.innerHTML = '';
       dom.summary.textContent = '未取得';
       dom.lastRefresh.textContent = '最終更新: なし';
+      state.apiTotal = 0;
+      state.apiSourceCounts = { tabelog: 0, ikyu: 0 };
+      state.visibleCount = 0;
       state.popupItems = {};
       closeReservationModal();
     });
@@ -830,6 +881,12 @@
     dom.sourceFilter.addEventListener('change', async function() {
       state.source = String(dom.sourceFilter.value || 'all');
       try { await loadCalendar(); } catch (error) { alert(error.message || String(error)); }
+    });
+
+    dom.nameFilterInput.addEventListener('input', function() {
+      state.nameQuery = String(dom.nameFilterInput.value || '').trim();
+      state.visibleCount = renderCalendar(state.items);
+      updateSummaryText();
     });
 
     dom.reloadBtn.addEventListener('click', async function() {
@@ -855,6 +912,7 @@
     (function init() {
       dom.projectUrlInput.value = FIXED_PROJECT_URL;
       dom.sourceFilter.value = state.source;
+      dom.nameFilterInput.value = state.nameQuery;
       updateAuthState();
       dom.monthTitle.textContent = '予約表 ' + formatMonthLabel(state.currentMonth);
       if (getToken()) {
