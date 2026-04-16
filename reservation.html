@@ -490,6 +490,10 @@
     const FIXED_PROJECT_URL = 'https://jhpmzqxqvapdkyvvhyra.supabase.co';
     const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
     const JST = 'Asia/Tokyo';
+    const SEARCH_FALLBACK_PAST_MONTHS = 48;
+    const SEARCH_FALLBACK_FUTURE_MONTHS = 12;
+    const SEARCH_FALLBACK_BATCH_SIZE = 6;
+    const SEARCH_FALLBACK_MAX_HITS = 240;
 
     const state = {
       currentMonth: getCurrentMonthJst(),
@@ -620,6 +624,7 @@
 
     function normalizeNameSearchKey(value) {
       return String(value || '')
+        .replace(/[（(][^）)]*[）)]/g, '')
         .replace(/\u3000/g, ' ')
         .replace(/\s+/g, '')
         .replace(/様/g, '')
@@ -633,6 +638,7 @@
       const candidates = [
         item && item.customer_name_label,
         item && item.customer_name,
+        item && item.reservation_detail,
       ];
       return candidates.some((candidate) => {
         const key = normalizeNameSearchKey(candidate);
@@ -764,6 +770,94 @@
       ].join('');
     }
 
+    function shouldUseCalendarSearchFallback(error) {
+      const message = String(error && error.message || error || '').toLowerCase();
+      return message.includes('not found') || message.includes('api error: 404');
+    }
+
+    function buildFallbackSearchMonths(centerMonth) {
+      const months = [];
+      const seen = new Set();
+      const maxStep = Math.max(SEARCH_FALLBACK_PAST_MONTHS, SEARCH_FALLBACK_FUTURE_MONTHS);
+      for (let step = 0; step <= maxStep; step += 1) {
+        if (step === 0) {
+          const key = centerMonth;
+          if (key && !seen.has(key)) {
+            seen.add(key);
+            months.push(key);
+          }
+          continue;
+        }
+        if (step <= SEARCH_FALLBACK_PAST_MONTHS) {
+          const past = shiftMonth(centerMonth, -step);
+          if (past && !seen.has(past)) {
+            seen.add(past);
+            months.push(past);
+          }
+        }
+        if (step <= SEARCH_FALLBACK_FUTURE_MONTHS) {
+          const future = shiftMonth(centerMonth, step);
+          if (future && !seen.has(future)) {
+            seen.add(future);
+            months.push(future);
+          }
+        }
+      }
+      return months;
+    }
+
+    async function fetchSearchHitsViaCalendarFallback(query) {
+      const months = buildFallbackSearchMonths(getCurrentMonthJst());
+      const dedup = new Set();
+      const collected = [];
+      let scannedMonths = 0;
+
+      for (let i = 0; i < months.length; i += SEARCH_FALLBACK_BATCH_SIZE) {
+        const batch = months.slice(i, i + SEARCH_FALLBACK_BATCH_SIZE);
+        const batchResults = await Promise.all(batch.map(async function(month) {
+          try {
+            const params = new URLSearchParams();
+            params.set('month', month);
+            params.set('source', 'all');
+            params.set('_ts', String(Date.now()));
+            const data = await api('/reservations/calendar?' + params.toString());
+            const items = Array.isArray(data && data.items) ? data.items : [];
+            return items.filter((item) => matchesNameFilter(item, query));
+          } catch (_) {
+            return [];
+          }
+        }));
+
+        scannedMonths += batch.length;
+        for (const list of batchResults) {
+          for (const item of list) {
+            const source = String(item && item.source || '');
+            const id = String(item && item.id != null ? item.id : '');
+            const visitAt = String(item && item.visit_at || '');
+            const key = source + '::' + id + '::' + visitAt;
+            if (dedup.has(key)) continue;
+            dedup.add(key);
+            collected.push(item);
+            if (collected.length >= SEARCH_FALLBACK_MAX_HITS) {
+              return {
+                items: collected,
+                scannedMonths,
+                totalMonths: months.length,
+                truncated: true,
+              };
+            }
+          }
+        }
+      }
+
+      return {
+        items: collected,
+        scannedMonths,
+        totalMonths: months.length,
+        truncated: false,
+      };
+    }
+
     async function openSearchHitsModal() {
       const query = String(dom.nameFilterInput.value || state.nameQuery || '').trim();
       if (!query) {
@@ -784,25 +878,44 @@
       params.set('limit', '160');
       params.set('_ts', String(Date.now()));
 
+      let items = [];
+      let truncated = false;
+      let usedFallback = false;
+      let fallbackScannedMonths = 0;
+      let fallbackTotalMonths = 0;
+
       try {
         const data = await api('/reservations/search?' + params.toString());
-        const items = Array.isArray(data.items) ? data.items : [];
-        const hits = buildSearchHitRows(items);
-        state.searchHits = hits;
-        const truncated = data && data.truncated === true;
-        const suffix = truncated ? '（上位表示）' : '';
-        dom.searchHitsSummary.textContent = '検索: ' + query + ' / ' + String(hits.length) + '件（全期間）' + suffix;
-        if (hits.length === 0) {
-          dom.searchHitsList.innerHTML = '<div class="meta">該当する予約はありません。</div>';
-          return;
-        }
-        dom.searchHitsList.innerHTML = hits.map((hit, index) => buildSearchHitHtml(hit, index)).join('');
+        items = Array.isArray(data && data.items) ? data.items : [];
+        truncated = data && data.truncated === true;
       } catch (error) {
-        state.searchHits = [];
-        dom.searchHitsSummary.textContent = '検索エラー';
-        dom.searchHitsList.innerHTML = '<div class="meta">検索に失敗しました。</div>';
-        throw error;
+        if (!shouldUseCalendarSearchFallback(error)) {
+          state.searchHits = [];
+          dom.searchHitsSummary.textContent = '検索エラー';
+          dom.searchHitsList.innerHTML = '<div class="meta">検索に失敗しました。</div>';
+          throw error;
+        }
+
+        usedFallback = true;
+        const fallback = await fetchSearchHitsViaCalendarFallback(query);
+        items = fallback.items;
+        truncated = fallback.truncated;
+        fallbackScannedMonths = fallback.scannedMonths;
+        fallbackTotalMonths = fallback.totalMonths;
       }
+
+      const hits = buildSearchHitRows(items);
+      state.searchHits = hits;
+      let suffix = truncated ? '（上位表示）' : '';
+      if (usedFallback) {
+        suffix += '（互換検索: ' + String(fallbackScannedMonths) + '/' + String(fallbackTotalMonths) + 'か月）';
+      }
+      dom.searchHitsSummary.textContent = '検索: ' + query + ' / ' + String(hits.length) + '件（全期間）' + suffix;
+      if (hits.length === 0) {
+        dom.searchHitsList.innerHTML = '<div class="meta">該当する予約はありません。</div>';
+        return;
+      }
+      dom.searchHitsList.innerHTML = hits.map((hit, index) => buildSearchHitHtml(hit, index)).join('');
     }
 
     function findPopupIdBySourceAndEventId(source, eventId) {
