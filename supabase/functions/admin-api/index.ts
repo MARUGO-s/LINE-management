@@ -1842,9 +1842,16 @@ async function fetchReservationSearchState(
       .filter((pattern) => pattern.length > 0)
 
     if (escapedPatterns.length === 1) {
-      eventsQuery = eventsQuery.ilike("customer_name", `%${escapedPatterns[0]}%`)
+      const pattern = escapedPatterns[0]
+      eventsQuery = eventsQuery.or(
+        `customer_name.ilike.%${pattern}%,reservation_detail.ilike.%${pattern}%`,
+      )
     } else if (escapedPatterns.length > 1) {
-      const filters = escapedPatterns.map((pattern) => `customer_name.ilike.%${pattern}%`)
+      const filters: string[] = []
+      for (const pattern of escapedPatterns) {
+        filters.push(`customer_name.ilike.%${pattern}%`)
+        filters.push(`reservation_detail.ilike.%${pattern}%`)
+      }
       eventsQuery = eventsQuery.or(filters.join(","))
     }
 
@@ -1876,6 +1883,7 @@ async function fetchReservationSearchState(
         summaryByCustomer,
       )
       if (!item) continue
+      if (!matchesReservationSearchItem(item, query)) continue
       items.push(item)
       sourceCounts[source] += 1
     }
@@ -2065,6 +2073,32 @@ function buildReservationNameSearchPatterns(query: string): string[] {
     noHonorific,
     compact,
   ].map((value) => value.trim()).filter((value) => value.length > 0))]
+}
+
+function normalizeReservationNameSearchKey(value: unknown): string {
+  const raw = toSafeString(value)
+  if (!raw) return ""
+  return raw
+    .replace(/[（(][^）)]*[）)]/g, "")
+    .replace(/\u3000/g, " ")
+    .replace(/\s+/g, "")
+    .replace(/様/g, "")
+    .trim()
+    .toLowerCase()
+}
+
+function matchesReservationSearchItem(item: Record<string, unknown>, query: string): boolean {
+  const queryKey = normalizeReservationNameSearchKey(query)
+  if (!queryKey) return true
+  const candidates = [
+    item.customer_name,
+    item.customer_name_label,
+    item.reservation_detail,
+  ]
+  return candidates.some((candidate) => {
+    const candidateKey = normalizeReservationNameSearchKey(candidate)
+    return candidateKey.includes(queryKey)
+  })
 }
 
 function escapeLikePattern(value: string): string {
