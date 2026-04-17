@@ -358,7 +358,7 @@ async function maybeAccumulatePartnerVisitHistory(
 
   const visitAtIso = parseHistoryVisitDateIso(alert.reservation?.visitDateTime, alert.internalDateIso)
   const reservationType = inferReservationTypeLabel(alert.reservation?.plan, alert.reservation?.seatName)
-  const reservationDetail = buildReservationDetailLabel(alert.reservation?.plan, alert.reservation?.seatName)
+  const reservationDetail = buildReservationCalendarDetailPayload(alert, route)
   try {
     const { data, error } = await supabase.rpc(historyConfig.rpcName, {
       p_gmail_message_id: alert.id,
@@ -452,6 +452,54 @@ function buildReservationDetailLabel(plan: string | null | undefined, seatName: 
   const normalizedSeat = normalizeInlineText(String(seatName ?? ""))
   if (normalizedSeat && normalizedSeat !== "不明" && normalizedSeat !== "なし") return truncateForLine(normalizedSeat, 160)
   return null
+}
+
+function buildReservationCalendarDetailPayload(alert: GmailMessageAlert, routeLabel: string): string | null {
+  const reservation = alert.reservation
+  const fallbackDetail = buildReservationDetailLabel(reservation?.plan, reservation?.seatName)
+  const route = normalizeCalendarDetailText(routeLabel, 80)
+  const reservationSite = normalizeCalendarDetailText(reservation?.reservationSite, 80)
+  const customerName = normalizeCalendarDetailText(normalizeHistoryPersonName(reservation?.representativeName), 80)
+  const visitDateTime = normalizeCalendarDetailText(reservation?.visitDateTime, 100)
+  const plan = normalizeCalendarDetailText(reservation?.plan, 180)
+  const partySize = normalizeCalendarPartySize(reservation?.partySize)
+  const allergy = normalizeCalendarAllergy(reservation?.allergy)
+
+  const payload = {
+    v: 1,
+    source: isTabelogReservationRoute(routeLabel) ? "tabelog" : (isIkyuReservationRoute(routeLabel) ? "ikyu" : null),
+    route,
+    reservationSite,
+    customerName,
+    visitDateTime,
+    plan,
+    partySize,
+    allergy,
+  }
+  const hasAnyField = Object.values(payload).some((value) => typeof value === "string" && value.length > 0)
+  if (!hasAnyField) return fallbackDetail
+
+  try {
+    return JSON.stringify(payload)
+  } catch {
+    return fallbackDetail
+  }
+}
+
+function normalizeCalendarDetailText(raw: string | null | undefined, maxLength: number): string | null {
+  const normalized = normalizeInlineText(String(raw ?? ""))
+  if (!normalized) return null
+  if (normalized === "不明" || normalized === "なし") return null
+  if (normalized.length > maxLength) return `${normalized.slice(0, maxLength)}...`
+  return normalized
+}
+
+function normalizeCalendarPartySize(raw: string | null | undefined): string | null {
+  return normalizePartySizeLabel(raw == null ? null : String(raw))
+}
+
+function normalizeCalendarAllergy(raw: string | null | undefined): string | null {
+  return normalizeAllergyAnswer(raw == null ? null : String(raw))
 }
 
 async function resolveGmailAlertTargetRooms(
@@ -1165,7 +1213,15 @@ function formatReservationPersonNameLabel(value: string | null | undefined): str
   const raw = normalizeInlineText(String(value ?? ""))
   if (!raw) return "不明"
   const noRuby = raw.replace(/[（(][^）)]*[）)]/g, "").replace(/\s*様$/, "").trim()
-  return noRuby || "不明"
+  return appendReservationHonorific(noRuby || "不明")
+}
+
+function appendReservationHonorific(name: string): string {
+  const normalized = normalizeInlineText(String(name ?? ""))
+  if (!normalized || normalized === "不明") return "不明"
+  const withoutHonorific = normalized.replace(/\s*様$/, "").trim()
+  if (!withoutHonorific) return "不明"
+  return `${withoutHonorific} 様`
 }
 
 function extractGmailBodyText(payload: any): string {
@@ -1286,7 +1342,7 @@ function extractReservationMailDetails(
     pickLineValue(lineMap, ["来店人数", "人数"]) ??
       captureFirstMatch([bodyText], [/(?:来店人数|人数)\s*[：:]\s*([0-9０-９]+\s*(?:人|名))/i]),
   )
-  const plan = pickLineValue(lineMap, ["プラン"])
+  const plan = pickLineValue(lineMap, ["プラン", "コース", "ご利用コース"])
   const paymentMethod = pickLineValue(lineMap, ["決済方法"])
   const totalAmount = normalizeAmountLabel(
     pickLineValue(lineMap, ["お支払い金額"]) ??
@@ -1414,13 +1470,28 @@ function buildVisitDateTimeFromMail(
   }
 
   const md = dateOnly.match(/(\d{1,2})[\/\-月](\d{1,2})/)
-  if (!md) return `${dateOnly} ${timeOnly}`
-  const year = inferReservationYear(`${bodyText}\n${subject}`, internalDateIso)
-  return `${String(year).padStart(4, "0")}/${String(Number(md[1])).padStart(2, "0")}/${String(Number(md[2])).padStart(2, "0")} ${timeOnly}`
+  if (md) {
+    const year = inferReservationYear(`${bodyText}\n${subject}`, internalDateIso)
+    return `${String(year).padStart(4, "0")}/${String(Number(md[1])).padStart(2, "0")}/${String(Number(md[2])).padStart(2, "0")} ${timeOnly}`
+  }
+
+  const compactDigits = dateOnly.replace(/[^\d]/g, "")
+  if (compactDigits.length === 3 || compactDigits.length === 4) {
+    const monthDigits = compactDigits.length === 3 ? compactDigits.slice(0, 1) : compactDigits.slice(0, 2)
+    const dayDigits = compactDigits.length === 3 ? compactDigits.slice(1) : compactDigits.slice(2)
+    const month = Number(monthDigits)
+    const day = Number(dayDigits)
+    if (Number.isInteger(month) && Number.isInteger(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const year = inferReservationYear(`${bodyText}\n${subject}`, internalDateIso)
+      return `${String(year).padStart(4, "0")}/${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")} ${timeOnly}`
+    }
+  }
+
+  return `${dateOnly} ${timeOnly}`
 }
 
 function buildSeatNameFromMail(lineMap: Map<string, string>, bodyText: string): string | null {
-  const seatPrimary = pickLineValue(lineMap, ["席", "席管理名称"]) ?? pickLineValue(lineMap, ["席No"])
+  const seatPrimary = pickLineValue(lineMap, ["席", "席管理名称", "卓", "座席"]) ?? pickLineValue(lineMap, ["席No"])
   const seatExtra = extractLineAfterLabel(bodyText, ["席管理名称"])
   const merged = [seatPrimary, seatExtra]
     .map((value) => normalizeInlineText(String(value ?? "")))
@@ -1510,7 +1581,7 @@ function extractQaAnswer(bodyText: string, questionNo: number): string | null {
       continue
     }
 
-    const inlineAnswer = normalizeInlineText(aMatch[1] ?? "")
+    const inlineAnswer = sanitizeQaAnswerCandidate(aMatch[1] ?? "")
     if (inlineAnswer) return inlineAnswer
 
     for (let j = i + 1; j < lines.length; j += 1) {
@@ -1518,7 +1589,7 @@ function extractQaAnswer(bodyText: string, questionNo: number): string | null {
       if (!next) continue
       if (/^\s*(Q\d+\.|A\d+\.)/i.test(next)) return null
       if (/^\s*[●◆■・]?\s*[^:：]{1,40}\s*[：:]/.test(next)) return null
-      return next
+      return sanitizeQaAnswerCandidate(next)
     }
     return null
   }
@@ -1526,15 +1597,31 @@ function extractQaAnswer(bodyText: string, questionNo: number): string | null {
   return null
 }
 
+function sanitizeQaAnswerCandidate(raw: string): string | null {
+  const normalized = normalizeInlineText(raw)
+  if (!normalized) return null
+  if (/^(q\d+\.?|a\d+\.?)/i.test(normalized)) return null
+  if (/^(注意事項|ご?要望)\s*[：:]?/i.test(normalized)) return null
+
+  const markerIndex = normalized.search(/(?:Q\d+\.|A\d+\.|注意事項\s*[：:]|ご?要望\s*[：:])/i)
+  const trimmed = markerIndex >= 0 ? normalized.slice(0, markerIndex).trim() : normalized
+  if (!trimmed) return null
+  if (/^(q\d+\.?|a\d+\.?)$/i.test(trimmed)) return null
+  if (/^(注意事項|ご?要望)\s*[：:]?$/i.test(trimmed)) return null
+  return trimmed
+}
+
 function extractReservationAllergy(
   bodyText: string,
   lineMap: Map<string, string>,
   preferQaForTabelog: boolean,
 ): string | null {
+  const allergyLabels = ["アレルギー", "食材アレルギー", "食材のアレルギー"]
   const direct = normalizeAllergyAnswer(
-    pickLineValue(lineMap, ["アレルギー", "食材アレルギー", "食材のアレルギー"]),
+    pickLineValue(lineMap, allergyLabels),
   )
   if (direct) return direct
+  if (hasExplicitEmptyLabelLine(bodyText, allergyLabels)) return null
 
   if (preferQaForTabelog && hasAllergyQuestionInQ1(bodyText)) {
     return normalizeAllergyAnswer(extractQaAnswer(bodyText, 1))
@@ -1564,13 +1651,15 @@ function normalizeAllergyAnswer(raw: string | null | undefined): string | null {
 }
 
 function extractReservationRequest(bodyText: string, lineMap: Map<string, string>): string | null {
-  const direct = normalizeRequestAnswer(pickLineValue(lineMap, ["要望", "コメント"]))
+  const requestLabels = ["要望", "ご要望", "コメント"]
+  const direct = normalizeRequestAnswer(pickLineValue(lineMap, requestLabels))
   if (direct) return direct
+  if (hasExplicitEmptyLabelLine(bodyText, requestLabels)) return null
   const qa2 = normalizeRequestAnswer(extractQaAnswer(bodyText, 2))
   const qa3 = normalizeRequestAnswer(extractQaAnswer(bodyText, 3))
   const mergedQa = [qa2, qa3].filter((value): value is string => !!value).join(" / ")
   if (mergedQa) return mergedQa
-  const section = normalizeRequestAnswer(extractSectionValue(bodyText, ["コメント", "要望"]))
+  const section = normalizeRequestAnswer(extractSectionValue(bodyText, ["コメント", "要望", "ご要望"]))
   return section
 }
 
@@ -1592,6 +1681,21 @@ function isBoilerplateReservationNoticeText(raw: string): boolean {
     normalized.includes("ご予約時にお申し付けください") ||
     normalized.includes("上記予約情報を店舗様でお使いの予約台帳に転記頂きますようお願い申し上げます") ||
     (normalized.includes("上記予約情報") && normalized.includes("予約台帳に転記頂きますよう"))
+}
+
+function hasExplicitEmptyLabelLine(bodyText: string, labels: string[]): boolean {
+  const normalizedTargets = labels.map((label) => normalizeLabelKey(label))
+  const lines = String(bodyText ?? "").split(/\r?\n/)
+  for (const line of lines) {
+    const match = line.match(/^\s*[●◆■・]?\s*([^:：]{1,40}?)\s*[：:]\s*(.*)$/)
+    if (!match) continue
+    const label = normalizeLabelKey(match[1])
+    if (!normalizedTargets.some((target) => labelKeyMatchesTarget(label, target))) continue
+    const value = normalizeInlineText(match[2] ?? "")
+    if (!value) return true
+    if (/^[\-ー‐―〜～/\\]+$/.test(value)) return true
+  }
+  return false
 }
 
 function extractSectionValue(bodyText: string, markers: string[]): string | null {
@@ -1811,11 +1915,23 @@ function parseColonSeparatedLines(text: string): Map<string, string> {
 }
 
 function pickLineValue(map: Map<string, string>, labels: string[]): string | null {
-  for (const label of labels) {
-    const value = map.get(normalizeLabelKey(label))
+  const normalizedLabels = labels.map((label) => normalizeLabelKey(label))
+  for (const key of normalizedLabels) {
+    const value = map.get(key)
     if (value && value.trim()) return value.trim()
   }
+  for (const [key, value] of map.entries()) {
+    if (!value || !value.trim()) continue
+    if (normalizedLabels.some((target) => labelKeyMatchesTarget(key, target))) return value.trim()
+  }
   return null
+}
+
+function labelKeyMatchesTarget(labelKey: string, targetKey: string): boolean {
+  return labelKey === targetKey ||
+    labelKey.startsWith(targetKey) ||
+    labelKey.endsWith(targetKey) ||
+    labelKey.includes(targetKey)
 }
 
 function normalizeLabelKey(label: string): string {
