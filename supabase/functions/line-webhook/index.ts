@@ -3525,18 +3525,30 @@ async function analyzeLineImageWithGroqScout(
     body: JSON.stringify({
       model: 'meta-llama/llama-4-scout-17b-16e-instruct',
       temperature: 0.1,
-      max_tokens: 260,
+      max_tokens: 340,
       messages: [
         {
           role: 'system',
           content: [
             'あなたは画像解析アシスタントです。必ず JSON のみを返してください（説明文・コードブロック禁止）。',
+            '画像が横向き・逆向きの場合は、頭の中で正立に回転してから読むこと。',
             '画像がレシート/領収書なら kind を receipt にし、主要項目を抽出してください。',
             'レシートでない場合は kind を general にし、summary に1文（80文字以内）で内容を入れてください。',
             'JSONスキーマ:',
             '{"kind":"receipt|general","summary":"string","receipt":{"store_name":"string|null","date":"string|null","net_sales":"string|null","tax_amount":"string|null","gross_sales":"string|null","party_count":"string|null","guest_count":"string|null","unit_price":"string|null","items":["string"]}}',
             'receipt は kind=general の時は null でも可。items は最大5件まで。読めない項目は null。',
             '金額は可能なら「¥7,700」の形式。会計組数・客数は数値として抽出。summary は必須。',
+            'ラベル対応ルール（重要）:',
+            '- party_count は「会計組数」「合計組数」「組数」に対応（例: 5組 -> "5"）。',
+            '- guest_count は「客数」「人数」「名」に対応（例: 63名 -> "63"）。',
+            '- unit_price は「客単価」に対応（例: ¥7,700）。',
+            '- gross_sales は「総売上」「売上」「現計」「合計」に対応。',
+            '- tax_amount は「消費税」「税額」「うち税」「内税」に対応。',
+            '- net_sales は「純売上」「税抜売上」「本体」に対応。',
+            '- 「会計組数・客数 5組 63名」の形式は party_count=5, guest_count=63 に必ず分離。',
+            '- party_count / guest_count は数字のみ（単位を含めない）。',
+            '- gross_sales と guest_count があり unit_price が無い場合は unit_price = gross_sales / guest_count で補完（四捨五入）。',
+            '- tax_amount が gross_sales より大きいのは通常不自然。読み取りが曖昧なら tax_amount は null を優先。',
           ].join('\n'),
         },
         {
@@ -3636,15 +3648,51 @@ function parseCurrencyAmount(raw: string | null): number | null {
 
 function parseIntegerCount(raw: string | null): number | null {
   if (!raw) return null
-  const normalized = decodeEscapedUnicodeSequences(raw).replace(/[^\d-]/g, '').trim()
-  if (!normalized) return null
-  const value = Number(normalized)
+  const match = decodeEscapedUnicodeSequences(raw).match(/-?\d+/)
+  if (!match || !match[0]) return null
+  const value = Number(match[0])
   if (!Number.isFinite(value)) return null
   return Math.max(0, Math.round(value))
 }
 
 function formatYenAmount(value: number): string {
   return `¥${Math.round(value).toLocaleString('ja-JP')}`
+}
+
+function extractPartyGuestCountsFromText(raw: string | null): { party: number | null; guest: number | null } {
+  if (!raw) return { party: null, guest: null }
+  const text = decodeEscapedUnicodeSequences(raw)
+  const partyMatch = text.match(/(\d{1,3})\s*組/)
+  const guestMatch = text.match(/(\d{1,4})\s*(?:名|人)/)
+  const party = partyMatch && partyMatch[1] ? parseIntegerCount(partyMatch[1]) : null
+  const guest = guestMatch && guestMatch[1] ? parseIntegerCount(guestMatch[1]) : null
+  if (party != null || guest != null) {
+    return { party, guest }
+  }
+  const numbers = text.match(/\d{1,4}/g) ?? []
+  if (numbers.length >= 2) {
+    return {
+      party: parseIntegerCount(numbers[0] ?? null),
+      guest: parseIntegerCount(numbers[1] ?? null),
+    }
+  }
+  return { party: null, guest: null }
+}
+
+function salvageOverreadTaxAmount(rawTax: string | null, grossAmount: number): number | null {
+  if (!rawTax || !Number.isFinite(grossAmount) || grossAmount <= 0) return null
+  const digits = decodeEscapedUnicodeSequences(rawTax).replace(/[^\d]/g, '')
+  if (!digits) return null
+  const candidates: number[] = []
+  if (digits.length >= 4) candidates.push(Number(digits.slice(-4)))
+  if (digits.length >= 3) candidates.push(Number(digits.slice(-3)))
+  for (const candidate of candidates) {
+    if (!Number.isFinite(candidate) || candidate <= 0) continue
+    if (candidate <= grossAmount * 0.2) {
+      return Math.round(candidate)
+    }
+  }
+  return null
 }
 
 function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalysis | null {
@@ -3662,21 +3710,78 @@ function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalys
   let grossSales =
     normalizeReceiptFieldText(data.gross_sales ?? data.total_amount ?? data.total_sales, 40)
   let partyCount =
-    normalizeReceiptFieldText(data.party_count ?? data.group_count ?? data.account_groups, 20)
+    normalizeReceiptFieldText(
+      data.party_count ?? data.group_count ?? data.account_groups ?? data.account_count ?? data.bill_count,
+      20,
+    )
   let guestCount =
-    normalizeReceiptFieldText(data.guest_count ?? data.customer_count ?? data.guests, 20)
+    normalizeReceiptFieldText(
+      data.guest_count ?? data.customer_count ?? data.guests ?? data.people_count,
+      20,
+    )
   let unitPrice =
-    normalizeReceiptFieldText(data.unit_price ?? data.avg_spend_per_guest ?? data.average_spend, 40)
+    normalizeReceiptFieldText(
+      data.unit_price ?? data.avg_spend_per_guest ?? data.average_spend ?? data.tanka,
+      40,
+    )
+
+  const combinedPartyGuestText = normalizeReceiptFieldText(
+    data.party_guest ?? data.party_guest_count ?? data.group_guest ?? data.party_and_guest,
+    80,
+  )
+  const combinedCounts = extractPartyGuestCountsFromText(combinedPartyGuestText)
+  if (!partyCount && combinedCounts.party != null) {
+    partyCount = String(combinedCounts.party)
+  }
+  if (!guestCount && combinedCounts.guest != null) {
+    guestCount = String(combinedCounts.guest)
+  }
+
+  const partyFromPartyField = extractPartyGuestCountsFromText(partyCount).party
+  const guestFromPartyField = extractPartyGuestCountsFromText(partyCount).guest
+  const partyFromGuestField = extractPartyGuestCountsFromText(guestCount).party
+  const guestFromGuestField = extractPartyGuestCountsFromText(guestCount).guest
+  if ((!partyCount || parseIntegerCount(partyCount) == null) && partyFromPartyField != null) partyCount = String(partyFromPartyField)
+  if ((!partyCount || parseIntegerCount(partyCount) == null) && partyFromGuestField != null) partyCount = String(partyFromGuestField)
+  if ((!guestCount || parseIntegerCount(guestCount) == null) && guestFromGuestField != null) guestCount = String(guestFromGuestField)
+  if ((!guestCount || parseIntegerCount(guestCount) == null) && guestFromPartyField != null) guestCount = String(guestFromPartyField)
 
   const netNum = parseCurrencyAmount(netSales)
   const taxNum = parseCurrencyAmount(taxAmount)
   const grossNum = parseCurrencyAmount(grossSales)
 
-  if (!grossSales && netNum != null && taxNum != null) {
-    grossSales = formatYenAmount(netNum + taxNum)
+  let normalizedNetNum = netNum
+  let normalizedTaxNum = taxNum
+  let normalizedGrossNum = grossNum
+
+  if (normalizedGrossNum != null && normalizedTaxNum != null && normalizedTaxNum > normalizedGrossNum) {
+    const salvagedTax = salvageOverreadTaxAmount(taxAmount, normalizedGrossNum)
+    normalizedTaxNum = salvagedTax
   }
-  if (!netSales && grossNum != null && taxNum != null) {
-    netSales = formatYenAmount(grossNum - taxNum)
+
+  if (normalizedGrossNum == null && normalizedNetNum != null && normalizedTaxNum != null) {
+    normalizedGrossNum = normalizedNetNum + normalizedTaxNum
+  }
+  if (normalizedNetNum == null && normalizedGrossNum != null && normalizedTaxNum != null && normalizedGrossNum >= normalizedTaxNum) {
+    normalizedNetNum = normalizedGrossNum - normalizedTaxNum
+  }
+  if (normalizedNetNum != null && normalizedNetNum < 0) {
+    normalizedNetNum = null
+  }
+  if (normalizedNetNum == null && normalizedGrossNum != null && normalizedTaxNum != null && normalizedGrossNum >= normalizedTaxNum) {
+    normalizedNetNum = normalizedGrossNum - normalizedTaxNum
+  }
+
+  if (normalizedGrossNum != null) {
+    grossSales = formatYenAmount(normalizedGrossNum)
+  }
+  if (normalizedTaxNum != null) {
+    taxAmount = formatYenAmount(normalizedTaxNum)
+  } else if (normalizedGrossNum != null && normalizedNetNum != null) {
+    taxAmount = formatYenAmount(Math.max(0, normalizedGrossNum - normalizedNetNum))
+  }
+  if (normalizedNetNum != null) {
+    netSales = formatYenAmount(normalizedNetNum)
   }
 
   const partyNum = parseIntegerCount(partyCount)
@@ -3684,15 +3789,9 @@ function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalys
   const guestNum = parseIntegerCount(guestCount)
   if (guestNum != null) guestCount = String(guestNum)
 
-  const grossForUnitPrice = parseCurrencyAmount(grossSales)
+  const grossForUnitPrice = parseCurrencyAmount(grossSales) ?? normalizedGrossNum
   if (!unitPrice && grossForUnitPrice != null && guestNum != null && guestNum > 0) {
     unitPrice = formatYenAmount(grossForUnitPrice / guestNum)
-  }
-  if (taxAmount) {
-    const normalizedTax = parseCurrencyAmount(taxAmount)
-    if (normalizedTax != null) {
-      taxAmount = formatYenAmount(normalizedTax)
-    }
   }
 
   const itemsRaw = Array.isArray(data.items) ? data.items : []
