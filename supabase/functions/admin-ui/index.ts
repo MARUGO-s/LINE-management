@@ -1168,6 +1168,7 @@ const html = String.raw`<!doctype html>
         <label class="room-scope-option" title="全体の定期要約レポートをこのトークにも送ります。LINE_OVERALL_ROOM_ID のルームと同じ内容です。ルーム単体の要約とは同時にONにできません。"><input id="roomConfigReceiveOverallSummary" type="checkbox">全体要約レポートをこのルームに配信</label>
         <label class="room-scope-option"><input id="roomConfigTomorrowReminder" type="checkbox">明日予定配信</label>
         <label class="room-scope-option"><input id="roomConfigMediaAccess" type="checkbox">LINE添付保存（ルーム）</label>
+        <label class="room-scope-option"><input id="roomConfigImageAnalysisReplyEnabled" type="checkbox">画像解析結果をLINE返信</label>
         <label class="room-scope-option" title="連携カレンダーへ、AIが予定と判断した場合の扱いです。信頼度が高いときは通常LINEで返信せず登録します（下の「登録内容をLINEで返信」で高確度でも返信可能）。信頼度が低いときは、さらに下の「低確度のときは確認の返信」がOFFなら無返信のまま件名に（仮）の仮登録、ONならLINEではい／いいえで確認します。"><input id="roomConfigGoogleCalendarAutoRegister" type="checkbox">会話から予定を検知したら「Googleカレンダー」へ無返信で自動登録する</label>
         <label class="room-scope-option" title="無返信自動登録がONで、AIが高確度と判断してカレンダーに書き込んだあと、登録内容をこのトークに返信します。AI会話返信もONが必要です。低確度の確認返信とは別に設定できます。"><input id="roomConfigCalendarRegistrationReply" type="checkbox">会話から予定を検知したGoogleカレンダーへの登録内容をLINEで返信する（高確度でも）</label>
         <label class="room-scope-option" title="無返信自動登録がONのときのみ有効です。AIの信頼度が「要確認」レンジのとき、LINEで「登録しますか？」と返信し、はい／いいえで確定します。OFFのときは無言のまま件名に（仮）を付けて登録します（AI会話返信もONが必要）。"><input id="roomConfigCalendarLowConfidenceConfirmReply" type="checkbox">低確度のときは確認の返信を送る（はい／いいえ）</label>
@@ -1193,6 +1194,7 @@ const html = String.raw`<!doctype html>
         <label class="room-scope-option" title="全体の定期要約レポートをこのトークにも送ります。ルーム単体の要約とは同時にONにできません。"><input id="newRoomReceiveOverallSummary" type="checkbox">全体要約レポートをこのルームに配信</label>
         <label class="room-scope-option"><input id="newRoomTomorrowReminder" type="checkbox">明日予定配信</label>
         <label class="room-scope-option"><input id="newRoomMediaFileAccessEnabled" type="checkbox">LINE添付保存（ルーム）</label>
+        <label class="room-scope-option"><input id="newRoomImageAnalysisReplyEnabled" type="checkbox">画像解析結果をLINE返信</label>
         <label class="room-scope-option" title="連携カレンダーへ、AIが予定と判断した場合の扱いです。信頼度が高いときは通常LINEで返信せず登録します（下の「登録内容をLINEで返信」で高確度でも返信可能）。信頼度が低いときは、さらに下の「低確度のときは確認の返信」がOFFなら無返信のまま件名に（仮）の仮登録、ONならLINEではい／いいえで確認します。"><input id="newRoomGoogleCalendarAutoRegister" type="checkbox">会話から予定を検知したら「Googleカレンダー」へ無返信で自動登録する</label>
         <label class="room-scope-option" title="無返信自動登録がONで高確度登録のあと、登録内容をLINEで返信します。AI会話返信もONが必要です。"><input id="newRoomCalendarRegistrationReply" type="checkbox">会話から予定を検知したGoogleカレンダーへの登録内容をLINEで返信する（高確度でも）</label>
         <label class="room-scope-option" title="無返信自動登録がONのときのみ有効です。AIの信頼度が「要確認」レンジのとき、LINEで「登録しますか？」と返信し、はい／いいえで確定します。OFFのときは無言のまま件名に（仮）を付けて登録します（AI会話返信もONが必要）。"><input id="newRoomCalendarLowConfidenceConfirmReply" type="checkbox">低確度のときは確認の返信を送る（はい／いいえ）</label>
@@ -1223,6 +1225,7 @@ const html = String.raw`<!doctype html>
     const NEW_ROOM_DEFAULT_RECEIVE_OVERALL_SUMMARY_KEY = 'line_summary_new_room_default_receive_overall_summary';
     const NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY = 'line_summary_new_room_default_tomorrow_reminder';
     const NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY = 'line_summary_new_room_default_media_file_access';
+    const NEW_ROOM_DEFAULT_IMAGE_ANALYSIS_REPLY_KEY = 'line_summary_new_room_default_image_analysis_reply';
     const NEW_ROOM_DEFAULT_GOOGLE_CALENDAR_AUTO_REGISTER_KEY = 'line_summary_new_room_default_google_calendar_auto_register';
     const NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY = 'line_summary_new_room_default_calendar_auto_create';
     const NEW_ROOM_DEFAULT_SILENT_AUTO_REGISTER_KEY = 'line_summary_new_room_default_silent_auto_register';
@@ -1273,6 +1276,7 @@ const html = String.raw`<!doctype html>
       newRoomReceiveOverallSummary: document.getElementById('newRoomReceiveOverallSummary'),
       newRoomTomorrowReminder: document.getElementById('newRoomTomorrowReminder'),
       newRoomMediaFileAccessEnabled: document.getElementById('newRoomMediaFileAccessEnabled'),
+      newRoomImageAnalysisReplyEnabled: document.getElementById('newRoomImageAnalysisReplyEnabled'),
       newRoomGoogleCalendarAutoRegister: document.getElementById('newRoomGoogleCalendarAutoRegister'),
       newRoomCalendarRegistrationReply: document.getElementById('newRoomCalendarRegistrationReply'),
       newRoomCalendarLowConfidenceConfirmReply: document.getElementById('newRoomCalendarLowConfidenceConfirmReply'),
@@ -1304,6 +1308,7 @@ const html = String.raw`<!doctype html>
       roomConfigReceiveOverallSummary: document.getElementById('roomConfigReceiveOverallSummary'),
       roomConfigTomorrowReminder: document.getElementById('roomConfigTomorrowReminder'),
       roomConfigMediaAccess: document.getElementById('roomConfigMediaAccess'),
+      roomConfigImageAnalysisReplyEnabled: document.getElementById('roomConfigImageAnalysisReplyEnabled'),
       roomConfigGoogleCalendarAutoRegister: document.getElementById('roomConfigGoogleCalendarAutoRegister'),
       roomConfigCalendarRegistrationReply: document.getElementById('roomConfigCalendarRegistrationReply'),
       roomConfigCalendarLowConfidenceConfirmReply: document.getElementById('roomConfigCalendarLowConfidenceConfirmReply'),
@@ -1354,6 +1359,11 @@ const html = String.raw`<!doctype html>
       if (dom.roomConfigCalendarLowConfidenceConfirmReply) dom.roomConfigCalendarLowConfidenceConfirmReply.disabled = !g;
     }
 
+    function syncRoomConfigMediaSubOptions() {
+      var canStore = dom.roomConfigMediaAccess && dom.roomConfigMediaAccess.checked;
+      if (dom.roomConfigImageAnalysisReplyEnabled) dom.roomConfigImageAnalysisReplyEnabled.disabled = !canStore;
+    }
+
     function syncRoomSummaryMutualExclusion() {
       var overallEl = dom.roomConfigReceiveOverallSummary;
       var roomEl = dom.roomConfigSendSummary;
@@ -1396,6 +1406,11 @@ const html = String.raw`<!doctype html>
       if (dom.newRoomCalendarLowConfidenceConfirmReply) dom.newRoomCalendarLowConfidenceConfirmReply.disabled = !g;
     }
 
+    function syncNewRoomMediaSubOptions() {
+      var canStore = dom.newRoomMediaFileAccessEnabled && dom.newRoomMediaFileAccessEnabled.checked;
+      if (dom.newRoomImageAnalysisReplyEnabled) dom.newRoomImageAnalysisReplyEnabled.disabled = !canStore;
+    }
+
     function loadMergedGoogleCalendarAutoRegisterDefault() {
       var v = localStorage.getItem(NEW_ROOM_DEFAULT_GOOGLE_CALENDAR_AUTO_REGISTER_KEY);
       if (v != null) return loadBooleanSetting(NEW_ROOM_DEFAULT_GOOGLE_CALENDAR_AUTO_REGISTER_KEY, true);
@@ -1413,6 +1428,9 @@ const html = String.raw`<!doctype html>
       syncNewRoomSummaryMutualExclusion();
       dom.newRoomTomorrowReminder.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_TOMORROW_REMINDER_KEY, false);
       dom.newRoomMediaFileAccessEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY, true);
+      if (dom.newRoomImageAnalysisReplyEnabled) {
+        dom.newRoomImageAnalysisReplyEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_IMAGE_ANALYSIS_REPLY_KEY, true);
+      }
       dom.newRoomGoogleCalendarAutoRegister.checked = loadMergedGoogleCalendarAutoRegisterDefault();
       if (dom.newRoomCalendarRegistrationReply) {
         dom.newRoomCalendarRegistrationReply.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_CALENDAR_REGISTRATION_REPLY_KEY, false);
@@ -1420,6 +1438,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomCalendarLowConfidenceConfirmReply.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_CALENDAR_LOW_CONF_CONFIRM_KEY, false);
       dom.newRoomGmailAlertEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, false);
       syncNewRoomCalendarSubOptions();
+      syncNewRoomMediaSubOptions();
       refreshNewRoomConfigSummary();
     }
 
@@ -1431,6 +1450,7 @@ const html = String.raw`<!doctype html>
         (dom.newRoomSendSummary.checked || (dom.newRoomReceiveOverallSummary && dom.newRoomReceiveOverallSummary.checked) ? 1 : 0) +
         (dom.newRoomTomorrowReminder.checked ? 1 : 0) +
         (dom.newRoomMediaFileAccessEnabled.checked ? 1 : 0) +
+        (dom.newRoomMediaFileAccessEnabled.checked && dom.newRoomImageAnalysisReplyEnabled && dom.newRoomImageAnalysisReplyEnabled.checked ? 1 : 0) +
         (dom.newRoomGoogleCalendarAutoRegister.checked ? 1 : 0) +
         (dom.newRoomGoogleCalendarAutoRegister.checked && dom.newRoomCalendarRegistrationReply && dom.newRoomCalendarRegistrationReply.checked ? 1 : 0) +
         (dom.newRoomGoogleCalendarAutoRegister.checked && dom.newRoomCalendarLowConfidenceConfirmReply.checked ? 1 : 0) +
@@ -1440,7 +1460,7 @@ const html = String.raw`<!doctype html>
         : dom.newRoomSummaryMode.value === 'independent'
         ? '各回独立'
         : '継承';
-      return enabledCount + '/10 有効 ・ 最終回:' + summary;
+      return enabledCount + '/11 有効 ・ 最終回:' + summary;
     }
 
     function refreshNewRoomConfigSummary() {
@@ -2123,6 +2143,7 @@ const html = String.raw`<!doctype html>
       const sendSummaryInput = tr.querySelector('.room-send-summary');
       const tomorrowReminderInput = tr.querySelector('.room-tomorrow-reminder');
       const mediaFileAccessEnabledInput = tr.querySelector('.room-media-file-access-enabled');
+      const imageAnalysisReplyEnabledInput = tr.querySelector('.room-image-analysis-reply-enabled');
       const calendarAutoCreateInput = tr.querySelector('.room-calendar-auto-create');
       const silentAutoRegisterInput = tr.querySelector('.room-silent-auto-register');
       const gmailAlertEnabledInput = tr.querySelector('.room-gmail-alert-enabled');
@@ -2140,6 +2161,7 @@ const html = String.raw`<!doctype html>
         receive_overall_summary_enabled: parseDatasetBoolean(tr.dataset.roomReceiveOverallSummary, false),
         calendar_tomorrow_reminder_enabled: tomorrowReminderInput ? !!tomorrowReminderInput.checked : parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
         media_file_access_enabled: mediaFileAccessEnabledInput ? !!mediaFileAccessEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
+        image_analysis_reply_enabled: imageAnalysisReplyEnabledInput ? !!imageAnalysisReplyEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomImageAnalysisReply, true),
         calendar_ai_auto_create_enabled: gCalRow,
         calendar_silent_auto_register_enabled: gCalRow,
         calendar_low_confidence_confirm_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarLowConfConfirm, false),
@@ -2165,6 +2187,7 @@ const html = String.raw`<!doctype html>
       tr.dataset.roomReceiveOverallSummary = String(!!config.receive_overall_summary_enabled);
       tr.dataset.roomTomorrowReminder = String(!!config.calendar_tomorrow_reminder_enabled);
       tr.dataset.roomMediaAccess = String(!!config.media_file_access_enabled);
+      tr.dataset.roomImageAnalysisReply = String(!!config.image_analysis_reply_enabled);
       tr.dataset.roomCalendarAutoCreate = String(!!config.calendar_ai_auto_create_enabled);
       tr.dataset.roomSilentAutoRegister = String(!!config.calendar_silent_auto_register_enabled);
       tr.dataset.roomCalendarLowConfConfirm = String(!!config.calendar_low_confidence_confirm_reply_enabled);
@@ -2186,6 +2209,7 @@ const html = String.raw`<!doctype html>
       if (config.send_room_summary || config.receive_overall_summary_enabled) enabledCount += 1;
       if (config.calendar_tomorrow_reminder_enabled) enabledCount += 1;
       if (config.media_file_access_enabled) enabledCount += 1;
+      if (config.media_file_access_enabled && config.image_analysis_reply_enabled) enabledCount += 1;
       if (config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) enabledCount += 1;
       if (config.calendar_low_confidence_confirm_reply_enabled && config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) enabledCount += 1;
       if (config.calendar_registration_reply_enabled && config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) enabledCount += 1;
@@ -2201,7 +2225,7 @@ const html = String.raw`<!doctype html>
 
     function buildRoomConfigSummary(config) {
       const enabledCount = getRoomConfigEnabledCount(config);
-      return enabledCount + '/10 有効';
+      return enabledCount + '/11 有効';
     }
 
     function buildRoomConfigSavedMessage(tr, config) {
@@ -2253,6 +2277,7 @@ const html = String.raw`<!doctype html>
           receive_overall_summary_enabled: setting && setting.receive_overall_summary_enabled === true,
           calendar_tomorrow_reminder_enabled: setting && setting.calendar_tomorrow_reminder_enabled === true,
           media_file_access_enabled: (setting && setting.media_file_access_enabled) !== false,
+          image_analysis_reply_enabled: (setting && setting.image_analysis_reply_enabled) !== false,
           calendar_ai_auto_create_enabled: gCalMerged,
           calendar_silent_auto_register_enabled: gCalMerged,
           calendar_low_confidence_confirm_reply_enabled: !!(setting && setting.calendar_low_confidence_confirm_reply_enabled),
@@ -2272,6 +2297,7 @@ const html = String.raw`<!doctype html>
         tr.dataset.roomReceiveOverallSummary = String(roomFeatureConfig.receive_overall_summary_enabled);
         tr.dataset.roomTomorrowReminder = String(roomFeatureConfig.calendar_tomorrow_reminder_enabled);
         tr.dataset.roomMediaAccess = String(roomFeatureConfig.media_file_access_enabled);
+        tr.dataset.roomImageAnalysisReply = String(roomFeatureConfig.image_analysis_reply_enabled);
         tr.dataset.roomCalendarAutoCreate = String(roomFeatureConfig.calendar_ai_auto_create_enabled);
         tr.dataset.roomSilentAutoRegister = String(roomFeatureConfig.calendar_silent_auto_register_enabled);
         tr.dataset.roomCalendarLowConfConfirm = String(!!(setting && setting.calendar_low_confidence_confirm_reply_enabled));
@@ -2287,6 +2313,7 @@ const html = String.raw`<!doctype html>
           receive_overall_summary_enabled: parseDatasetBoolean(tr.dataset.roomReceiveOverallSummary, false),
           calendar_tomorrow_reminder_enabled: parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
           media_file_access_enabled: parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
+          image_analysis_reply_enabled: parseDatasetBoolean(tr.dataset.roomImageAnalysisReply, true),
           calendar_ai_auto_create_enabled: parseDatasetBoolean(tr.dataset.roomCalendarAutoCreate, true),
           calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, true),
           calendar_low_confidence_confirm_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarLowConfConfirm, false),
@@ -2302,6 +2329,7 @@ const html = String.raw`<!doctype html>
           receive_overall_summary_enabled: parseDatasetBoolean(tr.dataset.roomReceiveOverallSummary, false),
           calendar_tomorrow_reminder_enabled: parseDatasetBoolean(tr.dataset.roomTomorrowReminder, false),
           media_file_access_enabled: parseDatasetBoolean(tr.dataset.roomMediaAccess, true),
+          image_analysis_reply_enabled: parseDatasetBoolean(tr.dataset.roomImageAnalysisReply, true),
           calendar_ai_auto_create_enabled: parseDatasetBoolean(tr.dataset.roomCalendarAutoCreate, true),
           calendar_silent_auto_register_enabled: parseDatasetBoolean(tr.dataset.roomSilentAutoRegister, true),
           calendar_low_confidence_confirm_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarLowConfConfirm, false),
@@ -2351,6 +2379,9 @@ const html = String.raw`<!doctype html>
       syncRoomSummaryMutualExclusion();
       dom.roomConfigTomorrowReminder.checked = !!config.calendar_tomorrow_reminder_enabled;
       dom.roomConfigMediaAccess.checked = !!config.media_file_access_enabled;
+      if (dom.roomConfigImageAnalysisReplyEnabled) {
+        dom.roomConfigImageAnalysisReplyEnabled.checked = !!config.image_analysis_reply_enabled;
+      }
       dom.roomConfigGoogleCalendarAutoRegister.checked = !!config.calendar_ai_auto_create_enabled && !!config.calendar_silent_auto_register_enabled;
       if (dom.roomConfigCalendarRegistrationReply) {
         dom.roomConfigCalendarRegistrationReply.checked = !!config.calendar_registration_reply_enabled;
@@ -2358,6 +2389,7 @@ const html = String.raw`<!doctype html>
       dom.roomConfigCalendarLowConfidenceConfirmReply.checked = !!config.calendar_low_confidence_confirm_reply_enabled;
       dom.roomConfigGmailAlert.checked = !!config.gmail_reservation_alert_enabled;
       syncRoomConfigCalendarSubOptions();
+      syncRoomConfigMediaSubOptions();
       dom.roomConfigModal.classList.add('open');
       dom.roomConfigModal.setAttribute('aria-hidden', 'false');
     }
@@ -2378,6 +2410,7 @@ const html = String.raw`<!doctype html>
         receive_overall_summary_enabled: !!(dom.roomConfigReceiveOverallSummary && dom.roomConfigReceiveOverallSummary.checked),
         calendar_tomorrow_reminder_enabled: !!dom.roomConfigTomorrowReminder.checked,
         media_file_access_enabled: !!dom.roomConfigMediaAccess.checked,
+        image_analysis_reply_enabled: !!(dom.roomConfigImageAnalysisReplyEnabled && dom.roomConfigImageAnalysisReplyEnabled.checked),
         calendar_ai_auto_create_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked,
         calendar_silent_auto_register_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked,
         calendar_low_confidence_confirm_reply_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked && !!dom.roomConfigCalendarLowConfidenceConfirmReply.checked,
@@ -2645,6 +2678,7 @@ const html = String.raw`<!doctype html>
         message_search_enabled: messageSearchEnabled,
         message_search_library_enabled: messageSearchLibraryEnabled,
         media_file_access_enabled: roomConfig.media_file_access_enabled,
+        image_analysis_reply_enabled: roomConfig.image_analysis_reply_enabled,
         bot_reply_enabled: roomConfig.bot_reply_enabled,
         calendar_ai_auto_create_enabled: roomConfig.calendar_ai_auto_create_enabled,
         calendar_silent_auto_register_enabled: roomConfig.calendar_silent_auto_register_enabled,
@@ -2684,6 +2718,7 @@ const html = String.raw`<!doctype html>
         payload.receive_overall_summary_enabled = !!opts.overrideConfig.receive_overall_summary_enabled;
         payload.calendar_tomorrow_reminder_enabled = !!opts.overrideConfig.calendar_tomorrow_reminder_enabled;
         payload.media_file_access_enabled = !!opts.overrideConfig.media_file_access_enabled;
+        payload.image_analysis_reply_enabled = !!opts.overrideConfig.image_analysis_reply_enabled;
         payload.calendar_ai_auto_create_enabled = !!opts.overrideConfig.calendar_ai_auto_create_enabled;
         payload.calendar_silent_auto_register_enabled = !!opts.overrideConfig.calendar_silent_auto_register_enabled;
         payload.calendar_low_confidence_confirm_reply_enabled = !!opts.overrideConfig.calendar_low_confidence_confirm_reply_enabled;
@@ -2741,6 +2776,7 @@ const html = String.raw`<!doctype html>
         receive_overall_summary_enabled: !!(dom.newRoomReceiveOverallSummary && dom.newRoomReceiveOverallSummary.checked),
         calendar_tomorrow_reminder_enabled: !!dom.newRoomTomorrowReminder.checked,
         media_file_access_enabled: !!dom.newRoomMediaFileAccessEnabled.checked,
+        image_analysis_reply_enabled: !!(dom.newRoomImageAnalysisReplyEnabled && dom.newRoomImageAnalysisReplyEnabled.checked),
         calendar_ai_auto_create_enabled: !!dom.newRoomGoogleCalendarAutoRegister.checked,
         calendar_silent_auto_register_enabled: !!dom.newRoomGoogleCalendarAutoRegister.checked,
         calendar_low_confidence_confirm_reply_enabled: !!dom.newRoomGoogleCalendarAutoRegister.checked && !!dom.newRoomCalendarLowConfidenceConfirmReply.checked,
@@ -2758,6 +2794,7 @@ const html = String.raw`<!doctype html>
         message_search_enabled: newRoomFeatureConfig.message_search_enabled,
         message_search_library_enabled: newRoomFeatureConfig.message_search_library_enabled,
         media_file_access_enabled: newRoomFeatureConfig.media_file_access_enabled,
+        image_analysis_reply_enabled: newRoomFeatureConfig.image_analysis_reply_enabled,
         calendar_ai_auto_create_enabled: newRoomFeatureConfig.calendar_ai_auto_create_enabled,
         calendar_silent_auto_register_enabled: newRoomFeatureConfig.calendar_silent_auto_register_enabled,
         calendar_low_confidence_confirm_reply_enabled: newRoomFeatureConfig.calendar_low_confidence_confirm_reply_enabled,
@@ -3191,6 +3228,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomReceiveOverallSummary,
       dom.newRoomTomorrowReminder,
       dom.newRoomMediaFileAccessEnabled,
+      dom.newRoomImageAnalysisReplyEnabled,
       dom.newRoomGoogleCalendarAutoRegister,
       dom.newRoomCalendarRegistrationReply,
       dom.newRoomCalendarLowConfidenceConfirmReply,
@@ -3226,7 +3264,13 @@ const html = String.raw`<!doctype html>
     });
     dom.newRoomMediaFileAccessEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_MEDIA_FILE_ACCESS_KEY, !!dom.newRoomMediaFileAccessEnabled.checked);
+      syncNewRoomMediaSubOptions();
     });
+    if (dom.newRoomImageAnalysisReplyEnabled) {
+      dom.newRoomImageAnalysisReplyEnabled.addEventListener('change', function() {
+        saveBooleanSetting(NEW_ROOM_DEFAULT_IMAGE_ANALYSIS_REPLY_KEY, !!dom.newRoomImageAnalysisReplyEnabled.checked);
+      });
+    }
     dom.newRoomGoogleCalendarAutoRegister.addEventListener('change', function() {
       var on = !!dom.newRoomGoogleCalendarAutoRegister.checked;
       saveBooleanSetting(NEW_ROOM_DEFAULT_GOOGLE_CALENDAR_AUTO_REGISTER_KEY, on);
@@ -3253,6 +3297,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomReceiveOverallSummary,
       dom.newRoomTomorrowReminder,
       dom.newRoomMediaFileAccessEnabled,
+      dom.newRoomImageAnalysisReplyEnabled,
       dom.newRoomGoogleCalendarAutoRegister,
       dom.newRoomCalendarRegistrationReply,
       dom.newRoomCalendarLowConfidenceConfirmReply,
@@ -3285,6 +3330,7 @@ const html = String.raw`<!doctype html>
     });
 
     dom.roomConfigGoogleCalendarAutoRegister.addEventListener('change', syncRoomConfigCalendarSubOptions);
+    if (dom.roomConfigMediaAccess) dom.roomConfigMediaAccess.addEventListener('change', syncRoomConfigMediaSubOptions);
     if (dom.roomConfigSendSummary) dom.roomConfigSendSummary.addEventListener('change', syncRoomSummaryMutualExclusion);
     if (dom.roomConfigReceiveOverallSummary) dom.roomConfigReceiveOverallSummary.addEventListener('change', syncRoomSummaryMutualExclusion);
 

@@ -252,6 +252,7 @@ type RoomReplyPolicy = {
   messageSearchEnabled: boolean
   messageSearchLibraryEnabled: boolean
   mediaFileAccessEnabled: boolean
+  imageAnalysisReplyEnabled: boolean
   calendarAiAutoCreateEnabled: boolean
   calendarSilentAutoRegisterEnabled: boolean
   /** 無返信自動登録ON時、低確度は確認返信（pending）に切り替える */
@@ -582,11 +583,13 @@ Deno.serve(async (req) => {
         lineUserPermissionCache,
       )
       const storableMediaType = normalizeStorableLineMediaType(event.message?.type)
-      const canUseMedia = roomReplyPolicy.mediaFileAccessEnabled && lineUserPermission.canMediaAccess && lineUserPermission.isActive
-      const shouldStoreMediaFile = !!storableMediaType && canUseMedia
+      // 添付保存はルーム設定優先。個人の can_media_access は「メディア検索/URL 利用可否」にのみ使う。
+      const canStoreMedia = roomReplyPolicy.mediaFileAccessEnabled && lineUserPermission.isActive
+      const canUseMedia = canStoreMedia && lineUserPermission.canMediaAccess
+      const shouldStoreMediaFile = !!storableMediaType && canStoreMedia
       /** 友だち 1:1 は既定で履歴全文は保存しないが、メディア保存が有効なら画像等は DB + Storage に残す（メディアURL 用） */
       const shouldPersistMessage = shouldPersistLineMessage(source, event.message) ||
-        (isDirectUserChat && !!storableMediaType && canUseMedia)
+        (isDirectUserChat && !!storableMediaType && canStoreMedia)
       const roomCanReply = shouldSendRoomReply(roomReplyPolicy)
       let calendarSourceMeta: CalendarSourceMeta = {
         roomName: roomReplyPolicy.roomName,
@@ -1467,6 +1470,7 @@ Deno.serve(async (req) => {
               senderDisplayName,
               mediaUploadMaxBytes,
               calendarEnvForFileMedia,
+              roomReplyPolicy.imageAnalysisReplyEnabled,
               calendarSourceMeta,
             )
             // 無返信自動登録ONでは roomCanReply が false になるが、ファイル（HACCP Excel 等）の
@@ -1575,6 +1579,7 @@ async function trySaveLineMediaContent(
   senderDisplayName: string | null,
   mediaUploadMaxBytes: number,
   calendarEnv: CalendarEnv | null,
+  imageAnalysisReplyEnabled: boolean,
   sourceMeta: CalendarSourceMeta,
 ): Promise<string | null> {
   const mediaType = normalizeStorableLineMediaType(message?.type)
@@ -1744,7 +1749,7 @@ async function trySaveLineMediaContent(
 
   console.log(`Saved media content (${mediaType}) for room=${roomId}, lineMessageId=${lineMessageId}`)
   if (haccpReply) return haccpReply
-  if (mediaType === 'image') {
+  if (mediaType === 'image' && imageAnalysisReplyEnabled) {
     const cap = String(contentPreview ?? '').trim()
     if (cap) return buildLineImageAnalysisReply(cap)
   }
@@ -3849,6 +3854,7 @@ function buildDirectUserRoomPolicy(base: RoomReplyPolicy): RoomReplyPolicy {
     messageSearchLibraryEnabled: true,
     /** メディアは DB に残し「メディアURL」で全ルーム横断取得可能 */
     mediaFileAccessEnabled: true,
+    imageAnalysisReplyEnabled: true,
     calendarAiAutoCreateEnabled: true,
     calendarSilentAutoRegisterEnabled: false,
     calendarRegistrationReplyEnabled: false,
@@ -3932,6 +3938,7 @@ async function loadRoomReplyPolicy(
     messageSearchEnabled: false,
     messageSearchLibraryEnabled: false,
     mediaFileAccessEnabled: false,
+    imageAnalysisReplyEnabled: false,
     calendarAiAutoCreateEnabled: false,
     calendarSilentAutoRegisterEnabled: false,
     calendarLowConfidenceConfirmReplyEnabled: false,
@@ -3970,6 +3977,7 @@ async function loadRoomReplyPolicy(
     const messageSearchEnabled = data?.message_search_enabled !== false
     const messageSearchLibraryEnabled = data?.message_search_library_enabled !== false
     const mediaFileAccessEnabled = data?.media_file_access_enabled !== false
+    const imageAnalysisReplyEnabled = data?.image_analysis_reply_enabled !== false
     const calendarAiAutoCreateEnabled = data?.calendar_ai_auto_create_enabled !== false
     const calendarSilentAutoRegisterEnabled = data?.calendar_silent_auto_register_enabled === true
     const calendarLowConfidenceConfirmReplyEnabled = data?.calendar_low_confidence_confirm_reply_enabled === true
@@ -3992,6 +4000,7 @@ async function loadRoomReplyPolicy(
       messageSearchEnabled,
       messageSearchLibraryEnabled,
       mediaFileAccessEnabled,
+      imageAnalysisReplyEnabled,
       calendarAiAutoCreateEnabled,
       calendarSilentAutoRegisterEnabled,
       calendarLowConfidenceConfirmReplyEnabled,

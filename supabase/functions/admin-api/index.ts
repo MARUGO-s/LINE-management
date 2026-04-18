@@ -428,6 +428,7 @@ Deno.serve(async (req) => {
           message_search_enabled: payload.message_search_enabled,
           message_search_library_enabled: payload.message_search_library_enabled,
           media_file_access_enabled: payload.media_file_access_enabled,
+          image_analysis_reply_enabled: payload.image_analysis_reply_enabled,
         }),
       )
       const { data, error } = await supabase
@@ -447,6 +448,7 @@ Deno.serve(async (req) => {
           message_search_enabled: payload.message_search_enabled,
           message_search_library_enabled: payload.message_search_library_enabled,
           media_file_access_enabled: payload.media_file_access_enabled,
+          image_analysis_reply_enabled: payload.image_analysis_reply_enabled,
           gmail_reservation_alert_enabled: payload.gmail_reservation_alert_enabled,
           room_sort_order: payload.room_sort_order,
           delivery_hours: payload.delivery_hours,
@@ -469,6 +471,7 @@ Deno.serve(async (req) => {
           message_search_enabled: data.message_search_enabled,
           message_search_library_enabled: data.message_search_library_enabled,
           media_file_access_enabled: data.media_file_access_enabled,
+          image_analysis_reply_enabled: data.image_analysis_reply_enabled,
           updated_at: data.updated_at,
         }),
       )
@@ -3989,6 +3992,7 @@ function buildRoomSettingsPayload(body: unknown): {
   message_search_enabled: boolean
   message_search_library_enabled: boolean
   media_file_access_enabled: boolean
+  image_analysis_reply_enabled: boolean
   gmail_reservation_alert_enabled: boolean
   room_sort_order: number | null
   delivery_hours: number[] | null
@@ -4081,6 +4085,12 @@ function buildRoomSettingsPayload(body: unknown): {
   }
   const mediaFileAccessEnabled = mediaFileAccessEnabledRaw !== false
 
+  const imageAnalysisReplyEnabledRaw = body.image_analysis_reply_enabled
+  if (imageAnalysisReplyEnabledRaw != null && typeof imageAnalysisReplyEnabledRaw !== "boolean") {
+    throw { status: 400, message: "image_analysis_reply_enabled must be boolean when provided." } satisfies AppError
+  }
+  const imageAnalysisReplyEnabled = imageAnalysisReplyEnabledRaw !== false
+
   const gmailReservationAlertEnabledRaw = body.gmail_reservation_alert_enabled
   if (gmailReservationAlertEnabledRaw != null && typeof gmailReservationAlertEnabledRaw !== "boolean") {
     throw { status: 400, message: "gmail_reservation_alert_enabled must be boolean when provided." } satisfies AppError
@@ -4126,6 +4136,7 @@ function buildRoomSettingsPayload(body: unknown): {
     message_search_enabled: messageSearchEnabled,
     message_search_library_enabled: messageSearchLibraryEnabled,
     media_file_access_enabled: mediaFileAccessEnabled,
+    image_analysis_reply_enabled: imageAnalysisReplyEnabled,
     gmail_reservation_alert_enabled: gmailReservationAlertEnabled,
     room_sort_order: roomSortOrder,
     delivery_hours: deliveryHours,

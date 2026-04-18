@@ -1315,8 +1315,11 @@ function extractReservationMailDetails(
   const lineMap = parseColonSeparatedLines(bodyText)
 
   const reservationSite = inferReservationSite(subject, from, bodyText)
-  const storeName = pickLineValue(lineMap, ["店舗", "店舗名", "店名", "ご予約店舗", "ご予約店舗名"]) ??
-    extractStoreNameFromBody(bodyText)
+  const storeName = resolveStoreNameForReservationMail({
+    reservationSite,
+    lineMap,
+    bodyText,
+  })
   const reservationNo = normalizeReservationNo(
     pickLineValue(lineMap, ["予約番号"]) ??
       captureFirstMatch([subject, bodyText], [
@@ -1381,6 +1384,31 @@ function extractReservationMailDetails(
 
   const hasAny = Object.values(details).some((value) => typeof value === "string" && value.trim().length > 0)
   return hasAny ? details : null
+}
+
+function resolveStoreNameForReservationMail(params: {
+  reservationSite: string | null
+  lineMap: Map<string, string>
+  bodyText: string
+}): string | null {
+  const { reservationSite, lineMap, bodyText } = params
+  const labeledStore = normalizeStoreNameCandidate(
+    pickLineValue(lineMap, ["店舗", "店舗名", "店名", "ご予約店舗", "ご予約店舗名"]),
+  )
+  const bodyTopStore = normalizeStoreNameCandidate(extractStoreNameFromBody(bodyText))
+
+  // 食べログ通知は先頭の「〜様」行が店舗名として最も安定するため優先する。
+  if (isTabelogReservationRoute(reservationSite ?? "")) {
+    return bodyTopStore ?? labeledStore
+  }
+  return labeledStore ?? bodyTopStore
+}
+
+function normalizeStoreNameCandidate(raw: string | null | undefined): string | null {
+  const candidate = normalizeInlineText(String(raw ?? ""))
+  if (!candidate) return null
+  if (!isLikelyStoreName(candidate)) return null
+  return candidate
 }
 
 function inferReservationSite(subject: string, from: string, bodyText: string): string | null {
@@ -1528,11 +1556,22 @@ function isLikelyStoreName(value: string): boolean {
   const text = normalizeInlineText(value)
   if (!text || text.length > 80) return false
   if (/[:：]/.test(text)) return false
+  if (isLikelyUrlOrAddress(text)) return false
   if (/^(お世話|以下の予約|ご確認|株式会社|管理画面|https?:|予約|通知|来店|プラン|席|コメント|メール|tel)/i.test(text)) {
     return false
   }
   if (/^[=＝\-ー_]+$/.test(text)) return false
   return /[A-Za-zぁ-んァ-ヶ一-龠]/.test(text)
+}
+
+function isLikelyUrlOrAddress(value: string): boolean {
+  const text = normalizeInlineText(value).toLowerCase()
+  if (!text) return false
+  if (/^https?:\/\//.test(text) || /^www\./.test(text)) return true
+  if (/[^\s]+@[^\s]+\.[^\s]+/.test(text)) return true
+  if (/[a-z0-9][a-z0-9.-]*\.(?:co\.jp|com|net|org|jp|io|biz|info|app|dev)(?:[\/?#]|$)/i.test(text)) return true
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(?:[\/?#].*)?$/i.test(text)) return true
+  return false
 }
 
 function extractLineAfterLabel(bodyText: string, labels: string[]): string | null {
