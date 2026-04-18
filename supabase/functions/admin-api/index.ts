@@ -286,6 +286,10 @@ Deno.serve(async (req) => {
       const reservationSearchState = await fetchReservationSearchState(supabase, url)
       return json(reservationSearchState, 200)
     }
+    if (req.method === "GET" && path === "/receipts/sales") {
+      const receiptSalesState = await fetchReceiptSalesState(supabase, url)
+      return json(receiptSalesState, 200)
+    }
 
     if (req.method === "POST" && path === "/documents") {
       const created = await uploadDocumentFile(req, supabase)
@@ -1895,6 +1899,253 @@ async function fetchReservationSearchState(
     items: items.slice(0, limit),
     generated_at: new Date().toISOString(),
   }
+}
+
+async function fetchReceiptSalesState(
+  supabase: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const month = normalizeCalendarMonthParam(url.searchParams.get("month"))
+  const selectedStoreKeyRaw = toSafeString(url.searchParams.get("store_key"))
+  const range = buildJstMonthRange(month)
+  const dayKeys = buildJstDateKeysForMonth(month)
+  const dayKeySet = new Set(dayKeys)
+
+  const { data, error } = await supabase
+    .from("line_receipt_entries")
+    .select(
+      "store_partition_key, store_name, receipt_date, created_at, gross_sales_yen, net_sales_yen, tax_amount_yen, party_count, guest_count",
+    )
+    .gte("created_at", range.startIso)
+    .lt("created_at", range.endIso)
+    .order("created_at", { ascending: true })
+    .limit(20000)
+
+  if (error) {
+    throw { status: 500, message: `Failed to fetch receipt sales data: ${error.message}` } satisfies AppError
+  }
+
+  type StoreTotal = {
+    store_key: string
+    store_name: string
+    receipt_count: number
+    total_gross_sales_yen: number
+    total_net_sales_yen: number
+    total_tax_amount_yen: number
+    total_party_count: number
+    total_guest_count: number
+  }
+
+  type DailyTotal = {
+    date: string
+    receipt_count: number
+    gross_sales_yen: number
+    net_sales_yen: number
+    tax_amount_yen: number
+    party_count: number
+    guest_count: number
+  }
+
+  const rows = Array.isArray(data) ? data : []
+  const storeTotals = new Map<string, StoreTotal>()
+  const byStoreByDate = new Map<string, Map<string, DailyTotal>>()
+
+  for (const row of rows) {
+    const storeKey = toSafeString((row as Record<string, unknown>).store_partition_key) || "unknown_store"
+    const storeNameRaw = toSafeString((row as Record<string, unknown>).store_name) || storeKey
+    const dayKey = resolveReceiptEntryDateKeyForMonth(
+      (row as Record<string, unknown>).receipt_date,
+      (row as Record<string, unknown>).created_at,
+      month,
+    )
+    if (!dayKey || !dayKeySet.has(dayKey)) continue
+
+    const grossSalesYen = toNonNegativeInteger((row as Record<string, unknown>).gross_sales_yen)
+    const netSalesYen = toNonNegativeInteger((row as Record<string, unknown>).net_sales_yen)
+    const taxAmountYen = toNonNegativeInteger((row as Record<string, unknown>).tax_amount_yen)
+    const partyCount = toNonNegativeInteger((row as Record<string, unknown>).party_count)
+    const guestCount = toNonNegativeInteger((row as Record<string, unknown>).guest_count)
+
+    const existingStore = storeTotals.get(storeKey)
+    if (!existingStore) {
+      storeTotals.set(storeKey, {
+        store_key: storeKey,
+        store_name: storeNameRaw,
+        receipt_count: 1,
+        total_gross_sales_yen: grossSalesYen,
+        total_net_sales_yen: netSalesYen,
+        total_tax_amount_yen: taxAmountYen,
+        total_party_count: partyCount,
+        total_guest_count: guestCount,
+      })
+    } else {
+      if (existingStore.store_name === existingStore.store_key && storeNameRaw !== storeKey) {
+        existingStore.store_name = storeNameRaw
+      }
+      existingStore.receipt_count += 1
+      existingStore.total_gross_sales_yen += grossSalesYen
+      existingStore.total_net_sales_yen += netSalesYen
+      existingStore.total_tax_amount_yen += taxAmountYen
+      existingStore.total_party_count += partyCount
+      existingStore.total_guest_count += guestCount
+    }
+
+    if (!byStoreByDate.has(storeKey)) {
+      byStoreByDate.set(storeKey, new Map<string, DailyTotal>())
+    }
+    const dailyMap = byStoreByDate.get(storeKey)!
+    const existingDaily = dailyMap.get(dayKey)
+    if (!existingDaily) {
+      dailyMap.set(dayKey, {
+        date: dayKey,
+        receipt_count: 1,
+        gross_sales_yen: grossSalesYen,
+        net_sales_yen: netSalesYen,
+        tax_amount_yen: taxAmountYen,
+        party_count: partyCount,
+        guest_count: guestCount,
+      })
+    } else {
+      existingDaily.receipt_count += 1
+      existingDaily.gross_sales_yen += grossSalesYen
+      existingDaily.net_sales_yen += netSalesYen
+      existingDaily.tax_amount_yen += taxAmountYen
+      existingDaily.party_count += partyCount
+      existingDaily.guest_count += guestCount
+    }
+  }
+
+  const collator = new Intl.Collator("ja-JP", { sensitivity: "base", usage: "sort" })
+  const storeOptions = [...storeTotals.values()].sort((a, b) => {
+    if (a.total_gross_sales_yen !== b.total_gross_sales_yen) {
+      return b.total_gross_sales_yen - a.total_gross_sales_yen
+    }
+    const byName = collator.compare(a.store_name, b.store_name)
+    if (byName !== 0) return byName
+    return collator.compare(a.store_key, b.store_key)
+  })
+
+  const selectedStoreKey = selectedStoreKeyRaw && storeTotals.has(selectedStoreKeyRaw)
+    ? selectedStoreKeyRaw
+    : (storeOptions[0]?.store_key ?? "")
+  const selectedStore = selectedStoreKey ? storeTotals.get(selectedStoreKey) ?? null : null
+  const selectedDailyMap = selectedStoreKey ? (byStoreByDate.get(selectedStoreKey) ?? new Map<string, DailyTotal>()) : new Map<
+    string,
+    DailyTotal
+  >()
+
+  const series = dayKeys.map((dateKey) => {
+    const daily = selectedDailyMap.get(dateKey)
+    const receiptCount = daily?.receipt_count ?? 0
+    const grossSalesYen = daily?.gross_sales_yen ?? 0
+    const netSalesYen = daily?.net_sales_yen ?? 0
+    const taxAmountYen = daily?.tax_amount_yen ?? 0
+    const partyCount = daily?.party_count ?? 0
+    const guestCount = daily?.guest_count ?? 0
+    return {
+      date: dateKey,
+      receipt_count: receiptCount,
+      gross_sales_yen: grossSalesYen,
+      net_sales_yen: netSalesYen,
+      tax_amount_yen: taxAmountYen,
+      party_count: partyCount,
+      guest_count: guestCount,
+      avg_gross_sales_yen: receiptCount > 0 ? Math.round(grossSalesYen / receiptCount) : null,
+      avg_party_count: receiptCount > 0 ? roundToScale(partyCount / receiptCount, 2) : null,
+      avg_guest_count: receiptCount > 0 ? roundToScale(guestCount / receiptCount, 2) : null,
+      avg_unit_price_yen: guestCount > 0 ? Math.round(grossSalesYen / guestCount) : null,
+    }
+  })
+
+  const monthStartDate = dayKeys.length > 0 ? dayKeys[0] : `${month}-01`
+  const monthEndDate = dayKeys.length > 0 ? dayKeys[dayKeys.length - 1] : `${month}-01`
+
+  return {
+    month,
+    month_start_iso: range.startIso,
+    month_end_iso: range.endIso,
+    month_start_date: monthStartDate,
+    month_end_date: monthEndDate,
+    selected_store_key: selectedStoreKey || null,
+    selected_store_name: selectedStore?.store_name ?? null,
+    store_options: storeOptions,
+    totals: {
+      receipt_count: selectedStore?.receipt_count ?? 0,
+      total_gross_sales_yen: selectedStore?.total_gross_sales_yen ?? 0,
+      total_net_sales_yen: selectedStore?.total_net_sales_yen ?? 0,
+      total_tax_amount_yen: selectedStore?.total_tax_amount_yen ?? 0,
+      total_party_count: selectedStore?.total_party_count ?? 0,
+      total_guest_count: selectedStore?.total_guest_count ?? 0,
+      avg_gross_sales_yen: selectedStore && selectedStore.receipt_count > 0
+        ? Math.round(selectedStore.total_gross_sales_yen / selectedStore.receipt_count)
+        : null,
+      avg_party_count: selectedStore && selectedStore.receipt_count > 0
+        ? roundToScale(selectedStore.total_party_count / selectedStore.receipt_count, 2)
+        : null,
+      avg_guest_count: selectedStore && selectedStore.receipt_count > 0
+        ? roundToScale(selectedStore.total_guest_count / selectedStore.receipt_count, 2)
+        : null,
+      avg_unit_price_yen: selectedStore && selectedStore.total_guest_count > 0
+        ? Math.round(selectedStore.total_gross_sales_yen / selectedStore.total_guest_count)
+        : null,
+    },
+    series,
+    available_store_count: storeOptions.length,
+    source_row_count: rows.length,
+    generated_at: new Date().toISOString(),
+  }
+}
+
+function resolveReceiptEntryDateKeyForMonth(
+  receiptDateValue: unknown,
+  createdAtValue: unknown,
+  month: string,
+): string | null {
+  const receiptDate = toSafeString(receiptDateValue)
+  if (/^\d{4}-(0[1-9]|1[0-2])-\d{2}$/.test(receiptDate) && receiptDate.startsWith(`${month}-`)) {
+    return receiptDate
+  }
+  const createdDate = toJstDateKeyFromIso(createdAtValue)
+  if (!createdDate || !createdDate.startsWith(`${month}-`)) return null
+  return createdDate
+}
+
+function toJstDateKeyFromIso(value: unknown): string | null {
+  const iso = toSafeString(value)
+  if (!iso) return null
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return null
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date)
+  const year = parts.find((part) => part.type === "year")?.value
+  const month = parts.find((part) => part.type === "month")?.value
+  const day = parts.find((part) => part.type === "day")?.value
+  if (!year || !month || !day) return null
+  return `${year}-${month}-${day}`
+}
+
+function buildJstDateKeysForMonth(month: string): string[] {
+  const matched = month.match(/^(\d{4})-(\d{2})$/)
+  if (!matched) return []
+  const year = Number(matched[1])
+  const monthNum = Number(matched[2])
+  if (!Number.isInteger(year) || !Number.isInteger(monthNum) || monthNum < 1 || monthNum > 12) return []
+  const lastDay = new Date(Date.UTC(year, monthNum, 0)).getUTCDate()
+  const keys: string[] = []
+  for (let day = 1; day <= lastDay; day += 1) {
+    keys.push(`${String(year).padStart(4, "0")}-${String(monthNum).padStart(2, "0")}-${String(day).padStart(2, "0")}`)
+  }
+  return keys
+}
+
+function roundToScale(value: number, scale = 2): number {
+  if (!Number.isFinite(value)) return 0
+  const factor = 10 ** Math.max(0, Math.floor(scale))
+  return Math.round(value * factor) / factor
 }
 
 function getReservationSourceTables(

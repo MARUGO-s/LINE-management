@@ -163,8 +163,10 @@ flowchart LR
 | `index.html` | 管理画面（プロジェクト URL 固定表示、`localStorage` に管理トークン） |
 | `media.html` | メディア一覧・容量・**資料ライブラリ**（アップロードは `admin-api` へ FormData） |
 | `reservation.html` | 予約カレンダー表示（食べログ / 一休） |
+| `sales.html` | レシート売上の店舗別グラフ表示（店舗ドロップダウンで切替） |
 | `admin-dashboard/index.html` | `../index.html` へリダイレクト |
 | `admin-dashboard/media.html` | `../media.html` へリダイレクト |
+| `admin-dashboard/sales.html` | `../sales.html` へリダイレクト |
 
 - **テーマ切替（静的 UI 共通）**: `index.html` / `media.html` / `reservation.html` で **ライト/ダークモード切替**に対応。選択状態は `localStorage` の `line_reservation_calendar_theme` に保存され、3画面で共通利用されます。
 
