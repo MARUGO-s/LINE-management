@@ -4473,7 +4473,7 @@ function buildLineReceiptImageAnalysisReply(
     { label: '消費税', value: receipt.taxAmount || '-' },
     { label: '総売上', value: receipt.grossSales || '-' },
     {
-      label: '月累計売上',
+      label: '月間総売上累計',
       value: monthCumulativeGrossSalesYen == null ? '-' : formatYenAmount(monthCumulativeGrossSalesYen),
     },
     { label: '会計組数', value: receipt.partyCount || '-' },
@@ -4489,15 +4489,6 @@ function buildLineReceiptImageAnalysisReply(
       { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', flex: 2 },
       { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
     ],
-  }))
-
-  const itemTexts = receipt.items.slice(0, 5)
-  const itemRows = itemTexts.map((item, idx) => ({
-    type: 'text',
-    text: `${idx + 1}. ${item}`,
-    size: 'sm',
-    wrap: true,
-    color: '#1F1F1F',
   }))
 
   const summaryText = normalizeInlineText(String(summary ?? '')).slice(0, 180) || '画像を解析しました。'
@@ -4521,20 +4512,6 @@ function buildLineReceiptImageAnalysisReply(
       margin: 'md',
       contents: detailRows,
     })
-  }
-
-  if (itemRows.length > 0) {
-    bodyContents.push(
-      { type: 'separator', margin: 'md' },
-      { type: 'text', text: '明細', weight: 'bold', size: 'sm', margin: 'md', color: '#111111' },
-      {
-        type: 'box',
-        layout: 'vertical',
-        spacing: 'xs',
-        margin: 'sm',
-        contents: itemRows,
-      },
-    )
   }
 
   bodyContents.push(
