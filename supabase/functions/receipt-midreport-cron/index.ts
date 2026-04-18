@@ -11,8 +11,25 @@ type ReceiptAggregate = {
   avgGuestCount: number | null
 }
 
+type ReceiptReportKind = "mid_month" | "month_end"
+type ReceiptReportTriggerType = "day15_fallback" | "month_end_fallback"
+
+type ReceiptReportSchedule = {
+  reportKind: ReceiptReportKind
+  reportTitle: string
+  triggerType: ReceiptReportTriggerType
+  reportMonth: string
+  periodStartDate: string
+  periodEndDate: string
+  rangeStartIso: string
+  rangeEndIso: string
+}
+
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 const RECEIPT_MID_REPORT_TITLE = "中間報告"
+const RECEIPT_MONTH_END_REPORT_TITLE = "月間報告"
+const REPORT_RUN_HOUR_JST = 23
+const REPORT_RUN_MINUTE_JST = 59
 
 Deno.serve(async () => {
   const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? ""
@@ -36,28 +53,24 @@ Deno.serve(async () => {
 
   const now = new Date()
   const jst = toJstDateParts(now)
-  if (!(jst.day === 15 && jst.hour === 23 && jst.minute === 59)) {
+  const schedule = resolveReceiptReportSchedule(jst)
+  if (!schedule) {
     return json({
       ok: true,
       skipped: true,
-      reason: "not_mid_month_report_time",
-      now_jst: `${toJstDateString(jst.year, jst.month, jst.day)} ${String(jst.hour).padStart(2, "0")}:${String(jst.minute).padStart(2, "0")}`,
+      reason: "not_receipt_report_time",
+      now_jst:
+        `${toJstDateString(jst.year, jst.month, jst.day)} ${String(jst.hour).padStart(2, "0")}:${String(jst.minute).padStart(2, "0")}`,
     }, 200)
   }
-
-  const reportMonth = toJstDateString(jst.year, jst.month, 1)
-  const periodStartDate = reportMonth
-  const periodEndDate = toJstDateString(jst.year, jst.month, 15)
-  const rangeStartIso = buildJstDateStartUtcIso(jst.year, jst.month, 1)
-  const rangeEndIso = buildJstDateStartUtcIso(jst.year, jst.month, 16)
 
   const supabase = createClient(supabaseUrl, serviceRoleKey)
 
   const { data: rawRows, error: rowError } = await supabase
     .from("line_receipt_entries")
     .select("room_id, gross_sales_yen, party_count, guest_count")
-    .gte("created_at", rangeStartIso)
-    .lt("created_at", rangeEndIso)
+    .gte("created_at", schedule.rangeStartIso)
+    .lt("created_at", schedule.rangeEndIso)
 
   if (rowError) {
     return json({
@@ -71,8 +84,9 @@ Deno.serve(async () => {
     return json({
       ok: true,
       skipped: true,
-      reason: "no_receipt_entries_for_mid_month",
-      report_month: reportMonth,
+      reason: `no_receipt_entries_for_${schedule.reportKind}`,
+      report_kind: schedule.reportKind,
+      report_month: schedule.reportMonth,
     }, 200)
   }
 
@@ -82,7 +96,8 @@ Deno.serve(async () => {
       ok: true,
       skipped: true,
       reason: "no_aggregatable_receipt_entries",
-      report_month: reportMonth,
+      report_kind: schedule.reportKind,
+      report_month: schedule.reportMonth,
     }, 200)
   }
 
@@ -90,7 +105,8 @@ Deno.serve(async () => {
   const { data: existingRows, error: existingError } = await supabase
     .from("line_receipt_mid_reports")
     .select("room_id")
-    .eq("report_month", reportMonth)
+    .eq("report_month", schedule.reportMonth)
+    .eq("report_kind", schedule.reportKind)
     .in("room_id", roomIds)
 
   if (existingError) {
@@ -116,9 +132,10 @@ Deno.serve(async () => {
       continue
     }
 
-    const reportText = buildMidMonthReceiptReportMessage(aggregate, {
-      periodStartDate,
-      periodEndDate,
+    const reportText = buildReceiptReportMessage(aggregate, {
+      reportTitle: schedule.reportTitle,
+      periodStartDate: schedule.periodStartDate,
+      periodEndDate: schedule.periodEndDate,
     })
     const sendResult = await sendLinePushTextMessage(roomId, reportText, lineAccessToken)
     if (!sendResult.ok) {
@@ -129,11 +146,12 @@ Deno.serve(async () => {
     const { error: insertError } = await supabase
       .from("line_receipt_mid_reports")
       .insert({
-        report_month: reportMonth,
+        report_month: schedule.reportMonth,
+        report_kind: schedule.reportKind,
         room_id: roomId,
-        period_start_jst: periodStartDate,
-        period_end_jst: periodEndDate,
-        trigger_type: "day15_fallback",
+        period_start_jst: schedule.periodStartDate,
+        period_end_jst: schedule.periodEndDate,
+        trigger_type: schedule.triggerType,
         trigger_line_message_id: null,
         receipt_count: aggregate.receiptCount,
         total_gross_sales_yen: aggregate.totalGrossSalesYen,
@@ -160,8 +178,10 @@ Deno.serve(async () => {
 
   return json({
     ok: true,
-    report_month: reportMonth,
-    period: { start: periodStartDate, end: periodEndDate },
+    report_kind: schedule.reportKind,
+    report_title: schedule.reportTitle,
+    report_month: schedule.reportMonth,
+    period: { start: schedule.periodStartDate, end: schedule.periodEndDate },
     source_room_count: roomIds.length,
     sent_room_count: sentRoomIds.length,
     skipped_room_count: skippedRoomIds.length,
@@ -199,6 +219,60 @@ function toJstDateString(year: number, month: number, day: number): string {
 
 function buildJstDateStartUtcIso(year: number, month: number, day: number): string {
   return new Date(Date.UTC(year, month - 1, day, -9, 0, 0, 0)).toISOString()
+}
+
+function shiftJstYearMonth(year: number, month: number, deltaMonths: number): { year: number; month: number } {
+  const shifted = new Date(Date.UTC(year, month - 1 + deltaMonths, 1))
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth() + 1,
+  }
+}
+
+function getJstMonthLastDay(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate()
+}
+
+function resolveReceiptReportSchedule(
+  jst: { year: number; month: number; day: number; hour: number; minute: number },
+): ReceiptReportSchedule | null {
+  if (jst.hour !== REPORT_RUN_HOUR_JST || jst.minute !== REPORT_RUN_MINUTE_JST) {
+    return null
+  }
+
+  const reportMonth = toJstDateString(jst.year, jst.month, 1)
+  const periodStartDate = reportMonth
+  const rangeStartIso = buildJstDateStartUtcIso(jst.year, jst.month, 1)
+
+  if (jst.day === 15) {
+    return {
+      reportKind: "mid_month",
+      reportTitle: RECEIPT_MID_REPORT_TITLE,
+      triggerType: "day15_fallback",
+      reportMonth,
+      periodStartDate,
+      periodEndDate: toJstDateString(jst.year, jst.month, 15),
+      rangeStartIso,
+      rangeEndIso: buildJstDateStartUtcIso(jst.year, jst.month, 16),
+    }
+  }
+
+  const monthLastDay = getJstMonthLastDay(jst.year, jst.month)
+  if (jst.day !== monthLastDay) {
+    return null
+  }
+
+  const nextMonth = shiftJstYearMonth(jst.year, jst.month, 1)
+  return {
+    reportKind: "month_end",
+    reportTitle: RECEIPT_MONTH_END_REPORT_TITLE,
+    triggerType: "month_end_fallback",
+    reportMonth,
+    periodStartDate,
+    periodEndDate: toJstDateString(jst.year, jst.month, monthLastDay),
+    rangeStartIso,
+    rangeEndIso: buildJstDateStartUtcIso(nextMonth.year, nextMonth.month, 1),
+  }
 }
 
 function buildRoomReceiptAggregateMap(rows: Array<Record<string, unknown>>): Map<string, ReceiptAggregate> {
@@ -273,12 +347,12 @@ function formatAverageCount(value: number | null): string {
   return value.toFixed(2).replace(/\.?0+$/, "")
 }
 
-function buildMidMonthReceiptReportMessage(
+function buildReceiptReportMessage(
   aggregate: ReceiptAggregate,
-  opts: { periodStartDate: string; periodEndDate: string },
+  opts: { reportTitle: string; periodStartDate: string; periodEndDate: string },
 ): string {
   return [
-    `【${RECEIPT_MID_REPORT_TITLE}】`,
+    `【${opts.reportTitle}】`,
     `対象期間: ${opts.periodStartDate}〜${opts.periodEndDate}`,
     `総売上合計: ${formatYenAmount(aggregate.totalGrossSalesYen)}`,
     `組数合計: ${aggregate.totalPartyCount.toLocaleString("ja-JP")}`,

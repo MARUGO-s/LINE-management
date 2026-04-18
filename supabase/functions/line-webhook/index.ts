@@ -1783,7 +1783,9 @@ async function trySaveLineMediaContent(
   }
 
   let midMonthReportReply: string | null = null
+  let monthCumulativeGrossSalesYen: number | null = null
   if (mediaType === 'image' && imageAnalysis?.receipt) {
+    const now = new Date()
     await saveLineReceiptEntry(supabase, {
       messageId: lineMessageRowId,
       lineMessageId,
@@ -1793,11 +1795,16 @@ async function trySaveLineMediaContent(
       receipt: imageAnalysis.receipt,
       summary: imageAnalysis.summary,
     })
+    monthCumulativeGrossSalesYen = await loadCurrentMonthCumulativeGrossSalesYen(
+      supabase,
+      roomId,
+      now,
+    )
     midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
       supabase,
       roomId,
       lineMessageId,
-      new Date(),
+      now,
     )
   }
 
@@ -1808,7 +1815,11 @@ async function trySaveLineMediaContent(
   }
   if (mediaType === 'image' && imageAnalysisReplyEnabled) {
     if (imageAnalysis?.receipt) {
-      const baseReply = buildLineReceiptImageAnalysisReply(imageAnalysis.receipt, imageAnalysis.summary)
+      const baseReply = buildLineReceiptImageAnalysisReply(
+        imageAnalysis.receipt,
+        imageAnalysis.summary,
+        monthCumulativeGrossSalesYen,
+      )
       if (midMonthReportReply) {
         return [
           ...baseReply,
@@ -4021,6 +4032,22 @@ async function loadReceiptAggregateForRoom(
   }
 }
 
+async function loadCurrentMonthCumulativeGrossSalesYen(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  now: Date,
+): Promise<number | null> {
+  const parts = getJstDateParts(now)
+  const monthRange = monthRangeFromJstYearMonth(parts.year, parts.month)
+  const aggregate = await loadReceiptAggregateForRoom(
+    supabase,
+    roomId,
+    monthRange.start.toISOString(),
+    new Date(now.getTime() + 1000).toISOString(),
+  )
+  return aggregate ? aggregate.totalGrossSalesYen : null
+}
+
 async function maybeCreateMidMonthReceiptReportOnPost(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
@@ -4044,6 +4071,7 @@ async function maybeCreateMidMonthReceiptReportOnPost(
     .from('line_receipt_mid_reports')
     .insert({
       report_month: reportMonth,
+      report_kind: 'mid_month',
       room_id: roomId,
       period_start_jst: periodStartDate,
       period_end_jst: periodEndDate,
@@ -4425,6 +4453,7 @@ function buildLineImageAnalysisReply(preview: string): string {
 function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
   summary: string,
+  monthCumulativeGrossSalesYen: number | null = null,
 ): LineReplyMessage[] {
   const rows: Array<{ label: string; value: string }> = [
     { label: '店名', value: receipt.storeName || '-' },
@@ -4432,6 +4461,10 @@ function buildLineReceiptImageAnalysisReply(
     { label: '純売上', value: receipt.netSales || '-' },
     { label: '消費税', value: receipt.taxAmount || '-' },
     { label: '総売上', value: receipt.grossSales || '-' },
+    {
+      label: '月累計売上',
+      value: monthCumulativeGrossSalesYen == null ? '-' : formatYenAmount(monthCumulativeGrossSalesYen),
+    },
     { label: '会計組数', value: receipt.partyCount || '-' },
     { label: '客数', value: receipt.guestCount || '-' },
     { label: '客単価', value: receipt.unitPrice || '-' },
