@@ -430,6 +430,7 @@ const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
 const MAX_MEDIA_UPLOAD_MAX_MB = 20
 const RECEIPT_MID_REPORT_TITLE = '中間報告'
+const RECEIPT_STORE_PARTITION_UNKNOWN = 'unknown_store'
 const WEBHOOK_REQUEST_WINDOW_MS = 60 * 1000
 const WEBHOOK_REQUEST_MAX_PER_IP = 120
 const WEBHOOK_EVENT_WINDOW_MS = 60 * 1000
@@ -2000,11 +2001,15 @@ function extractDatesFromText(value: string, defaultYear?: number): string[] {
 function normalizeStoreToken(value: string): string {
   return String(value || '')
     .toLowerCase()
-    .replace(/\s+/g, '')
-    .replace(/[・･ー\-＿_]/g, '')
-    .replace(/[（）()【】\[\]]/g, '')
     .replace(/株式会社ワルツ/g, '')
+    .replace(/[^0-9a-zぁ-んァ-ヶ一-龠々]/g, '')
     .trim()
+}
+
+function toReceiptStorePartitionKey(storeName: string | null): string {
+  const normalized = normalizeStoreToken(String(storeName ?? ''))
+  if (!normalized) return RECEIPT_STORE_PARTITION_UNKNOWN
+  return normalized.slice(0, 120)
 }
 
 const STORE_ALIAS_MAP: Record<string, string> = {
@@ -3751,8 +3756,9 @@ function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalys
   if (!raw || typeof raw !== 'object') return null
   const data = raw as Record<string, unknown>
 
-  const storeName =
+  const rawStoreName =
     normalizeReceiptFieldText(data.store_name ?? data.store ?? data.shop_name, 80)
+  const storeName = rawStoreName ? (resolveBestStoreName(rawStoreName) ?? rawStoreName) : null
   const date =
     normalizeReceiptFieldText(data.date ?? data.issued_at ?? data.issued_date, 80)
   let netSales =
@@ -3940,6 +3946,10 @@ async function saveLineReceiptEntry(
     summary: string
   },
 ): Promise<void> {
+  const canonicalStoreName = params.receipt.storeName
+    ? (resolveBestStoreName(params.receipt.storeName) ?? params.receipt.storeName)
+    : null
+  const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
   const receiptDateIso = parseReceiptDateToIso(params.receipt.date)
   const netSalesYen = parseCurrencyAmount(params.receipt.netSales)
   const taxAmountYen = parseCurrencyAmount(params.receipt.taxAmount)
@@ -3955,7 +3965,8 @@ async function saveLineReceiptEntry(
       room_id: params.roomId,
       user_id: params.userId,
       sender_display_name: params.senderDisplayName,
-      store_name: params.receipt.storeName,
+      store_name: canonicalStoreName,
+      store_partition_key: storePartitionKey,
       receipt_date_text: params.receipt.date,
       receipt_date: receiptDateIso,
       net_sales_yen: netSalesYen,
