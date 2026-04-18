@@ -296,6 +296,25 @@ type SearchDocumentRow = {
 }
 
 type StorableLineMediaType = 'image' | 'video' | 'audio' | 'file'
+type LineReplyTextMessage = { type: 'text'; text: string }
+type LineReplyFlexMessage = { type: 'flex'; altText: string; contents: Record<string, unknown> }
+type LineReplyMessage = LineReplyTextMessage | LineReplyFlexMessage
+type LineReplyPayload = string | string[] | LineReplyMessage | LineReplyMessage[]
+
+type LineImageReceiptAnalysis = {
+  storeName: string | null
+  issuedAt: string | null
+  totalAmount: string | null
+  taxAmount: string | null
+  itemCount: string | null
+  items: string[]
+}
+
+type LineImageAnalysisResult = {
+  summary: string
+  receipt: LineImageReceiptAnalysis | null
+}
+
 type MediaSearchStage = 'select_period' | 'select_category' | 'select_item'
 type MediaSearchPeriodMonths = 3 | 6 | 12 | 0
 type MediaSearchCategoryKey =
@@ -562,7 +581,7 @@ Deno.serve(async (req) => {
         continue
       }
       const replyToken = String(event.replyToken ?? '')
-      let aiAutoCreateReply: string | null = null
+      let aiAutoCreateReply: LineReplyPayload | null = null
       let senderDisplayName: string | null = null
 
       if (!roomNameSyncDone.has(roomId)) {
@@ -1581,7 +1600,7 @@ async function trySaveLineMediaContent(
   calendarEnv: CalendarEnv | null,
   imageAnalysisReplyEnabled: boolean,
   sourceMeta: CalendarSourceMeta,
-): Promise<string | null> {
+): Promise<LineReplyPayload | null> {
   const mediaType = normalizeStorableLineMediaType(message?.type)
   if (!mediaType) return null
 
@@ -1661,6 +1680,7 @@ async function trySaveLineMediaContent(
   }
 
   let contentPreview: string | null = null
+  let imageAnalysis: LineImageAnalysisResult | null = null
   if (mediaType === 'file') {
     try {
       contentPreview = await extractLineMediaFileContentPreview(
@@ -1677,12 +1697,13 @@ async function trySaveLineMediaContent(
     isVisionAnalyzableImageMime(contentFetch.contentType)
   ) {
     try {
-      contentPreview = await analyzeLineImageWithGroqScout(
+      imageAnalysis = await analyzeLineImageWithGroqScout(
         contentFetch.bytes,
         contentFetch.contentType,
         originalFileName,
         groqApiKey,
       )
+      contentPreview = imageAnalysis?.summary ?? null
     } catch (visionErr) {
       console.error(`line_image_vision failed (lineMessageId=${lineMessageId}):`, visionErr)
     }
@@ -1750,6 +1771,9 @@ async function trySaveLineMediaContent(
   console.log(`Saved media content (${mediaType}) for room=${roomId}, lineMessageId=${lineMessageId}`)
   if (haccpReply) return haccpReply
   if (mediaType === 'image' && imageAnalysisReplyEnabled) {
+    if (imageAnalysis?.receipt) {
+      return buildLineReceiptImageAnalysisReply(imageAnalysis.receipt, imageAnalysis.summary)
+    }
     const cap = String(contentPreview ?? '').trim()
     if (cap) return buildLineImageAnalysisReply(cap)
   }
@@ -3482,7 +3506,7 @@ async function analyzeLineImageWithGroqScout(
   contentType: string | null,
   fileName: string,
   groqApiKey: string,
-): Promise<string | null> {
+): Promise<LineImageAnalysisResult | null> {
   if (!groqApiKey) return null
   if (bytes.byteLength <= 0 || bytes.byteLength > GROQ_VISION_BASE64_MAX_BYTES) return null
   const mime = String(contentType ?? '').trim().toLowerCase()
@@ -3498,16 +3522,24 @@ async function analyzeLineImageWithGroqScout(
     body: JSON.stringify({
       model: 'meta-llama/llama-4-scout-17b-16e-instruct',
       temperature: 0.1,
-      max_tokens: 120,
+      max_tokens: 260,
       messages: [
         {
           role: 'system',
-          content: 'あなたは画像内容の説明器です。画像に映っている主な被写体を日本語で1文だけ、60文字以内で説明してください。推測が難しい場合は「画像の内容を特定できませんでした」と返してください。',
+          content: [
+            'あなたは画像解析アシスタントです。必ず JSON のみを返してください（説明文・コードブロック禁止）。',
+            '画像がレシート/領収書なら kind を receipt にし、主要項目を抽出してください。',
+            'レシートでない場合は kind を general にし、summary に1文（80文字以内）で内容を入れてください。',
+            'JSONスキーマ:',
+            '{"kind":"receipt|general","summary":"string","receipt":{"store_name":"string|null","issued_at":"string|null","total_amount":"string|null","tax_amount":"string|null","item_count":"string|null","items":["string"]}}',
+            'receipt は kind=general の時は null でも可。items は最大5件まで。読めない項目は null。',
+            '金額は可能なら「¥7,700」の形式。summary は必須。',
+          ].join('\n'),
         },
         {
           role: 'user',
           content: [
-            { type: 'text', text: `この画像には何が映っていますか？ファイル名: ${fileName || '(unknown)'}` },
+            { type: 'text', text: `この画像を解析してください。ファイル名: ${fileName || '(unknown)'}` },
             { type: 'image_url', image_url: { url: imageDataUrl } },
           ],
         },
@@ -3524,7 +3556,74 @@ async function analyzeLineImageWithGroqScout(
   const json = await response.json()
   const content = String(json?.choices?.[0]?.message?.content ?? '').trim()
   if (!content) return null
-  return content.slice(0, 240)
+  const extracted = parseFirstJsonObject(content)
+  if (extracted && typeof extracted === 'object') {
+    const normalized = normalizeLineImageAnalysisResult(extracted as Record<string, unknown>)
+    if (normalized) return normalized
+  }
+
+  const fallbackSummary = normalizeInlineText(content).slice(0, 240)
+  if (!fallbackSummary) return null
+  return {
+    summary: fallbackSummary,
+    receipt: null,
+  }
+}
+
+function normalizeLineImageAnalysisResult(raw: Record<string, unknown>): LineImageAnalysisResult | null {
+  const summary = normalizeInlineText(String(raw.summary ?? '')).slice(0, 240)
+  const kind = String(raw.kind ?? '').trim().toLowerCase()
+  const receipt = normalizeLineImageReceiptAnalysis(raw.receipt)
+
+  if (!summary) {
+    if (!receipt) return null
+    const syntheticSummaryParts = [
+      receipt.storeName ? `店舗:${receipt.storeName}` : '',
+      receipt.totalAmount ? `合計:${receipt.totalAmount}` : '',
+    ].filter((value) => value.length > 0)
+    const syntheticSummary = syntheticSummaryParts.join(' / ')
+    if (!syntheticSummary) return null
+    return {
+      summary: syntheticSummary.slice(0, 240),
+      receipt: kind === 'general' ? null : receipt,
+    }
+  }
+
+  if (kind === 'receipt') {
+    return { summary, receipt }
+  }
+  if (kind === 'general') {
+    return { summary, receipt: null }
+  }
+  return {
+    summary,
+    receipt,
+  }
+}
+
+function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalysis | null {
+  if (!raw || typeof raw !== 'object') return null
+  const data = raw as Record<string, unknown>
+  const storeName = normalizeInlineText(String(data.store_name ?? '')).slice(0, 80) || null
+  const issuedAt = normalizeInlineText(String(data.issued_at ?? '')).slice(0, 80) || null
+  const totalAmount = normalizeInlineText(String(data.total_amount ?? '')).slice(0, 40) || null
+  const taxAmount = normalizeInlineText(String(data.tax_amount ?? '')).slice(0, 40) || null
+  const itemCount = normalizeInlineText(String(data.item_count ?? '')).slice(0, 20) || null
+  const itemsRaw = Array.isArray(data.items) ? data.items : []
+  const items = itemsRaw
+    .map((value) => normalizeInlineText(String(value ?? '')).slice(0, 80))
+    .filter((value) => value.length > 0)
+    .slice(0, 5)
+  const hasAnyField = !!(storeName || issuedAt || totalAmount || taxAmount || itemCount || items.length > 0)
+  if (!hasAnyField) return null
+  return {
+    storeName,
+    issuedAt,
+    totalAmount,
+    taxAmount,
+    itemCount,
+    items,
+  }
 }
 
 function buildMediaStoragePath(
@@ -3879,6 +3978,95 @@ function buildLineImageAnalysisReply(preview: string): string {
   const body = String(preview ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
   const capped = body.length > 400 ? `${body.slice(0, 400)}…` : body
   return ['画像を保存しました。解析結果は次のとおりです。', capped].join('\n')
+}
+
+function buildLineReceiptImageAnalysisReply(
+  receipt: LineImageReceiptAnalysis,
+  summary: string,
+): LineReplyMessage[] {
+  const rows: Array<{ label: string; value: string }> = []
+  if (receipt.storeName) rows.push({ label: '店舗', value: receipt.storeName })
+  if (receipt.issuedAt) rows.push({ label: '日時', value: receipt.issuedAt })
+  if (receipt.totalAmount) rows.push({ label: '合計', value: receipt.totalAmount })
+  if (receipt.taxAmount) rows.push({ label: '税額', value: receipt.taxAmount })
+  if (receipt.itemCount) rows.push({ label: '点数', value: receipt.itemCount })
+
+  const detailRows = rows.map((row) => ({
+    type: 'box',
+    layout: 'baseline',
+    spacing: 'sm',
+    contents: [
+      { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', flex: 2 },
+      { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
+    ],
+  }))
+
+  const itemTexts = receipt.items.slice(0, 5)
+  const itemRows = itemTexts.map((item, idx) => ({
+    type: 'text',
+    text: `${idx + 1}. ${item}`,
+    size: 'sm',
+    wrap: true,
+    color: '#1F1F1F',
+  }))
+
+  const summaryText = normalizeInlineText(String(summary ?? '')).slice(0, 180) || '画像を解析しました。'
+  const altTextParts = [
+    'レシート解析',
+    receipt.storeName ? `店舗:${receipt.storeName}` : '',
+    receipt.totalAmount ? `合計:${receipt.totalAmount}` : '',
+  ].filter((value) => value.length > 0)
+  const altText = altTextParts.join(' / ').slice(0, 400) || 'レシート解析結果'
+
+  const bodyContents: Array<Record<string, unknown>> = [
+    { type: 'text', text: '画像を保存しました', size: 'xs', color: '#7A7A7A' },
+    { type: 'text', text: 'レシート解析結果', weight: 'bold', size: 'lg', color: '#111111', margin: 'sm' },
+  ]
+
+  if (detailRows.length > 0) {
+    bodyContents.push({
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      margin: 'md',
+      contents: detailRows,
+    })
+  }
+
+  if (itemRows.length > 0) {
+    bodyContents.push(
+      { type: 'separator', margin: 'md' },
+      { type: 'text', text: '明細', weight: 'bold', size: 'sm', margin: 'md', color: '#111111' },
+      {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'xs',
+        margin: 'sm',
+        contents: itemRows,
+      },
+    )
+  }
+
+  bodyContents.push(
+    { type: 'separator', margin: 'md' },
+    { type: 'text', text: `要約: ${summaryText}`, size: 'xs', wrap: true, color: '#5C5C5C', margin: 'md' },
+  )
+
+  return [
+    {
+      type: 'flex',
+      altText,
+      contents: {
+        type: 'bubble',
+        body: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          contents: bodyContents,
+        },
+      },
+    },
+  ]
 }
 
 function buildDirectUserFallbackReply(message: any, options: { canCalendarUpdate: boolean }): string {
@@ -10649,27 +10837,77 @@ function splitTextForLineReply(text: string, maxLength = 4900): string[] {
   return chunks.length > 0 ? chunks : ['（空メッセージ）']
 }
 
-async function replyLineMessage(
-  replyToken: string,
-  text: string | string[],
-  channelAccessToken: string,
-): Promise<{ ok: true; sentMessageIds: string[] } | { ok: false; error: string }> {
-  const inputTexts = Array.isArray(text) ? text : [text]
-  const preparedTexts = inputTexts
-    .flatMap((item) => splitTextForLineReply(item, 4900))
-    .filter((item) => item.length > 0)
-  if (preparedTexts.length === 0) {
-    preparedTexts.push('（空メッセージ）')
+function normalizeLineReplyMessages(payload: LineReplyPayload): LineReplyMessage[] {
+  const out: LineReplyMessage[] = []
+  const appendText = (rawText: string) => {
+    const chunks = splitTextForLineReply(rawText, 4900).filter((item) => item.length > 0)
+    for (const chunk of chunks) {
+      out.push({ type: 'text', text: chunk.slice(0, 4900) })
+    }
   }
 
-  const maxReplyMessages = 5
-  const replyTexts = preparedTexts.slice(0, maxReplyMessages)
-  if (preparedTexts.length > maxReplyMessages) {
-    const omitted = preparedTexts.length - maxReplyMessages
-    const notice = `\n\n※表示上限のため残り${omitted}メッセージ分を省略しました。検索条件を絞ってください。`
-    const last = replyTexts[maxReplyMessages - 1] ?? ''
-    replyTexts[maxReplyMessages - 1] = `${last.slice(0, Math.max(0, 4900 - notice.length))}${notice}`
+  if (typeof payload === 'string') {
+    appendText(payload)
+  } else if (Array.isArray(payload) && payload.every((item) => typeof item === 'string')) {
+    for (const item of payload) appendText(item)
+  } else {
+    const rawMessages = Array.isArray(payload) ? payload : [payload]
+    for (const rawMessage of rawMessages) {
+      if (!rawMessage || typeof rawMessage !== 'object') continue
+      const type = String((rawMessage as any).type ?? '').trim().toLowerCase()
+      if (type === 'text') {
+        appendText(String((rawMessage as any).text ?? ''))
+        continue
+      }
+      if (type === 'flex') {
+        const contents = (rawMessage as any).contents
+        if (!contents || typeof contents !== 'object') continue
+        const altText = normalizeInlineText(String((rawMessage as any).altText ?? '')).slice(0, 400) || '画像解析結果'
+        out.push({
+          type: 'flex',
+          altText,
+          contents: contents as Record<string, unknown>,
+        })
+      }
+    }
   }
+
+  if (out.length === 0) {
+    return [{ type: 'text', text: '（空メッセージ）' }]
+  }
+  return out
+}
+
+function applyLineReplyMessageLimit(messages: LineReplyMessage[], maxReplyMessages: number): LineReplyMessage[] {
+  if (messages.length <= maxReplyMessages) return messages
+  const omitted = messages.length - maxReplyMessages
+  const notice = `※表示上限のため残り${omitted}メッセージ分を省略しました。検索条件を絞ってください。`
+  const limited = messages.slice(0, maxReplyMessages)
+  const lastIndex = limited.length - 1
+  const last = limited[lastIndex]
+  if (last && last.type === 'text') {
+    const combined = `${last.text}\n\n${notice}`
+    limited[lastIndex] = {
+      type: 'text',
+      text: combined.slice(0, 4900),
+    }
+    return limited
+  }
+  limited[lastIndex] = {
+    type: 'text',
+    text: notice.slice(0, 4900),
+  }
+  return limited
+}
+
+async function replyLineMessage(
+  replyToken: string,
+  payload: LineReplyPayload,
+  channelAccessToken: string,
+): Promise<{ ok: true; sentMessageIds: string[] } | { ok: false; error: string }> {
+  const maxReplyMessages = 5
+  const preparedMessages = normalizeLineReplyMessages(payload)
+  const replyMessages = applyLineReplyMessageLimit(preparedMessages, maxReplyMessages)
 
   const response = await fetch('https://api.line.me/v2/bot/message/reply', {
     method: 'POST',
@@ -10679,7 +10917,19 @@ async function replyLineMessage(
     },
     body: JSON.stringify({
       replyToken,
-      messages: replyTexts.map((value) => ({ type: 'text', text: value.slice(0, 4900) })),
+      messages: replyMessages.map((message) => {
+        if (message.type === 'flex') {
+          return {
+            type: 'flex',
+            altText: message.altText.slice(0, 400),
+            contents: message.contents,
+          }
+        }
+        return {
+          type: 'text',
+          text: message.text.slice(0, 4900),
+        }
+      }),
     }),
   })
 
