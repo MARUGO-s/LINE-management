@@ -303,10 +303,13 @@ type LineReplyPayload = string | string[] | LineReplyMessage | LineReplyMessage[
 
 type LineImageReceiptAnalysis = {
   storeName: string | null
-  issuedAt: string | null
-  totalAmount: string | null
+  date: string | null
+  netSales: string | null
   taxAmount: string | null
-  itemCount: string | null
+  grossSales: string | null
+  partyCount: string | null
+  guestCount: string | null
+  unitPrice: string | null
   items: string[]
 }
 
@@ -3531,9 +3534,9 @@ async function analyzeLineImageWithGroqScout(
             '画像がレシート/領収書なら kind を receipt にし、主要項目を抽出してください。',
             'レシートでない場合は kind を general にし、summary に1文（80文字以内）で内容を入れてください。',
             'JSONスキーマ:',
-            '{"kind":"receipt|general","summary":"string","receipt":{"store_name":"string|null","issued_at":"string|null","total_amount":"string|null","tax_amount":"string|null","item_count":"string|null","items":["string"]}}',
+            '{"kind":"receipt|general","summary":"string","receipt":{"store_name":"string|null","date":"string|null","net_sales":"string|null","tax_amount":"string|null","gross_sales":"string|null","party_count":"string|null","guest_count":"string|null","unit_price":"string|null","items":["string"]}}',
             'receipt は kind=general の時は null でも可。items は最大5件まで。読めない項目は null。',
-            '金額は可能なら「¥7,700」の形式。summary は必須。',
+            '金額は可能なら「¥7,700」の形式。会計組数・客数は数値として抽出。summary は必須。',
           ].join('\n'),
         },
         {
@@ -3579,7 +3582,7 @@ function normalizeLineImageAnalysisResult(raw: Record<string, unknown>): LineIma
     if (!receipt) return null
     const syntheticSummaryParts = [
       receipt.storeName ? `店舗:${receipt.storeName}` : '',
-      receipt.totalAmount ? `合計:${receipt.totalAmount}` : '',
+      receipt.grossSales ? `総売上:${receipt.grossSales}` : '',
     ].filter((value) => value.length > 0)
     const syntheticSummary = syntheticSummaryParts.join(' / ')
     if (!syntheticSummary) return null
@@ -3601,27 +3604,125 @@ function normalizeLineImageAnalysisResult(raw: Record<string, unknown>): LineIma
   }
 }
 
+function decodeEscapedUnicodeSequences(raw: string): string {
+  return String(raw ?? '')
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/\\n/g, ' ')
+    .replace(/\\r/g, ' ')
+    .replace(/\\t/g, ' ')
+}
+
+function normalizeReceiptFieldText(raw: unknown, maxLen: number): string | null {
+  const normalized = normalizeInlineText(decodeEscapedUnicodeSequences(String(raw ?? '')))
+    .replace(/\u00a5/g, '¥')
+    .trim()
+  if (!normalized) return null
+  return normalized.length > maxLen ? normalized.slice(0, maxLen) : normalized
+}
+
+function parseCurrencyAmount(raw: string | null): number | null {
+  if (!raw) return null
+  const normalized = decodeEscapedUnicodeSequences(raw)
+    .replace(/,/g, '')
+    .replace(/[¥￥円]/g, '')
+    .replace(/[^\d.-]/g, '')
+    .trim()
+  if (!normalized) return null
+  const value = Number(normalized)
+  if (!Number.isFinite(value)) return null
+  return value
+}
+
+function parseIntegerCount(raw: string | null): number | null {
+  if (!raw) return null
+  const normalized = decodeEscapedUnicodeSequences(raw).replace(/[^\d-]/g, '').trim()
+  if (!normalized) return null
+  const value = Number(normalized)
+  if (!Number.isFinite(value)) return null
+  return Math.max(0, Math.round(value))
+}
+
+function formatYenAmount(value: number): string {
+  return `¥${Math.round(value).toLocaleString('ja-JP')}`
+}
+
 function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalysis | null {
   if (!raw || typeof raw !== 'object') return null
   const data = raw as Record<string, unknown>
-  const storeName = normalizeInlineText(String(data.store_name ?? '')).slice(0, 80) || null
-  const issuedAt = normalizeInlineText(String(data.issued_at ?? '')).slice(0, 80) || null
-  const totalAmount = normalizeInlineText(String(data.total_amount ?? '')).slice(0, 40) || null
-  const taxAmount = normalizeInlineText(String(data.tax_amount ?? '')).slice(0, 40) || null
-  const itemCount = normalizeInlineText(String(data.item_count ?? '')).slice(0, 20) || null
+
+  const storeName =
+    normalizeReceiptFieldText(data.store_name ?? data.store ?? data.shop_name, 80)
+  const date =
+    normalizeReceiptFieldText(data.date ?? data.issued_at ?? data.issued_date, 80)
+  let netSales =
+    normalizeReceiptFieldText(data.net_sales ?? data.subtotal ?? data.net_amount, 40)
+  let taxAmount =
+    normalizeReceiptFieldText(data.tax_amount ?? data.consumption_tax ?? data.tax, 40)
+  let grossSales =
+    normalizeReceiptFieldText(data.gross_sales ?? data.total_amount ?? data.total_sales, 40)
+  let partyCount =
+    normalizeReceiptFieldText(data.party_count ?? data.group_count ?? data.account_groups, 20)
+  let guestCount =
+    normalizeReceiptFieldText(data.guest_count ?? data.customer_count ?? data.guests, 20)
+  let unitPrice =
+    normalizeReceiptFieldText(data.unit_price ?? data.avg_spend_per_guest ?? data.average_spend, 40)
+
+  const netNum = parseCurrencyAmount(netSales)
+  const taxNum = parseCurrencyAmount(taxAmount)
+  const grossNum = parseCurrencyAmount(grossSales)
+
+  if (!grossSales && netNum != null && taxNum != null) {
+    grossSales = formatYenAmount(netNum + taxNum)
+  }
+  if (!netSales && grossNum != null && taxNum != null) {
+    netSales = formatYenAmount(grossNum - taxNum)
+  }
+
+  const partyNum = parseIntegerCount(partyCount)
+  if (partyNum != null) partyCount = String(partyNum)
+  const guestNum = parseIntegerCount(guestCount)
+  if (guestNum != null) guestCount = String(guestNum)
+
+  const grossForUnitPrice = parseCurrencyAmount(grossSales)
+  if (!unitPrice && grossForUnitPrice != null && guestNum != null && guestNum > 0) {
+    unitPrice = formatYenAmount(grossForUnitPrice / guestNum)
+  }
+  if (taxAmount) {
+    const normalizedTax = parseCurrencyAmount(taxAmount)
+    if (normalizedTax != null) {
+      taxAmount = formatYenAmount(normalizedTax)
+    }
+  }
+
   const itemsRaw = Array.isArray(data.items) ? data.items : []
   const items = itemsRaw
-    .map((value) => normalizeInlineText(String(value ?? '')).slice(0, 80))
+    .map((value) => normalizeReceiptFieldText(value, 80) ?? '')
     .filter((value) => value.length > 0)
     .slice(0, 5)
-  const hasAnyField = !!(storeName || issuedAt || totalAmount || taxAmount || itemCount || items.length > 0)
+
+  const hasAnyField = !!(
+    storeName ||
+    date ||
+    netSales ||
+    taxAmount ||
+    grossSales ||
+    partyCount ||
+    guestCount ||
+    unitPrice ||
+    items.length > 0
+  )
   if (!hasAnyField) return null
+
   return {
     storeName,
-    issuedAt,
-    totalAmount,
+    date,
+    netSales,
     taxAmount,
-    itemCount,
+    grossSales,
+    partyCount,
+    guestCount,
+    unitPrice,
     items,
   }
 }
@@ -3984,12 +4085,16 @@ function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
   summary: string,
 ): LineReplyMessage[] {
-  const rows: Array<{ label: string; value: string }> = []
-  if (receipt.storeName) rows.push({ label: '店舗', value: receipt.storeName })
-  if (receipt.issuedAt) rows.push({ label: '日時', value: receipt.issuedAt })
-  if (receipt.totalAmount) rows.push({ label: '合計', value: receipt.totalAmount })
-  if (receipt.taxAmount) rows.push({ label: '税額', value: receipt.taxAmount })
-  if (receipt.itemCount) rows.push({ label: '点数', value: receipt.itemCount })
+  const rows: Array<{ label: string; value: string }> = [
+    { label: '店名', value: receipt.storeName || '-' },
+    { label: '日付', value: receipt.date || '-' },
+    { label: '純売上', value: receipt.netSales || '-' },
+    { label: '消費税', value: receipt.taxAmount || '-' },
+    { label: '総売上', value: receipt.grossSales || '-' },
+    { label: '会計組数', value: receipt.partyCount || '-' },
+    { label: '客数', value: receipt.guestCount || '-' },
+    { label: '客単価', value: receipt.unitPrice || '-' },
+  ]
 
   const detailRows = rows.map((row) => ({
     type: 'box',
@@ -4013,8 +4118,8 @@ function buildLineReceiptImageAnalysisReply(
   const summaryText = normalizeInlineText(String(summary ?? '')).slice(0, 180) || '画像を解析しました。'
   const altTextParts = [
     'レシート解析',
-    receipt.storeName ? `店舗:${receipt.storeName}` : '',
-    receipt.totalAmount ? `合計:${receipt.totalAmount}` : '',
+    receipt.storeName ? `店名:${receipt.storeName}` : '',
+    receipt.grossSales ? `総売上:${receipt.grossSales}` : '',
   ].filter((value) => value.length > 0)
   const altText = altTextParts.join(' / ').slice(0, 400) || 'レシート解析結果'
 
