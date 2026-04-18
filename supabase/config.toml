@@ -421,6 +421,12 @@ verify_jwt = true
 import_map = "./functions/calendar-pending-cron/deno.json"
 entrypoint = "./functions/calendar-pending-cron/index.ts"
 
+[functions.receipt-midreport-cron]
+enabled = true
+verify_jwt = true
+import_map = "./functions/receipt-midreport-cron/deno.json"
+entrypoint = "./functions/receipt-midreport-cron/index.ts"
+
 [functions.admin-api]
 enabled = true
 verify_jwt = false

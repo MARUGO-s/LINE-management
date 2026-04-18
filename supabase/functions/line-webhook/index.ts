@@ -318,6 +318,16 @@ type LineImageAnalysisResult = {
   receipt: LineImageReceiptAnalysis | null
 }
 
+type LineReceiptAggregate = {
+  receiptCount: number
+  totalGrossSalesYen: number
+  totalPartyCount: number
+  totalGuestCount: number
+  avgGrossSalesYen: number | null
+  avgPartyCount: number | null
+  avgGuestCount: number | null
+}
+
 type MediaSearchStage = 'select_period' | 'select_category' | 'select_item'
 type MediaSearchPeriodMonths = 3 | 6 | 12 | 0
 type MediaSearchCategoryKey =
@@ -419,6 +429,7 @@ const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
 const MAX_MEDIA_UPLOAD_MAX_MB = 20
+const RECEIPT_MID_REPORT_TITLE = '中間報告'
 const WEBHOOK_REQUEST_WINDOW_MS = 60 * 1000
 const WEBHOOK_REQUEST_MAX_PER_IP = 120
 const WEBHOOK_EVENT_WINDOW_MS = 60 * 1000
@@ -1771,15 +1782,45 @@ async function trySaveLineMediaContent(
     return haccpReply
   }
 
+  let midMonthReportReply: string | null = null
+  if (mediaType === 'image' && imageAnalysis?.receipt) {
+    await saveLineReceiptEntry(supabase, {
+      messageId: lineMessageRowId,
+      lineMessageId,
+      roomId,
+      userId,
+      senderDisplayName,
+      receipt: imageAnalysis.receipt,
+      summary: imageAnalysis.summary,
+    })
+    midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
+      supabase,
+      roomId,
+      lineMessageId,
+      new Date(),
+    )
+  }
+
   console.log(`Saved media content (${mediaType}) for room=${roomId}, lineMessageId=${lineMessageId}`)
   if (haccpReply) return haccpReply
+  if (midMonthReportReply && (!imageAnalysisReplyEnabled || mediaType !== 'image')) {
+    return midMonthReportReply
+  }
   if (mediaType === 'image' && imageAnalysisReplyEnabled) {
     if (imageAnalysis?.receipt) {
-      return buildLineReceiptImageAnalysisReply(imageAnalysis.receipt, imageAnalysis.summary)
+      const baseReply = buildLineReceiptImageAnalysisReply(imageAnalysis.receipt, imageAnalysis.summary)
+      if (midMonthReportReply) {
+        return [
+          ...baseReply,
+          { type: 'text', text: midMonthReportReply.slice(0, 4900) },
+        ]
+      }
+      return baseReply
     }
     const cap = String(contentPreview ?? '').trim()
     if (cap) return buildLineImageAnalysisReply(cap)
   }
+  if (midMonthReportReply) return midMonthReportReply
   return null
 }
 
@@ -3824,6 +3865,207 @@ function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalys
     unitPrice,
     items,
   }
+}
+
+function parseReceiptDateToIso(raw: string | null): string | null {
+  if (!raw) return null
+  const normalized = decodeEscapedUnicodeSequences(raw).trim()
+  if (!normalized) return null
+  const m = normalized.match(/(\d{4})[\/\-\.年](\d{1,2})[\/\-\.月](\d{1,2})/)
+  if (!m) return null
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  return toIsoDateStringSafe(year, month, day)
+}
+
+function getJstDateParts(base = new Date()): { year: number; month: number; day: number; hour: number; minute: number } {
+  const jst = new Date(base.getTime() + JST_OFFSET_MS)
+  return {
+    year: jst.getUTCFullYear(),
+    month: jst.getUTCMonth() + 1,
+    day: jst.getUTCDate(),
+    hour: jst.getUTCHours(),
+    minute: jst.getUTCMinutes(),
+  }
+}
+
+function toJstDateString(year: number, month: number, day: number): string {
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+}
+
+function formatAverageCount(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return '-'
+  if (Math.abs(value - Math.round(value)) < 0.0001) return String(Math.round(value))
+  return value.toFixed(2).replace(/\.?0+$/, '')
+}
+
+function buildMidMonthReceiptReportMessage(
+  aggregate: LineReceiptAggregate,
+  opts: { periodStartDate: string; periodEndDate: string },
+): string {
+  return [
+    `【${RECEIPT_MID_REPORT_TITLE}】`,
+    `対象期間: ${opts.periodStartDate}〜${opts.periodEndDate}`,
+    `総売上合計: ${formatYenAmount(aggregate.totalGrossSalesYen)}`,
+    `組数合計: ${aggregate.totalPartyCount.toLocaleString('ja-JP')}`,
+    `客数合計: ${aggregate.totalGuestCount.toLocaleString('ja-JP')}`,
+    `総売上平均: ${aggregate.avgGrossSalesYen == null ? '-' : formatYenAmount(aggregate.avgGrossSalesYen)}`,
+    `組数平均: ${formatAverageCount(aggregate.avgPartyCount)}`,
+    `客数平均: ${formatAverageCount(aggregate.avgGuestCount)}`,
+    `レシート件数: ${aggregate.receiptCount.toLocaleString('ja-JP')}`,
+  ].join('\n')
+}
+
+async function saveLineReceiptEntry(
+  supabase: ReturnType<typeof createClient>,
+  params: {
+    messageId: string
+    lineMessageId: string
+    roomId: string
+    userId: string | null
+    senderDisplayName: string | null
+    receipt: LineImageReceiptAnalysis
+    summary: string
+  },
+): Promise<void> {
+  const receiptDateIso = parseReceiptDateToIso(params.receipt.date)
+  const netSalesYen = parseCurrencyAmount(params.receipt.netSales)
+  const taxAmountYen = parseCurrencyAmount(params.receipt.taxAmount)
+  const grossSalesYen = parseCurrencyAmount(params.receipt.grossSales)
+  const partyCount = parseIntegerCount(params.receipt.partyCount)
+  const guestCount = parseIntegerCount(params.receipt.guestCount)
+  const unitPriceYen = parseCurrencyAmount(params.receipt.unitPrice)
+  const { error } = await supabase
+    .from('line_receipt_entries')
+    .insert({
+      message_id: params.messageId,
+      line_message_id: params.lineMessageId,
+      room_id: params.roomId,
+      user_id: params.userId,
+      sender_display_name: params.senderDisplayName,
+      store_name: params.receipt.storeName,
+      receipt_date_text: params.receipt.date,
+      receipt_date: receiptDateIso,
+      net_sales_yen: netSalesYen,
+      tax_amount_yen: taxAmountYen,
+      gross_sales_yen: grossSalesYen,
+      party_count: partyCount,
+      guest_count: guestCount,
+      unit_price_yen: unitPriceYen,
+      summary_text: normalizeInlineText(params.summary).slice(0, 240) || null,
+      raw_payload: params.receipt,
+    })
+  if (error) {
+    const code = String((error as any)?.code ?? '')
+    if (code !== '23505') {
+      console.error(`Failed to insert line_receipt_entries (lineMessageId=${params.lineMessageId}):`, error)
+    }
+  }
+}
+
+async function loadReceiptAggregateForRoom(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  startIso: string,
+  endIso: string,
+): Promise<LineReceiptAggregate | null> {
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .select('gross_sales_yen, party_count, guest_count')
+    .eq('room_id', roomId)
+    .gte('created_at', startIso)
+    .lt('created_at', endIso)
+
+  if (error) {
+    console.error(`Failed to load line_receipt_entries for room=${roomId}:`, error.message)
+    return null
+  }
+
+  const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : []
+  if (rows.length === 0) return null
+
+  let totalGrossSalesYen = 0
+  let totalPartyCount = 0
+  let totalGuestCount = 0
+  let grossCount = 0
+  let partyCountRows = 0
+  let guestCountRows = 0
+
+  for (const row of rows) {
+    const gross = Number(row.gross_sales_yen)
+    if (Number.isFinite(gross) && gross >= 0) {
+      totalGrossSalesYen += Math.round(gross)
+      grossCount += 1
+    }
+    const party = Number(row.party_count)
+    if (Number.isFinite(party) && party >= 0) {
+      totalPartyCount += Math.round(party)
+      partyCountRows += 1
+    }
+    const guest = Number(row.guest_count)
+    if (Number.isFinite(guest) && guest >= 0) {
+      totalGuestCount += Math.round(guest)
+      guestCountRows += 1
+    }
+  }
+
+  return {
+    receiptCount: rows.length,
+    totalGrossSalesYen,
+    totalPartyCount,
+    totalGuestCount,
+    avgGrossSalesYen: grossCount > 0 ? totalGrossSalesYen / grossCount : null,
+    avgPartyCount: partyCountRows > 0 ? totalPartyCount / partyCountRows : null,
+    avgGuestCount: guestCountRows > 0 ? totalGuestCount / guestCountRows : null,
+  }
+}
+
+async function maybeCreateMidMonthReceiptReportOnPost(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  lineMessageId: string,
+  now: Date,
+): Promise<string | null> {
+  const parts = getJstDateParts(now)
+  if (parts.day !== 15) return null
+
+  const monthRange = monthRangeFromJstYearMonth(parts.year, parts.month)
+  const startIso = monthRange.start.toISOString()
+  const endIso = new Date(now.getTime() + 1000).toISOString()
+  const aggregate = await loadReceiptAggregateForRoom(supabase, roomId, startIso, endIso)
+  if (!aggregate || aggregate.receiptCount === 0) return null
+
+  const periodStartDate = toJstDateString(parts.year, parts.month, 1)
+  const periodEndDate = toJstDateString(parts.year, parts.month, 15)
+  const reportMonth = periodStartDate
+
+  const { error } = await supabase
+    .from('line_receipt_mid_reports')
+    .insert({
+      report_month: reportMonth,
+      room_id: roomId,
+      period_start_jst: periodStartDate,
+      period_end_jst: periodEndDate,
+      trigger_type: 'day15_post',
+      trigger_line_message_id: lineMessageId,
+      receipt_count: aggregate.receiptCount,
+      total_gross_sales_yen: aggregate.totalGrossSalesYen,
+      total_party_count: aggregate.totalPartyCount,
+      total_guest_count: aggregate.totalGuestCount,
+      avg_gross_sales_yen: aggregate.avgGrossSalesYen == null ? null : Math.round(aggregate.avgGrossSalesYen),
+      avg_party_count: aggregate.avgPartyCount,
+      avg_guest_count: aggregate.avgGuestCount,
+      sent_at: now.toISOString(),
+    })
+  if (error) {
+    const code = String((error as any)?.code ?? '')
+    if (code === '23505') return null
+    console.error(`Failed to insert line_receipt_mid_reports on day15 post (room=${roomId}):`, error.message)
+    return null
+  }
+
+  return buildMidMonthReceiptReportMessage(aggregate, { periodStartDate, periodEndDate })
 }
 
 function buildMediaStoragePath(
