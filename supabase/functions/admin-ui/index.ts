@@ -2478,12 +2478,7 @@ const html = String.raw`<!doctype html>
     }
 
     function buildRoomConfigSavedMessage(tr, config) {
-      const roomId = String((tr && tr.dataset && tr.dataset.roomId) || '').trim() || '(unknown)';
-      return [
-        'ルーム設定を保存しました。',
-        'room_id: ' + roomId,
-        '保存値: AI会話返信=' + (config.bot_reply_enabled ? 'ON' : 'OFF') + ' / AI返信完全無し=' + (config.bot_reply_hard_mute_enabled ? 'ON' : 'OFF') + ' / 会話検索=' + (config.message_search_enabled ? 'ON' : 'OFF') + ' / 資料検索=' + (config.message_search_library_enabled ? 'ON' : 'OFF'),
-      ].join('\n');
+      return 'ルーム設定を保存しました。';
     }
 
     function renderRooms(roomOverview, roomSettings) {
