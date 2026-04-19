@@ -925,7 +925,7 @@ Deno.serve(async (req) => {
               }
               continue
             }
-            if (looksLikeCalendarUpdateConversationText(text)) {
+            if (roomCanReply && looksLikeCalendarUpdateConversationText(text)) {
               aiAutoCreateReply = [
                 '予定変更の対象を特定できませんでした。',
                 '先に「予定確認」で候補を表示してから、対象メッセージに返信して変更してください。',
@@ -934,7 +934,7 @@ Deno.serve(async (req) => {
             }
           }
 
-          if (calendarEnvState.ok && !canCalendarUpdate && looksLikeCalendarUpdateConversationText(text)) {
+          if (roomCanReply && calendarEnvState.ok && !canCalendarUpdate && looksLikeCalendarUpdateConversationText(text)) {
             aiAutoCreateReply = buildCalendarPermissionDeniedReply()
           }
 
@@ -1796,9 +1796,13 @@ async function trySaveLineMediaContent(
       receipt: imageAnalysis.receipt,
       summary: imageAnalysis.summary,
     })
+    const canonicalStoreName = imageAnalysis.receipt.storeName
+      ? (resolveBestStoreName(imageAnalysis.receipt.storeName) ?? imageAnalysis.receipt.storeName)
+      : null
+    const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
     monthCumulativeGrossSalesYen = await loadCurrentMonthCumulativeGrossSalesYen(
       supabase,
-      roomId,
+      storePartitionKey,
       now,
     )
     midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
@@ -1818,7 +1822,6 @@ async function trySaveLineMediaContent(
     if (imageAnalysis?.receipt) {
       const baseReply = buildLineReceiptImageAnalysisReply(
         imageAnalysis.receipt,
-        imageAnalysis.summary,
         monthCumulativeGrossSalesYen,
       )
       if (midMonthReportReply) {
@@ -2013,8 +2016,8 @@ function toReceiptStorePartitionKey(storeName: string | null): string {
 }
 
 const STORE_ALIAS_MAP: Record<string, string> = {
-  'cavacava': 'Cava Cava',
-  'cava': 'Cava Cava',
+  'cavacava': 'BISTRO CAVA CAVA',
+  'cava': 'BISTRO CAVA CAVA',
   'marugod': 'マルゴ D',
   'marugo d': 'マルゴ D',
   'sobaju': 'ソバージュ',
@@ -4045,18 +4048,41 @@ async function loadReceiptAggregateForRoom(
 
 async function loadCurrentMonthCumulativeGrossSalesYen(
   supabase: ReturnType<typeof createClient>,
-  roomId: string,
+  storePartitionKey: string,
   now: Date,
 ): Promise<number | null> {
+  const normalizedStorePartitionKey = String(storePartitionKey ?? '').trim()
+  if (!normalizedStorePartitionKey) return null
+
   const parts = getJstDateParts(now)
   const monthRange = monthRangeFromJstYearMonth(parts.year, parts.month)
-  const aggregate = await loadReceiptAggregateForRoom(
-    supabase,
-    roomId,
-    monthRange.start.toISOString(),
-    new Date(now.getTime() + 1000).toISOString(),
-  )
-  return aggregate ? aggregate.totalGrossSalesYen : null
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .select('gross_sales_yen')
+    .eq('store_partition_key', normalizedStorePartitionKey)
+    .gte('created_at', monthRange.start.toISOString())
+    .lt('created_at', new Date(now.getTime() + 1000).toISOString())
+    .limit(20000)
+
+  if (error) {
+    console.error(
+      `Failed to load monthly cumulative gross sales (store_partition_key=${normalizedStorePartitionKey}):`,
+      error.message,
+    )
+    return null
+  }
+
+  const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : []
+  if (rows.length === 0) return 0
+
+  let totalGrossSalesYen = 0
+  for (const row of rows) {
+    const gross = Number(row.gross_sales_yen)
+    if (Number.isFinite(gross) && gross >= 0) {
+      totalGrossSalesYen += Math.round(gross)
+    }
+  }
+  return totalGrossSalesYen
 }
 
 async function maybeCreateMidMonthReceiptReportOnPost(
@@ -4463,46 +4489,47 @@ function buildLineImageAnalysisReply(preview: string): string {
 
 function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
-  summary: string,
   monthCumulativeGrossSalesYen: number | null = null,
 ): LineReplyMessage[] {
-  const rows: Array<{ label: string; value: string }> = [
+  const labelFlex = 3
+  const rows: Array<{ label: string; value: string; margin?: 'md' }> = [
     { label: '店名', value: receipt.storeName || '-' },
     { label: '日付', value: receipt.date || '-' },
     { label: '純売上', value: receipt.netSales || '-' },
     { label: '消費税', value: receipt.taxAmount || '-' },
     { label: '総売上', value: receipt.grossSales || '-' },
-    {
-      label: '月間総売上累計',
-      value: monthCumulativeGrossSalesYen == null ? '-' : formatYenAmount(monthCumulativeGrossSalesYen),
-    },
     { label: '会計組数', value: receipt.partyCount || '-' },
     { label: '客数', value: receipt.guestCount || '-' },
     { label: '客単価', value: receipt.unitPrice || '-' },
+    {
+      label: '月間総売上',
+      value: monthCumulativeGrossSalesYen == null ? '-' : formatYenAmount(monthCumulativeGrossSalesYen),
+      margin: 'md',
+    },
   ]
 
-  const detailRows = rows.map((row) => ({
-    type: 'box',
-    layout: 'baseline',
-    spacing: 'sm',
-    contents: [
-      { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', flex: 2 },
-      { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
-    ],
-  }))
+  const detailRows = rows.map((row) => {
+    const payload: Record<string, unknown> = {
+      type: 'box',
+      layout: 'baseline',
+      spacing: 'sm',
+      contents: [
+        { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
+        { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
+      ],
+    }
+    if (row.margin) payload.margin = row.margin
+    return payload
+  })
 
-  const summaryText = normalizeInlineText(String(summary ?? '')).slice(0, 180) || '画像を解析しました。'
   const altTextParts = [
     'レシート解析',
     receipt.storeName ? `店名:${receipt.storeName}` : '',
     receipt.grossSales ? `総売上:${receipt.grossSales}` : '',
   ].filter((value) => value.length > 0)
-  const altText = altTextParts.join(' / ').slice(0, 400) || 'レシート解析結果'
+  const altText = altTextParts.join(' / ').slice(0, 400) || 'レシート解析'
 
-  const bodyContents: Array<Record<string, unknown>> = [
-    { type: 'text', text: '画像を保存しました', size: 'xs', color: '#7A7A7A' },
-    { type: 'text', text: 'レシート解析結果', weight: 'bold', size: 'lg', color: '#111111', margin: 'sm' },
-  ]
+  const bodyContents: Array<Record<string, unknown>> = []
 
   if (detailRows.length > 0) {
     bodyContents.push({
@@ -4513,11 +4540,6 @@ function buildLineReceiptImageAnalysisReply(
       contents: detailRows,
     })
   }
-
-  bodyContents.push(
-    { type: 'separator', margin: 'md' },
-    { type: 'text', text: `要約: ${summaryText}`, size: 'xs', wrap: true, color: '#5C5C5C', margin: 'md' },
-  )
 
   return [
     {
