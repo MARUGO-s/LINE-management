@@ -249,6 +249,7 @@ type RoomReplyPolicy = {
   requiresRegistration: boolean
   isEnabled: boolean
   botReplyEnabled: boolean
+  botReplyHardMuteEnabled: boolean
   messageSearchEnabled: boolean
   messageSearchLibraryEnabled: boolean
   mediaFileAccessEnabled: boolean
@@ -749,6 +750,9 @@ Deno.serve(async (req) => {
 
         const mediaSearchStartCmd = parseMediaSearchStartCommand(text)
         if (mediaSearchStartCmd) {
+          if (roomReplyPolicy.botReplyHardMuteEnabled) {
+            continue
+          }
           if (!lineAccessToken || !replyToken) {
             if (!lineAccessToken) {
               console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply media search command.')
@@ -793,6 +797,9 @@ Deno.serve(async (req) => {
           canUseMedia,
         )
         if (mediaSearchPendingReply) {
+          if (roomReplyPolicy.botReplyHardMuteEnabled) {
+            continue
+          }
           if (!lineAccessToken || !replyToken) {
             if (!lineAccessToken) console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply media search pending.')
             if (!replyToken) console.error('Missing replyToken for media search pending.')
@@ -813,6 +820,9 @@ Deno.serve(async (req) => {
           canUseMedia,
         )
         if (casualMediaLookupReply) {
+          if (roomReplyPolicy.botReplyHardMuteEnabled) {
+            continue
+          }
           if (!lineAccessToken || !replyToken) {
             if (!lineAccessToken) console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply casual media lookup.')
             if (!replyToken) console.error('Missing replyToken for casual media lookup.')
@@ -1523,6 +1533,9 @@ Deno.serve(async (req) => {
       }
 
       if (aiAutoCreateReply) {
+        if (roomReplyPolicy.botReplyHardMuteEnabled) {
+          continue
+        }
         if (!lineAccessToken) {
           console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply AI auto-create result.')
           continue
@@ -4238,6 +4251,7 @@ async function syncRoomDisplayNameIfMissing(
       room_name: fetchedName,
       is_enabled: true,
       bot_reply_enabled: true,
+      bot_reply_hard_mute_enabled: false,
       message_search_enabled: false,
       message_search_library_enabled: false,
       send_room_summary: false,
@@ -4612,6 +4626,7 @@ async function loadRoomReplyPolicy(
     requiresRegistration: true,
     isEnabled: false,
     botReplyEnabled: false,
+    botReplyHardMuteEnabled: false,
     messageSearchEnabled: false,
     messageSearchLibraryEnabled: false,
     mediaFileAccessEnabled: false,
@@ -4651,6 +4666,7 @@ async function loadRoomReplyPolicy(
 
     const isEnabled = data?.is_enabled !== false
     const botReplyEnabled = data?.bot_reply_enabled !== false
+    const botReplyHardMuteEnabled = data?.bot_reply_hard_mute_enabled === true
     const messageSearchEnabled = data?.message_search_enabled !== false
     const messageSearchLibraryEnabled = data?.message_search_library_enabled !== false
     const mediaFileAccessEnabled = data?.media_file_access_enabled !== false
@@ -4662,6 +4678,7 @@ async function loadRoomReplyPolicy(
     const requiresRegistration =
       data?.is_enabled === false &&
       data?.bot_reply_enabled === false &&
+      data?.bot_reply_hard_mute_enabled !== true &&
       data?.message_search_enabled === false &&
       data?.message_search_library_enabled === false &&
       data?.media_file_access_enabled === false &&
@@ -4674,6 +4691,7 @@ async function loadRoomReplyPolicy(
       requiresRegistration,
       isEnabled,
       botReplyEnabled,
+      botReplyHardMuteEnabled,
       messageSearchEnabled,
       messageSearchLibraryEnabled,
       mediaFileAccessEnabled,
@@ -4749,7 +4767,7 @@ function isRoomBotReplyEnabled(policy: RoomReplyPolicy): boolean {
 }
 
 function shouldSendRoomReply(policy: RoomReplyPolicy): boolean {
-  return policy.isEnabled && !policy.calendarSilentAutoRegisterEnabled
+  return policy.isEnabled && !policy.calendarSilentAutoRegisterEnabled && !policy.botReplyHardMuteEnabled
 }
 
 /**
@@ -4759,6 +4777,7 @@ function shouldSendRoomReply(policy: RoomReplyPolicy): boolean {
 function wantLowConfidenceInteractiveCalendarConfirm(policy: RoomReplyPolicy): boolean {
   return (
     policy.calendarSilentAutoRegisterEnabled &&
+    !policy.botReplyHardMuteEnabled &&
     policy.calendarLowConfidenceConfirmReplyEnabled &&
     policy.isEnabled &&
     policy.botReplyEnabled

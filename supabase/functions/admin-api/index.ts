@@ -429,6 +429,7 @@ Deno.serve(async (req) => {
           room_id: payload.room_id,
           is_enabled: payload.is_enabled,
           bot_reply_enabled: payload.bot_reply_enabled,
+          bot_reply_hard_mute_enabled: payload.bot_reply_hard_mute_enabled,
           message_search_enabled: payload.message_search_enabled,
           message_search_library_enabled: payload.message_search_library_enabled,
           media_file_access_enabled: payload.media_file_access_enabled,
@@ -442,6 +443,7 @@ Deno.serve(async (req) => {
           room_name: payload.room_name,
           is_enabled: payload.is_enabled,
           bot_reply_enabled: payload.bot_reply_enabled,
+          bot_reply_hard_mute_enabled: payload.bot_reply_hard_mute_enabled,
           send_room_summary: payload.send_room_summary,
           receive_overall_summary_enabled: payload.receive_overall_summary_enabled,
           calendar_tomorrow_reminder_enabled: payload.calendar_tomorrow_reminder_enabled,
@@ -472,6 +474,7 @@ Deno.serve(async (req) => {
           room_id: data.room_id,
           is_enabled: data.is_enabled,
           bot_reply_enabled: data.bot_reply_enabled,
+          bot_reply_hard_mute_enabled: data.bot_reply_hard_mute_enabled,
           message_search_enabled: data.message_search_enabled,
           message_search_library_enabled: data.message_search_library_enabled,
           media_file_access_enabled: data.media_file_access_enabled,
@@ -4233,6 +4236,7 @@ function buildRoomSettingsPayload(body: unknown): {
   room_name: string | null
   is_enabled: boolean
   bot_reply_enabled: boolean
+  bot_reply_hard_mute_enabled: boolean
   send_room_summary: boolean
   receive_overall_summary_enabled: boolean
   calendar_tomorrow_reminder_enabled: boolean
@@ -4269,6 +4273,12 @@ function buildRoomSettingsPayload(body: unknown): {
     throw { status: 400, message: "bot_reply_enabled must be boolean when provided." } satisfies AppError
   }
   const botReplyEnabled = botReplyEnabledRaw === true
+
+  const botReplyHardMuteEnabledRaw = body.bot_reply_hard_mute_enabled
+  if (botReplyHardMuteEnabledRaw != null && typeof botReplyHardMuteEnabledRaw !== "boolean") {
+    throw { status: 400, message: "bot_reply_hard_mute_enabled must be boolean when provided." } satisfies AppError
+  }
+  const botReplyHardMuteEnabled = botReplyHardMuteEnabledRaw === true
 
   const sendRoomSummary = body.send_room_summary
   if (typeof sendRoomSummary !== "boolean") {
@@ -4377,6 +4387,7 @@ function buildRoomSettingsPayload(body: unknown): {
     room_name: roomNameRaw || null,
     is_enabled: isEnabled,
     bot_reply_enabled: botReplyEnabled,
+    bot_reply_hard_mute_enabled: botReplyHardMuteEnabled,
     send_room_summary: sendRoomSummaryFinal,
     receive_overall_summary_enabled: receiveOverallSummaryEnabled,
     calendar_tomorrow_reminder_enabled: roomTomorrowReminderEnabled,

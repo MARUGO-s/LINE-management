@@ -1218,6 +1218,7 @@ const html = String.raw`<!doctype html>
       <div id="roomConfigModalMeta" class="modal-meta">対象ルーム: -</div>
       <div class="room-scope-modal-list" style="margin-top:12px;">
         <label class="room-scope-option"><input id="roomConfigBotReplyEnabled" type="checkbox">AI会話返信</label>
+        <label class="room-scope-option" title="このルームでは、操作コマンドを含む会話起点の返信をすべて停止します。"><input id="roomConfigBotReplyHardMute" type="checkbox">AI返信完全無し（このルームは返信しない）</label>
         <label class="room-scope-option"><input id="roomConfigMessageSearchEnabled" type="checkbox">会話検索（ルーム）</label>
         <label class="room-scope-option"><input id="roomConfigMessageSearchLibraryEnabled" type="checkbox">資料検索（2段階目）</label>
         <label class="room-scope-option"><input id="roomConfigSendSummary" type="checkbox">ルーム要約配信（このルーム単体）</label>
@@ -1258,6 +1259,7 @@ const html = String.raw`<!doctype html>
       <div class="modal-meta">ここで選んだ値が次の追加に使われます。</div>
       <div class="room-scope-modal-list" style="margin-top:12px;">
         <label class="room-scope-option"><input id="newRoomBotReplyEnabled" type="checkbox">AI会話返信</label>
+        <label class="room-scope-option"><input id="newRoomBotReplyHardMute" type="checkbox">AI返信完全無し（このルームは返信しない）</label>
         <label class="room-scope-option"><input id="newRoomMessageSearchEnabled" type="checkbox">会話検索（ルーム）</label>
         <label class="room-scope-option"><input id="newRoomMessageSearchLibraryEnabled" type="checkbox">資料検索（2段階目）</label>
         <label class="room-scope-option"><input id="newRoomSendSummary" type="checkbox">ルーム要約配信（このルーム単体）</label>
@@ -1302,6 +1304,7 @@ const html = String.raw`<!doctype html>
     const NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY = 'line_summary_new_room_default_gmail_alert';
     const NEW_ROOM_DEFAULT_CALENDAR_LOW_CONF_CONFIRM_KEY = 'line_summary_new_room_default_calendar_low_conf_confirm';
     const NEW_ROOM_DEFAULT_CALENDAR_REGISTRATION_REPLY_KEY = 'line_summary_new_room_default_calendar_registration_reply';
+    const NEW_ROOM_DEFAULT_BOT_REPLY_HARD_MUTE_KEY = 'line_summary_new_room_default_bot_reply_hard_mute';
     const ROOM_DEFAULT_HOURS = '';
     const dom = {
       authState: document.getElementById('authState'),
@@ -1372,6 +1375,7 @@ const html = String.raw`<!doctype html>
       roomConfigModal: document.getElementById('roomConfigModal'),
       roomConfigModalMeta: document.getElementById('roomConfigModalMeta'),
       roomConfigBotReplyEnabled: document.getElementById('roomConfigBotReplyEnabled'),
+      roomConfigBotReplyHardMute: document.getElementById('roomConfigBotReplyHardMute'),
       roomConfigMessageSearchEnabled: document.getElementById('roomConfigMessageSearchEnabled'),
       roomConfigMessageSearchLibraryEnabled: document.getElementById('roomConfigMessageSearchLibraryEnabled'),
       roomConfigSendSummary: document.getElementById('roomConfigSendSummary'),
@@ -1391,6 +1395,7 @@ const html = String.raw`<!doctype html>
       roomConfigEffectPreview: document.getElementById('roomConfigEffectPreview'),
       cancelRoomConfigEffectBtn: document.getElementById('cancelRoomConfigEffectBtn'),
       confirmRoomConfigEffectBtn: document.getElementById('confirmRoomConfigEffectBtn'),
+      newRoomBotReplyHardMute: document.getElementById('newRoomBotReplyHardMute'),
     };
     const AUTO_REFRESH_MS_VISIBLE = 5000;
     const AUTO_REFRESH_MS_HIDDEN = 15000;
@@ -1497,6 +1502,9 @@ const html = String.raw`<!doctype html>
 
     function applyNewRoomDefaultCheckboxes() {
       dom.newRoomBotReplyEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, true);
+      if (dom.newRoomBotReplyHardMute) {
+        dom.newRoomBotReplyHardMute.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_HARD_MUTE_KEY, false);
+      }
       dom.newRoomMessageSearchEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, false);
       dom.newRoomMessageSearchLibraryEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_LIBRARY_KEY, false);
       dom.newRoomSendSummary.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_SEND_SUMMARY_KEY, false);
@@ -1523,6 +1531,7 @@ const html = String.raw`<!doctype html>
     function buildNewRoomConfigSummary() {
       const enabledCount =
         (dom.newRoomBotReplyEnabled.checked ? 1 : 0) +
+        (dom.newRoomBotReplyHardMute && dom.newRoomBotReplyHardMute.checked ? 1 : 0) +
         (dom.newRoomMessageSearchEnabled.checked ? 1 : 0) +
         (dom.newRoomMessageSearchLibraryEnabled.checked ? 1 : 0) +
         (dom.newRoomSendSummary.checked || (dom.newRoomReceiveOverallSummary && dom.newRoomReceiveOverallSummary.checked) ? 1 : 0) +
@@ -1538,7 +1547,7 @@ const html = String.raw`<!doctype html>
         : dom.newRoomSummaryMode.value === 'independent'
         ? '各回独立'
         : '継承';
-      return enabledCount + '/11 有効 ・ 最終回:' + summary;
+      return enabledCount + '/12 有効 ・ 最終回:' + summary;
     }
 
     function refreshNewRoomConfigSummary() {
@@ -1549,6 +1558,7 @@ const html = String.raw`<!doctype html>
     function buildRoomConfigDraftFromModal() {
       return {
         bot_reply_enabled: !!dom.roomConfigBotReplyEnabled.checked,
+        bot_reply_hard_mute_enabled: !!(dom.roomConfigBotReplyHardMute && dom.roomConfigBotReplyHardMute.checked),
         message_search_enabled: !!dom.roomConfigMessageSearchEnabled.checked,
         message_search_library_enabled: !!dom.roomConfigMessageSearchLibraryEnabled.checked,
         send_room_summary: !!dom.roomConfigSendSummary.checked,
@@ -1603,6 +1613,7 @@ const html = String.raw`<!doctype html>
       const cautions = [];
 
       if (config.bot_reply_enabled) enabledFeatures.push('AI会話返信');
+      if (config.bot_reply_hard_mute_enabled) enabledFeatures.push('AI返信完全無し（このルームは返信しない）');
       if (config.message_search_enabled) enabledFeatures.push('会話検索（ルーム）');
       if (config.message_search_library_enabled) enabledFeatures.push('資料検索（2段階目）');
       if (config.send_room_summary) enabledFeatures.push('ルーム要約配信（このルーム単体）');
@@ -1614,7 +1625,11 @@ const html = String.raw`<!doctype html>
         enabledFeatures.push('会話から予定検知 → Googleカレンダーへ無返信で自動登録');
       }
 
-      if (config.media_file_access_enabled && config.image_analysis_reply_enabled) {
+      if (config.bot_reply_hard_mute_enabled) {
+        replyEffects.push('AI返信完全無しがONのため、操作コマンドを含む会話起点の返信はすべて停止します。');
+      }
+
+      if (!config.bot_reply_hard_mute_enabled && config.media_file_access_enabled && config.image_analysis_reply_enabled) {
         replyEffects.push('画像添付時に解析結果をLINEへ返信します。');
       } else {
         replyEffects.push('画像解析結果はLINEへ返信しません。');
@@ -1623,6 +1638,8 @@ const html = String.raw`<!doctype html>
       if (config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) {
         if (!config.bot_reply_enabled) {
           cautions.push('AI会話返信がOFFのため、会話起点の予定自動登録は実装上動作しません。');
+        } else if (config.bot_reply_hard_mute_enabled) {
+          replyEffects.push('会話からの予定登録は行っても、確認や登録結果のLINE返信は行いません。');
         } else {
           if (config.calendar_registration_reply_enabled) {
             replyEffects.push('高確度で予定登録した内容をLINEへ返信します。');
@@ -2384,6 +2401,7 @@ const html = String.raw`<!doctype html>
       }
       const featureConfig = {
         bot_reply_enabled: botReplyEnabledInput ? !!botReplyEnabledInput.checked : parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
+        bot_reply_hard_mute_enabled: parseDatasetBoolean(tr.dataset.botReplyHardMuteEnabled, false),
         message_search_enabled: messageSearchEnabledInput ? !!messageSearchEnabledInput.checked : parseDatasetBoolean(tr.dataset.messageSearchEnabled, true),
         message_search_library_enabled: messageSearchLibraryEnabledInput ? !!messageSearchLibraryEnabledInput.checked : parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, true),
         send_room_summary: sendSummaryInput ? !!sendSummaryInput.checked : parseDatasetBoolean(tr.dataset.roomSendSummary, false),
@@ -2410,6 +2428,7 @@ const html = String.raw`<!doctype html>
       };
       tr.dataset.roomEnabled = String(!!normalizedConfig.is_enabled);
       tr.dataset.botReplyEnabled = String(!!config.bot_reply_enabled);
+      tr.dataset.botReplyHardMuteEnabled = String(!!config.bot_reply_hard_mute_enabled);
       tr.dataset.messageSearchEnabled = String(!!config.message_search_enabled);
       tr.dataset.messageSearchLibraryEnabled = String(!!config.message_search_library_enabled);
       tr.dataset.roomSendSummary = String(!!config.send_room_summary);
@@ -2433,6 +2452,7 @@ const html = String.raw`<!doctype html>
     function getRoomConfigEnabledCount(config) {
       let enabledCount = 0;
       if (config.bot_reply_enabled) enabledCount += 1;
+      if (config.bot_reply_hard_mute_enabled) enabledCount += 1;
       if (config.message_search_enabled) enabledCount += 1;
       if (config.message_search_library_enabled) enabledCount += 1;
       if (config.send_room_summary || config.receive_overall_summary_enabled) enabledCount += 1;
@@ -2454,7 +2474,7 @@ const html = String.raw`<!doctype html>
 
     function buildRoomConfigSummary(config) {
       const enabledCount = getRoomConfigEnabledCount(config);
-      return enabledCount + '/11 有効';
+      return enabledCount + '/12 有効';
     }
 
     function buildRoomConfigSavedMessage(tr, config) {
@@ -2462,7 +2482,7 @@ const html = String.raw`<!doctype html>
       return [
         'ルーム設定を保存しました。',
         'room_id: ' + roomId,
-        '保存値: AI会話返信=' + (config.bot_reply_enabled ? 'ON' : 'OFF') + ' / 会話検索=' + (config.message_search_enabled ? 'ON' : 'OFF') + ' / 資料検索=' + (config.message_search_library_enabled ? 'ON' : 'OFF'),
+        '保存値: AI会話返信=' + (config.bot_reply_enabled ? 'ON' : 'OFF') + ' / AI返信完全無し=' + (config.bot_reply_hard_mute_enabled ? 'ON' : 'OFF') + ' / 会話検索=' + (config.message_search_enabled ? 'ON' : 'OFF') + ' / 資料検索=' + (config.message_search_library_enabled ? 'ON' : 'OFF'),
       ].join('\n');
     }
 
@@ -2500,6 +2520,7 @@ const html = String.raw`<!doctype html>
         var gCalMerged = isRoomGoogleCalendarSilentAutoFromSetting(setting)
         const roomFeatureConfig = {
           bot_reply_enabled: !!(setting && setting.bot_reply_enabled === true),
+          bot_reply_hard_mute_enabled: !!(setting && setting.bot_reply_hard_mute_enabled === true),
           message_search_enabled: (setting && setting.message_search_enabled) !== false,
           message_search_library_enabled: (setting && setting.message_search_library_enabled) !== false,
           send_room_summary: setting && setting.send_room_summary === true,
@@ -2517,6 +2538,7 @@ const html = String.raw`<!doctype html>
         tr.dataset.roomId = room.room_id;
         tr.dataset.roomSortOrder = String(parseRoomSortOrder(setting?.room_sort_order) ?? visualIndex);
         tr.dataset.botReplyEnabled = String(roomFeatureConfig.bot_reply_enabled);
+        tr.dataset.botReplyHardMuteEnabled = String(roomFeatureConfig.bot_reply_hard_mute_enabled);
         tr.dataset.messageSearchEnabled = String((setting?.message_search_enabled) !== false);
         tr.dataset.messageSearchLibraryEnabled = String((setting?.message_search_library_enabled) !== false);
         tr.dataset.roomEnabled = String(
@@ -2536,6 +2558,7 @@ const html = String.raw`<!doctype html>
         const configSummary = buildRoomConfigSummary({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
           bot_reply_enabled: parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
+          bot_reply_hard_mute_enabled: parseDatasetBoolean(tr.dataset.botReplyHardMuteEnabled, false),
           message_search_enabled: parseDatasetBoolean(tr.dataset.messageSearchEnabled, true),
           message_search_library_enabled: parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, true),
           send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
@@ -2552,6 +2575,7 @@ const html = String.raw`<!doctype html>
         const configToneClass = roomConfigToneClass(getRoomConfigEnabledCount({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
           bot_reply_enabled: parseDatasetBoolean(tr.dataset.botReplyEnabled, false),
+          bot_reply_hard_mute_enabled: parseDatasetBoolean(tr.dataset.botReplyHardMuteEnabled, false),
           message_search_enabled: parseDatasetBoolean(tr.dataset.messageSearchEnabled, true),
           message_search_library_enabled: parseDatasetBoolean(tr.dataset.messageSearchLibraryEnabled, true),
           send_room_summary: parseDatasetBoolean(tr.dataset.roomSendSummary, false),
@@ -2599,6 +2623,9 @@ const html = String.raw`<!doctype html>
       dom.roomConfigModalMeta.textContent = '対象ルーム: ' + (roomName || roomId || '(未設定)');
       const config = getRoomConfigStateFromRow(tr);
       dom.roomConfigBotReplyEnabled.checked = !!config.bot_reply_enabled;
+      if (dom.roomConfigBotReplyHardMute) {
+        dom.roomConfigBotReplyHardMute.checked = !!config.bot_reply_hard_mute_enabled;
+      }
       dom.roomConfigMessageSearchEnabled.checked = !!config.message_search_enabled;
       dom.roomConfigMessageSearchLibraryEnabled.checked = !!config.message_search_library_enabled;
       dom.roomConfigSendSummary.checked = !!config.send_room_summary;
@@ -2643,6 +2670,7 @@ const html = String.raw`<!doctype html>
       const saved = await saveRoomFromRow(activeRoomConfigRow, { overrideConfig: nextConfig });
       const savedConfig = saved && saved.room_settings ? {
         bot_reply_enabled: saved.room_settings.bot_reply_enabled === true,
+        bot_reply_hard_mute_enabled: saved.room_settings.bot_reply_hard_mute_enabled === true,
         message_search_enabled: saved.room_settings.message_search_enabled !== false,
         message_search_library_enabled: saved.room_settings.message_search_library_enabled !== false,
       } : nextConfig;
@@ -2897,6 +2925,7 @@ const html = String.raw`<!doctype html>
         send_room_summary: roomConfig.send_room_summary,
         receive_overall_summary_enabled: roomConfig.receive_overall_summary_enabled,
         calendar_tomorrow_reminder_enabled: roomConfig.calendar_tomorrow_reminder_enabled,
+        bot_reply_hard_mute_enabled: roomConfig.bot_reply_hard_mute_enabled,
         message_search_enabled: messageSearchEnabled,
         message_search_library_enabled: messageSearchLibraryEnabled,
         media_file_access_enabled: roomConfig.media_file_access_enabled,
@@ -2934,6 +2963,7 @@ const html = String.raw`<!doctype html>
       const payload = buildRoomSettingsPayloadFromRow(tr, visualIndex >= 0 ? visualIndex : 0);
       if (opts.overrideConfig && typeof opts.overrideConfig === 'object') {
         payload.bot_reply_enabled = !!opts.overrideConfig.bot_reply_enabled;
+        payload.bot_reply_hard_mute_enabled = !!opts.overrideConfig.bot_reply_hard_mute_enabled;
         payload.message_search_enabled = !!opts.overrideConfig.message_search_enabled;
         payload.message_search_library_enabled = !!opts.overrideConfig.message_search_library_enabled;
         payload.send_room_summary = !!opts.overrideConfig.send_room_summary;
@@ -2992,6 +3022,7 @@ const html = String.raw`<!doctype html>
       }
       const newRoomFeatureConfig = {
         bot_reply_enabled: !!dom.newRoomBotReplyEnabled.checked,
+        bot_reply_hard_mute_enabled: !!(dom.newRoomBotReplyHardMute && dom.newRoomBotReplyHardMute.checked),
         message_search_enabled: !!dom.newRoomMessageSearchEnabled.checked,
         message_search_library_enabled: !!dom.newRoomMessageSearchLibraryEnabled.checked,
         send_room_summary: !!dom.newRoomSendSummary.checked,
@@ -3010,6 +3041,7 @@ const html = String.raw`<!doctype html>
         room_name: dom.newRoomName.value.trim(),
         is_enabled: computeRoomEnabledFromFeatureConfig(newRoomFeatureConfig),
         bot_reply_enabled: newRoomFeatureConfig.bot_reply_enabled,
+        bot_reply_hard_mute_enabled: newRoomFeatureConfig.bot_reply_hard_mute_enabled,
         send_room_summary: newRoomFeatureConfig.send_room_summary,
         receive_overall_summary_enabled: newRoomFeatureConfig.receive_overall_summary_enabled,
         calendar_tomorrow_reminder_enabled: newRoomFeatureConfig.calendar_tomorrow_reminder_enabled,
@@ -3444,6 +3476,7 @@ const html = String.raw`<!doctype html>
       dom.newRoomName,
       dom.newRoomHours,
       dom.newRoomBotReplyEnabled,
+      dom.newRoomBotReplyHardMute,
       dom.newRoomMessageSearchEnabled,
       dom.newRoomMessageSearchLibraryEnabled,
       dom.newRoomSendSummary,
@@ -3465,6 +3498,11 @@ const html = String.raw`<!doctype html>
     dom.newRoomBotReplyEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_KEY, !!dom.newRoomBotReplyEnabled.checked);
     });
+    if (dom.newRoomBotReplyHardMute) {
+      dom.newRoomBotReplyHardMute.addEventListener('change', function() {
+        saveBooleanSetting(NEW_ROOM_DEFAULT_BOT_REPLY_HARD_MUTE_KEY, !!dom.newRoomBotReplyHardMute.checked);
+      });
+    }
     dom.newRoomMessageSearchEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_MESSAGE_SEARCH_KEY, !!dom.newRoomMessageSearchEnabled.checked);
     });
@@ -3513,6 +3551,7 @@ const html = String.raw`<!doctype html>
     });
     [
       dom.newRoomBotReplyEnabled,
+      dom.newRoomBotReplyHardMute,
       dom.newRoomMessageSearchEnabled,
       dom.newRoomMessageSearchLibraryEnabled,
       dom.newRoomSendSummary,
@@ -3558,6 +3597,7 @@ const html = String.raw`<!doctype html>
 
     [
       dom.roomConfigBotReplyEnabled,
+      dom.roomConfigBotReplyHardMute,
       dom.roomConfigMessageSearchEnabled,
       dom.roomConfigMessageSearchLibraryEnabled,
       dom.roomConfigSendSummary,
