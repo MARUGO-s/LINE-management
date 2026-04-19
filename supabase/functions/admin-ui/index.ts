@@ -223,6 +223,18 @@ const html = String.raw`<!doctype html>
       background: rgba(25, 189, 255, 0.16);
     }
 
+    .button:disabled {
+      opacity: 0.56;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .button:disabled:hover {
+      transform: none;
+      border-color: var(--line);
+      background: rgba(7, 20, 34, 0.58);
+    }
+
     .button.primary {
       background: linear-gradient(180deg, rgba(25, 189, 255, 0.34), rgba(11, 120, 166, 0.34));
       border-color: rgba(108, 230, 255, 0.6);
@@ -888,6 +900,50 @@ const html = String.raw`<!doctype html>
       margin-top: 12px;
     }
 
+    .effect-preview {
+      margin-top: 10px;
+      border: 1px solid rgba(155, 220, 255, 0.22);
+      border-radius: 10px;
+      background: rgba(8, 21, 35, 0.58);
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+      max-height: min(58vh, 520px);
+      overflow: auto;
+    }
+
+    .effect-block {
+      border: 1px solid rgba(155, 220, 255, 0.16);
+      border-radius: 10px;
+      background: rgba(5, 17, 28, 0.52);
+      padding: 9px 10px;
+    }
+
+    .effect-title {
+      margin: 0 0 6px 0;
+      font-size: 0.82rem;
+      color: #9fd2eb;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .effect-list {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 4px;
+      font-size: 0.84rem;
+      color: #d7edff;
+      line-height: 1.45;
+    }
+
+    .effect-note {
+      margin: 0;
+      font-size: 0.82rem;
+      color: #ffd07c;
+      line-height: 1.45;
+    }
+
     .muted {
       color: #91b2c7;
       font-size: 0.8rem;
@@ -1177,7 +1233,21 @@ const html = String.raw`<!doctype html>
       <div class="modal-meta" style="margin-top:8px;">※資料ライブラリの閲覧権限は資料ごとに「メディア閲覧」画面で設定します。</div>
       <div class="modal-actions">
         <button id="cancelRoomConfigBtn" class="button">キャンセル</button>
+        <button id="reviewRoomConfigBtn" class="button warn">効果確認</button>
         <button id="saveRoomConfigBtn" class="button primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="roomConfigEffectModal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="roomConfigEffectModalTitle">
+      <h3 id="roomConfigEffectModalTitle" class="modal-title">設定の効果確認</h3>
+      <div id="roomConfigEffectModalMeta" class="modal-meta">対象ルーム: -</div>
+      <div class="modal-meta">この内容で問題なければ「確認して保存を有効化」を押してください。</div>
+      <div id="roomConfigEffectPreview" class="effect-preview"></div>
+      <div class="modal-actions">
+        <button id="cancelRoomConfigEffectBtn" class="button">戻る</button>
+        <button id="confirmRoomConfigEffectBtn" class="button primary">確認して保存を有効化</button>
       </div>
     </div>
   </div>
@@ -1314,7 +1384,13 @@ const html = String.raw`<!doctype html>
       roomConfigCalendarLowConfidenceConfirmReply: document.getElementById('roomConfigCalendarLowConfidenceConfirmReply'),
       roomConfigGmailAlert: document.getElementById('roomConfigGmailAlert'),
       cancelRoomConfigBtn: document.getElementById('cancelRoomConfigBtn'),
+      reviewRoomConfigBtn: document.getElementById('reviewRoomConfigBtn'),
       saveRoomConfigBtn: document.getElementById('saveRoomConfigBtn'),
+      roomConfigEffectModal: document.getElementById('roomConfigEffectModal'),
+      roomConfigEffectModalMeta: document.getElementById('roomConfigEffectModalMeta'),
+      roomConfigEffectPreview: document.getElementById('roomConfigEffectPreview'),
+      cancelRoomConfigEffectBtn: document.getElementById('cancelRoomConfigEffectBtn'),
+      confirmRoomConfigEffectBtn: document.getElementById('confirmRoomConfigEffectBtn'),
     };
     const AUTO_REFRESH_MS_VISIBLE = 5000;
     const AUTO_REFRESH_MS_HIDDEN = 15000;
@@ -1326,6 +1402,8 @@ const html = String.raw`<!doctype html>
     let isUserPermissionDirty = false;
     let activeUserRoomScopeRow = null;
     let activeRoomConfigRow = null;
+    let roomConfigReviewSignature = '';
+    let roomConfigPreviewSignature = '';
 
     function token() {
       return localStorage.getItem(TOKEN_KEY) || '';
@@ -1466,6 +1544,157 @@ const html = String.raw`<!doctype html>
     function refreshNewRoomConfigSummary() {
       if (!dom.newRoomConfigSummary) return;
       dom.newRoomConfigSummary.textContent = buildNewRoomConfigSummary();
+    }
+
+    function buildRoomConfigDraftFromModal() {
+      return {
+        bot_reply_enabled: !!dom.roomConfigBotReplyEnabled.checked,
+        message_search_enabled: !!dom.roomConfigMessageSearchEnabled.checked,
+        message_search_library_enabled: !!dom.roomConfigMessageSearchLibraryEnabled.checked,
+        send_room_summary: !!dom.roomConfigSendSummary.checked,
+        receive_overall_summary_enabled: !!(dom.roomConfigReceiveOverallSummary && dom.roomConfigReceiveOverallSummary.checked),
+        calendar_tomorrow_reminder_enabled: !!dom.roomConfigTomorrowReminder.checked,
+        media_file_access_enabled: !!dom.roomConfigMediaAccess.checked,
+        image_analysis_reply_enabled: !!(dom.roomConfigImageAnalysisReplyEnabled && dom.roomConfigImageAnalysisReplyEnabled.checked),
+        calendar_ai_auto_create_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked,
+        calendar_silent_auto_register_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked,
+        calendar_low_confidence_confirm_reply_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked && !!dom.roomConfigCalendarLowConfidenceConfirmReply.checked,
+        calendar_registration_reply_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked && !!(dom.roomConfigCalendarRegistrationReply && dom.roomConfigCalendarRegistrationReply.checked),
+        gmail_reservation_alert_enabled: !!dom.roomConfigGmailAlert.checked,
+      };
+    }
+
+    function buildRoomConfigDraftSignature(config) {
+      return JSON.stringify(config || {});
+    }
+
+    function updateRoomConfigSaveButtonState() {
+      if (!dom.saveRoomConfigBtn) return;
+      if (!activeRoomConfigRow) {
+        dom.saveRoomConfigBtn.disabled = false;
+        dom.saveRoomConfigBtn.title = '';
+        return;
+      }
+      const draft = buildRoomConfigDraftFromModal();
+      const signature = buildRoomConfigDraftSignature(draft);
+      const reviewed = !!roomConfigReviewSignature && roomConfigReviewSignature === signature;
+      dom.saveRoomConfigBtn.disabled = !reviewed;
+      dom.saveRoomConfigBtn.title = reviewed ? '' : '先に「効果確認」を実行してください。';
+    }
+
+    function invalidateRoomConfigReview() {
+      roomConfigReviewSignature = '';
+      roomConfigPreviewSignature = '';
+      updateRoomConfigSaveButtonState();
+    }
+
+    function renderEffectList(items) {
+      if (!Array.isArray(items) || items.length === 0) {
+        return '<div class="muted">該当なし</div>';
+      }
+      return '<ul class="effect-list">' + items.map(function(line) {
+        return '<li>' + escapeHtml(line) + '</li>';
+      }).join('') + '</ul>';
+    }
+
+    function buildRoomConfigEffectPreviewHtml(config) {
+      const enabledFeatures = [];
+      const replyEffects = [];
+      const cautions = [];
+
+      if (config.bot_reply_enabled) enabledFeatures.push('AI会話返信');
+      if (config.message_search_enabled) enabledFeatures.push('会話検索（ルーム）');
+      if (config.message_search_library_enabled) enabledFeatures.push('資料検索（2段階目）');
+      if (config.send_room_summary) enabledFeatures.push('ルーム要約配信（このルーム単体）');
+      if (config.receive_overall_summary_enabled) enabledFeatures.push('全体要約レポートをこのルームに配信');
+      if (config.calendar_tomorrow_reminder_enabled) enabledFeatures.push('明日予定配信');
+      if (config.media_file_access_enabled) enabledFeatures.push('LINE添付保存（ルーム）');
+      if (config.gmail_reservation_alert_enabled) enabledFeatures.push('Gmail予約通知');
+      if (config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) {
+        enabledFeatures.push('会話から予定検知 → Googleカレンダーへ無返信で自動登録');
+      }
+
+      if (config.media_file_access_enabled && config.image_analysis_reply_enabled) {
+        replyEffects.push('画像添付時に解析結果をLINEへ返信します。');
+      } else {
+        replyEffects.push('画像解析結果はLINEへ返信しません。');
+      }
+
+      if (config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) {
+        if (!config.bot_reply_enabled) {
+          cautions.push('AI会話返信がOFFのため、会話起点の予定自動登録は実装上動作しません。');
+        } else {
+          if (config.calendar_registration_reply_enabled) {
+            replyEffects.push('高確度で予定登録した内容をLINEへ返信します。');
+          } else {
+            replyEffects.push('高確度で予定登録してもLINE返信は行いません。');
+          }
+          if (config.calendar_low_confidence_confirm_reply_enabled) {
+            replyEffects.push('低確度の予定は「はい/いいえ」の確認返信を送ります。');
+          } else {
+            replyEffects.push('低確度の予定は無返信で仮登録します。');
+          }
+        }
+      } else {
+        replyEffects.push('会話からの予定自動登録は無効です。');
+      }
+
+      if (config.gmail_reservation_alert_enabled) {
+        replyEffects.push('Gmail予約通知メールを検知したとき、このルームへ通知します。');
+      } else {
+        replyEffects.push('Gmail予約通知は送信しません。');
+      }
+
+      return [
+        '<section class="effect-block"><h4 class="effect-title">有効になる機能</h4>',
+        renderEffectList(enabledFeatures),
+        '</section>',
+        '<section class="effect-block"><h4 class="effect-title">LINEへの通知・返信挙動</h4>',
+        renderEffectList(replyEffects),
+        '</section>',
+        '<section class="effect-block"><h4 class="effect-title">注意点</h4>',
+        (cautions.length > 0 ? renderEffectList(cautions) : '<p class="effect-note">この設定では追加の注意点はありません。</p>'),
+        '</section>',
+      ].join('');
+    }
+
+    function openRoomConfigEffectModal(config) {
+      if (!dom.roomConfigEffectModal || !dom.roomConfigEffectPreview) return;
+      const signature = buildRoomConfigDraftSignature(config);
+      roomConfigPreviewSignature = signature;
+      if (dom.roomConfigEffectModalMeta) {
+        dom.roomConfigEffectModalMeta.textContent = dom.roomConfigModalMeta.textContent || '対象ルーム: -';
+      }
+      dom.roomConfigEffectPreview.innerHTML = buildRoomConfigEffectPreviewHtml(config);
+      dom.roomConfigEffectModal.classList.add('open');
+      dom.roomConfigEffectModal.setAttribute('aria-hidden', 'false');
+    }
+
+    function closeRoomConfigEffectModal() {
+      if (!dom.roomConfigEffectModal) return;
+      dom.roomConfigEffectModal.classList.remove('open');
+      dom.roomConfigEffectModal.setAttribute('aria-hidden', 'true');
+    }
+
+    function openRoomConfigReviewFlow() {
+      if (!activeRoomConfigRow) return;
+      const draft = buildRoomConfigDraftFromModal();
+      openRoomConfigEffectModal(draft);
+    }
+
+    function confirmRoomConfigReview() {
+      if (!activeRoomConfigRow) return;
+      const currentSignature = buildRoomConfigDraftSignature(buildRoomConfigDraftFromModal());
+      if (!roomConfigPreviewSignature || roomConfigPreviewSignature !== currentSignature) {
+        alert('設定が変更されました。もう一度「効果確認」を実行してください。');
+        invalidateRoomConfigReview();
+        closeRoomConfigEffectModal();
+        return;
+      }
+      roomConfigReviewSignature = currentSignature;
+      roomConfigPreviewSignature = '';
+      closeRoomConfigEffectModal();
+      updateRoomConfigSaveButtonState();
     }
 
     function openNewRoomConfigModal() {
@@ -2390,33 +2619,26 @@ const html = String.raw`<!doctype html>
       dom.roomConfigGmailAlert.checked = !!config.gmail_reservation_alert_enabled;
       syncRoomConfigCalendarSubOptions();
       syncRoomConfigMediaSubOptions();
+      invalidateRoomConfigReview();
       dom.roomConfigModal.classList.add('open');
       dom.roomConfigModal.setAttribute('aria-hidden', 'false');
     }
 
     function closeRoomConfigModal() {
       activeRoomConfigRow = null;
+      invalidateRoomConfigReview();
       dom.roomConfigModal.classList.remove('open');
       dom.roomConfigModal.setAttribute('aria-hidden', 'true');
+      closeRoomConfigEffectModal();
     }
 
     async function saveRoomConfigModal() {
       if (!activeRoomConfigRow) return;
-      const nextConfig = {
-        bot_reply_enabled: !!dom.roomConfigBotReplyEnabled.checked,
-        message_search_enabled: !!dom.roomConfigMessageSearchEnabled.checked,
-        message_search_library_enabled: !!dom.roomConfigMessageSearchLibraryEnabled.checked,
-        send_room_summary: !!dom.roomConfigSendSummary.checked,
-        receive_overall_summary_enabled: !!(dom.roomConfigReceiveOverallSummary && dom.roomConfigReceiveOverallSummary.checked),
-        calendar_tomorrow_reminder_enabled: !!dom.roomConfigTomorrowReminder.checked,
-        media_file_access_enabled: !!dom.roomConfigMediaAccess.checked,
-        image_analysis_reply_enabled: !!(dom.roomConfigImageAnalysisReplyEnabled && dom.roomConfigImageAnalysisReplyEnabled.checked),
-        calendar_ai_auto_create_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked,
-        calendar_silent_auto_register_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked,
-        calendar_low_confidence_confirm_reply_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked && !!dom.roomConfigCalendarLowConfidenceConfirmReply.checked,
-        calendar_registration_reply_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked && !!(dom.roomConfigCalendarRegistrationReply && dom.roomConfigCalendarRegistrationReply.checked),
-        gmail_reservation_alert_enabled: !!dom.roomConfigGmailAlert.checked,
-      };
+      const nextConfig = buildRoomConfigDraftFromModal();
+      const signature = buildRoomConfigDraftSignature(nextConfig);
+      if (!roomConfigReviewSignature || roomConfigReviewSignature !== signature) {
+        throw new Error('先に「効果確認」を実行してから保存してください。');
+      }
       applyRoomConfigStateToRow(activeRoomConfigRow, nextConfig);
       const saved = await saveRoomFromRow(activeRoomConfigRow, { overrideConfig: nextConfig });
       const savedConfig = saved && saved.room_settings ? {
@@ -3334,6 +3556,30 @@ const html = String.raw`<!doctype html>
     if (dom.roomConfigSendSummary) dom.roomConfigSendSummary.addEventListener('change', syncRoomSummaryMutualExclusion);
     if (dom.roomConfigReceiveOverallSummary) dom.roomConfigReceiveOverallSummary.addEventListener('change', syncRoomSummaryMutualExclusion);
 
+    [
+      dom.roomConfigBotReplyEnabled,
+      dom.roomConfigMessageSearchEnabled,
+      dom.roomConfigMessageSearchLibraryEnabled,
+      dom.roomConfigSendSummary,
+      dom.roomConfigReceiveOverallSummary,
+      dom.roomConfigTomorrowReminder,
+      dom.roomConfigMediaAccess,
+      dom.roomConfigImageAnalysisReplyEnabled,
+      dom.roomConfigGoogleCalendarAutoRegister,
+      dom.roomConfigCalendarRegistrationReply,
+      dom.roomConfigCalendarLowConfidenceConfirmReply,
+      dom.roomConfigGmailAlert,
+    ].forEach(function(el) {
+      if (!el) return;
+      el.addEventListener('change', invalidateRoomConfigReview);
+    });
+
+    if (dom.reviewRoomConfigBtn) {
+      dom.reviewRoomConfigBtn.addEventListener('click', function() {
+        openRoomConfigReviewFlow();
+      });
+    }
+
     dom.saveRoomConfigBtn.addEventListener('click', async function() {
       try {
         await saveRoomConfigModal();
@@ -3341,6 +3587,18 @@ const html = String.raw`<!doctype html>
         alert(e.message || String(e));
       }
     });
+
+    if (dom.cancelRoomConfigEffectBtn) {
+      dom.cancelRoomConfigEffectBtn.addEventListener('click', function() {
+        closeRoomConfigEffectModal();
+      });
+    }
+
+    if (dom.confirmRoomConfigEffectBtn) {
+      dom.confirmRoomConfigEffectBtn.addEventListener('click', function() {
+        confirmRoomConfigReview();
+      });
+    }
 
     dom.cancelUserRoomScopeBtn.addEventListener('click', function() {
       closeUserRoomScopeModal();
@@ -3376,6 +3634,14 @@ const html = String.raw`<!doctype html>
       }
     });
 
+    if (dom.roomConfigEffectModal) {
+      dom.roomConfigEffectModal.addEventListener('click', function(event) {
+        if (event.target === dom.roomConfigEffectModal) {
+          closeRoomConfigEffectModal();
+        }
+      });
+    }
+
     dom.userRoomScopeModal.addEventListener('click', function(event) {
       if (event.target === dom.userRoomScopeModal) {
         closeUserRoomScopeModal();
@@ -3404,6 +3670,9 @@ const html = String.raw`<!doctype html>
       }
       if (event.key === 'Escape' && dom.roomConfigModal.classList.contains('open')) {
         closeRoomConfigModal();
+      }
+      if (dom.roomConfigEffectModal && event.key === 'Escape' && dom.roomConfigEffectModal.classList.contains('open')) {
+        closeRoomConfigEffectModal();
       }
       if (event.key === 'Escape' && dom.userRoomScopeModal.classList.contains('open')) {
         closeUserRoomScopeModal();

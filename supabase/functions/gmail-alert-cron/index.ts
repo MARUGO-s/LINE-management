@@ -1435,6 +1435,11 @@ function isLikelyReservationNotificationMail(subject: string, snippet: string, b
   const compact = normalizeInlineText(`${subject} ${snippet} ${bodyText}`).toLowerCase()
   if (!compact) return false
 
+  // 予約成立通知ではなく、当日一覧/時点一覧のリマインド配信は除外する。
+  const hasReminderDigestCue =
+    /(本日のご来店一覧|ネット予約一覧|時点の予約一覧|ご来店予定の|食べログネット予約一覧)/i.test(compact)
+  if (hasReminderDigestCue) return false
+
   const hasReservationCue = /(予約|来店|人数|コース|予約番号|ご予約|reservation|booking)/i.test(compact)
   if (!hasReservationCue) return false
 
