@@ -329,6 +329,28 @@ type LineReceiptAggregate = {
   avgGuestCount: number | null
 }
 
+type ReceiptCorrectionFieldKey =
+  | 'storeName'
+  | 'date'
+  | 'netSales'
+  | 'taxAmount'
+  | 'grossSales'
+  | 'partyCount'
+  | 'guestCount'
+  | 'unitPrice'
+type ReceiptCorrectionStage = 'select_field' | 'input_value'
+type PendingReceiptCorrection = {
+  id: string
+  conversation_key: string
+  room_id: string
+  user_id: string | null
+  receipt_entry_id: number
+  stage: ReceiptCorrectionStage
+  current_field_key: ReceiptCorrectionFieldKey | null
+  draft: LineImageReceiptAnalysis
+  expires_at: string
+}
+
 type MediaSearchStage = 'select_period' | 'select_category' | 'select_item'
 type MediaSearchPeriodMonths = 3 | 6 | 12 | 0
 type MediaSearchCategoryKey =
@@ -398,6 +420,7 @@ const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmatio
 const MESSAGE_SEARCH_EXPAND_PENDING_TABLE = 'message_search_expand_pending_confirmations'
 const MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE = 'message_search_followup_pending_confirmations'
 const MEDIA_SEARCH_PENDING_TABLE = 'media_search_pending_confirmations'
+const RECEIPT_CORRECTION_PENDING_TABLE = 'receipt_correction_pending_confirmations'
 const HACCP_BULK_PENDING_TABLE = 'haccp_bulk_pending_confirmations'
 const HACCP_SCHEDULE_REGISTRATION_TABLE = 'haccp_schedule_calendar_registrations'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
@@ -426,6 +449,22 @@ const MESSAGE_SEARCH_MEDIA_APPEND_MAX = 15
 /** 会話検索のメディア一覧で付与する署名付き URL の最大件数 */
 const MESSAGE_SEARCH_MEDIA_SIGNED_URL_MAX = 3
 const MEDIA_SEARCH_PENDING_TTL_MIN = 20
+const RECEIPT_CORRECTION_PENDING_TTL_MIN = 30
+const RECEIPT_CORRECTION_FIELDS: Array<{
+  key: ReceiptCorrectionFieldKey
+  label: string
+  valueKind: 'text' | 'date' | 'currency' | 'count'
+  maxLen: number
+}> = [
+  { key: 'storeName', label: '店名', valueKind: 'text', maxLen: 80 },
+  { key: 'date', label: '日付', valueKind: 'date', maxLen: 80 },
+  { key: 'netSales', label: '純売上', valueKind: 'currency', maxLen: 40 },
+  { key: 'taxAmount', label: '消費税', valueKind: 'currency', maxLen: 40 },
+  { key: 'grossSales', label: '総売上', valueKind: 'currency', maxLen: 40 },
+  { key: 'partyCount', label: '会計組数', valueKind: 'count', maxLen: 20 },
+  { key: 'guestCount', label: '客数', valueKind: 'count', maxLen: 20 },
+  { key: 'unitPrice', label: '客単価', valueKind: 'currency', maxLen: 40 },
+]
 const LINE_MEDIA_ABSOLUTE_MAX_BYTES = 20 * 1024 * 1024
 const LINE_MEDIA_TOTAL_CAP_BYTES = 2 * 1024 * 1024 * 1024
 const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
@@ -749,6 +788,41 @@ Deno.serve(async (req) => {
         }
 
         const mediaSearchStartCmd = parseMediaSearchStartCommand(text)
+        const receiptCorrectionStart = parseReceiptCorrectionStartDirective(text)
+        if (receiptCorrectionStart.matched) {
+          if (roomReplyPolicy.botReplyHardMuteEnabled) {
+            continue
+          }
+          if (!lineAccessToken || !replyToken) {
+            if (!lineAccessToken) {
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply receipt correction command.')
+            }
+            if (!replyToken) {
+              console.error('Missing replyToken for receipt correction command.')
+            }
+            continue
+          }
+          if (!canUseMedia) {
+            const denyReply = await replyLineMessage(
+              replyToken,
+              'レシート修正を使うには、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
+              lineAccessToken,
+            )
+            if (!denyReply.ok) {
+              console.error('Failed to reply receipt correction permission status:', denyReply.error)
+            }
+            continue
+          }
+          const startText = await startReceiptCorrectionSession(supabase, roomId, userId, {
+            targetLineMessageId: receiptCorrectionStart.targetLineMessageId,
+          })
+          const startReply = await replyLineMessage(replyToken, startText, lineAccessToken)
+          if (!startReply.ok) {
+            console.error('Failed to reply receipt correction start prompt:', startReply.error)
+          }
+          continue
+        }
+
         if (mediaSearchStartCmd) {
           if (roomReplyPolicy.botReplyHardMuteEnabled) {
             continue
@@ -774,6 +848,7 @@ Deno.serve(async (req) => {
             }
             continue
           }
+          await clearPendingReceiptCorrection(supabase, roomId, userId)
           await savePendingMediaSearch(supabase, roomId, userId, {
             stage: 'select_period',
             periodMonths: 3,
@@ -785,6 +860,32 @@ Deno.serve(async (req) => {
           const startReply = await replyLineMessage(replyToken, buildMediaSearchPeriodPrompt(), lineAccessToken)
           if (!startReply.ok) {
             console.error('Failed to reply media search period prompt:', startReply.error)
+          }
+          continue
+        }
+
+        const receiptCorrectionPendingReply = await tryHandlePendingReceiptCorrection(
+          text,
+          supabase,
+          roomId,
+          userId,
+        )
+        if (receiptCorrectionPendingReply) {
+          if (roomReplyPolicy.botReplyHardMuteEnabled) {
+            continue
+          }
+          if (!lineAccessToken || !replyToken) {
+            if (!lineAccessToken) {
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply receipt correction pending.')
+            }
+            if (!replyToken) {
+              console.error('Missing replyToken for receipt correction pending.')
+            }
+            continue
+          }
+          const pendingReply = await replyLineMessage(replyToken, receiptCorrectionPendingReply, lineAccessToken)
+          if (!pendingReply.ok) {
+            console.error('Failed to reply receipt correction pending:', pendingReply.error)
           }
           continue
         }
@@ -1836,6 +1937,7 @@ async function trySaveLineMediaContent(
       const baseReply = buildLineReceiptImageAnalysisReply(
         imageAnalysis.receipt,
         monthCumulativeGrossSalesYen,
+        { correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(lineMessageId) },
       )
       if (midMonthReportReply) {
         return [
@@ -2463,6 +2565,272 @@ function lineReplyMediaAnalysisCaption(
   return clipMediaPreview(prev, max)
 }
 
+function parseReceiptCorrectionStartCommand(rawText: string): boolean {
+  const parsed = parseReceiptCorrectionStartDirective(rawText)
+  return parsed.matched
+}
+
+function parseReceiptCorrectionStartDirective(
+  rawText: string,
+): { matched: boolean; targetLineMessageId: string | null } {
+  const normalized = normalizeForRuleParsing(String(rawText ?? '')).trim()
+  if (!normalized) return { matched: false, targetLineMessageId: null }
+  const idTagged = normalized.match(/^レシート(?:修正|訂正)\s*(?:id[:：]|#)\s*([A-Za-z0-9_-]{8,128})$/iu)
+  if (idTagged && idTagged[1]) {
+    return { matched: true, targetLineMessageId: String(idTagged[1]).trim() }
+  }
+  const idPlain = normalized.match(/^レシート(?:修正|訂正)\s+([A-Za-z0-9_-]{8,128})$/iu)
+  if (idPlain && idPlain[1]) {
+    return { matched: true, targetLineMessageId: String(idPlain[1]).trim() }
+  }
+  const compact = normalized.replace(/\s+/g, '')
+  if (compact === 'レシート修正' || compact === 'レシート訂正' || compact === '修正レシート') {
+    return { matched: true, targetLineMessageId: null }
+  }
+  if (/^レシート(?:修正|訂正)(\s|$)/u.test(normalized)) {
+    return { matched: true, targetLineMessageId: null }
+  }
+  return { matched: false, targetLineMessageId: null }
+}
+
+function buildReceiptCorrectionCommandTextForLineMessageId(lineMessageId: string | null | undefined): string {
+  const normalized = String(lineMessageId ?? '').trim()
+  if (!normalized) return 'レシート修正'
+  return `レシート修正 ID:${normalized}`
+}
+
+function normalizeReceiptCorrectionFieldKey(raw: unknown): ReceiptCorrectionFieldKey | null {
+  const normalized = String(raw ?? '').trim()
+  if (!normalized) return null
+  const found = RECEIPT_CORRECTION_FIELDS.find((field) => field.key === normalized)
+  return found?.key ?? null
+}
+
+function parseReceiptCorrectionFieldChoice(rawText: string): ReceiptCorrectionFieldKey | null {
+  const direct = normalizeReceiptCorrectionFieldKey(rawText)
+  if (direct) return direct
+  const compact = normalizeForRuleParsing(String(rawText ?? '')).replace(/\s+/g, '').toLowerCase()
+  if (!compact) return null
+  const index = Number(compact)
+  if (Number.isInteger(index) && index >= 1 && index <= RECEIPT_CORRECTION_FIELDS.length) {
+    return RECEIPT_CORRECTION_FIELDS[index - 1]?.key ?? null
+  }
+  if (/^(店名|店舗|店舗名)$/.test(compact)) return 'storeName'
+  if (/^(日付|営業日|会計日)$/.test(compact)) return 'date'
+  if (/^(純売上|税抜|税抜売上|本体)$/.test(compact)) return 'netSales'
+  if (/^(消費税|税額|税)$/.test(compact)) return 'taxAmount'
+  if (/^(総売上|合計|税込売上|売上合計)$/.test(compact)) return 'grossSales'
+  if (/^(会計組数|組数|会計数)$/.test(compact)) return 'partyCount'
+  if (/^(客数|人数|来客数)$/.test(compact)) return 'guestCount'
+  if (/^(客単価|単価)$/.test(compact)) return 'unitPrice'
+  return null
+}
+
+function normalizeReceiptCorrectionControl(rawText: string): 'confirm' | 'cancel' | 'back' | null {
+  const compact = normalizeForRuleParsing(String(rawText ?? ''))
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[。．.!！?？、,]/g, '')
+  if (!compact) return null
+  if (/^(確定|保存|反映|完了|ok|はい)$/.test(compact)) return 'confirm'
+  if (/^(キャンセル|中止|終了|やめる|破棄|取消|取り消し)$/.test(compact)) return 'cancel'
+  if (/^(戻る|もどる|back|項目選択|修正項目)$/.test(compact)) return 'back'
+  return null
+}
+
+function getReceiptCorrectionFieldConfig(
+  fieldKey: ReceiptCorrectionFieldKey,
+): (typeof RECEIPT_CORRECTION_FIELDS)[number] | null {
+  return RECEIPT_CORRECTION_FIELDS.find((field) => field.key === fieldKey) ?? null
+}
+
+function getReceiptCorrectionFieldValue(
+  draft: LineImageReceiptAnalysis,
+  fieldKey: ReceiptCorrectionFieldKey,
+): string | null {
+  switch (fieldKey) {
+    case 'storeName':
+      return draft.storeName
+    case 'date':
+      return draft.date
+    case 'netSales':
+      return draft.netSales
+    case 'taxAmount':
+      return draft.taxAmount
+    case 'grossSales':
+      return draft.grossSales
+    case 'partyCount':
+      return draft.partyCount
+    case 'guestCount':
+      return draft.guestCount
+    case 'unitPrice':
+      return draft.unitPrice
+    default:
+      return null
+  }
+}
+
+function setReceiptCorrectionFieldValue(
+  draft: LineImageReceiptAnalysis,
+  fieldKey: ReceiptCorrectionFieldKey,
+  value: string | null,
+): LineImageReceiptAnalysis {
+  const next = { ...draft }
+  switch (fieldKey) {
+    case 'storeName':
+      next.storeName = value
+      break
+    case 'date':
+      next.date = value
+      break
+    case 'netSales':
+      next.netSales = value
+      break
+    case 'taxAmount':
+      next.taxAmount = value
+      break
+    case 'grossSales':
+      next.grossSales = value
+      break
+    case 'partyCount':
+      next.partyCount = value
+      break
+    case 'guestCount':
+      next.guestCount = value
+      break
+    case 'unitPrice':
+      next.unitPrice = value
+      break
+  }
+  return next
+}
+
+function buildReceiptCorrectionFieldSelectionPrompt(
+  draft: LineImageReceiptAnalysis,
+  note?: string,
+): string {
+  const lines: string[] = ['レシート修正中です。修正する項目番号を返信してください。']
+  if (note) lines.push(note)
+  for (let idx = 0; idx < RECEIPT_CORRECTION_FIELDS.length; idx += 1) {
+    const field = RECEIPT_CORRECTION_FIELDS[idx]
+    const value = getReceiptCorrectionFieldValue(draft, field.key) || '-'
+    lines.push(`${idx + 1}) ${field.label}: ${value}`)
+  }
+  lines.push('操作: 番号で項目選択 / 確定 / キャンセル')
+  return lines.join('\n')
+}
+
+function buildReceiptCorrectionValueInputPrompt(
+  fieldKey: ReceiptCorrectionFieldKey,
+  draft: LineImageReceiptAnalysis,
+): string {
+  const field = getReceiptCorrectionFieldConfig(fieldKey)
+  if (!field) return '修正項目を認識できませんでした。番号で選び直してください。'
+  const currentValue = getReceiptCorrectionFieldValue(draft, fieldKey) || '-'
+  const kindHint = field.valueKind === 'currency'
+    ? '例: 46200 / ¥46,200'
+    : field.valueKind === 'count'
+      ? '例: 5'
+      : field.valueKind === 'date'
+        ? '例: 2026-04-19 / 2026年4月19日'
+        : '例: BISTRO CAVA CAVA'
+  return [
+    `${field.label}の新しい値を送ってください。`,
+    `現在値: ${currentValue}`,
+    kindHint,
+    '未設定にする場合は「-」または「なし」と入力してください。',
+    '「戻る」で項目選択に戻れます。',
+  ].join('\n')
+}
+
+function normalizeReceiptCorrectionDraft(raw: unknown): LineImageReceiptAnalysis {
+  const source = (raw && typeof raw === 'object') ? raw as Record<string, unknown> : {}
+  const normalized = normalizeLineImageReceiptAnalysis({
+    store_name: source.storeName ?? source.store_name ?? source.store_name_text,
+    date: source.date ?? source.receipt_date_text ?? source.receipt_date,
+    net_sales: source.netSales ?? source.net_sales ?? source.net_sales_yen,
+    tax_amount: source.taxAmount ?? source.tax_amount ?? source.tax_amount_yen,
+    gross_sales: source.grossSales ?? source.gross_sales ?? source.gross_sales_yen,
+    party_count: source.partyCount ?? source.party_count,
+    guest_count: source.guestCount ?? source.guest_count,
+    unit_price: source.unitPrice ?? source.unit_price ?? source.unit_price_yen,
+    items: Array.isArray(source.items) ? source.items : [],
+  })
+  if (normalized) return normalized
+  return {
+    storeName: null,
+    date: null,
+    netSales: null,
+    taxAmount: null,
+    grossSales: null,
+    partyCount: null,
+    guestCount: null,
+    unitPrice: null,
+    items: [],
+  }
+}
+
+function normalizeReceiptCorrectionInputValue(
+  fieldKey: ReceiptCorrectionFieldKey,
+  rawText: string,
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  const field = getReceiptCorrectionFieldConfig(fieldKey)
+  if (!field) return { ok: false, error: '修正項目を認識できませんでした。' }
+  const compact = normalizeForRuleParsing(String(rawText ?? '')).replace(/\s+/g, '').toLowerCase()
+  if (!compact || /^(?:-|ー|―|無し|なし|未設定|空欄|空|null|クリア|削除)$/.test(compact)) {
+    return { ok: true, value: null }
+  }
+  const normalized = normalizeReceiptFieldText(String(rawText ?? '').normalize('NFKC'), field.maxLen)
+  if (!normalized) return { ok: true, value: null }
+
+  if (field.valueKind === 'text') {
+    return { ok: true, value: normalized }
+  }
+  if (field.valueKind === 'date') {
+    const iso = parseReceiptDateToIso(normalized)
+    if (!iso) {
+      return { ok: false, error: '日付は「2026-04-19」または「2026年4月19日」で入力してください。' }
+    }
+    return { ok: true, value: normalized }
+  }
+  if (field.valueKind === 'currency') {
+    const amount = parseCurrencyAmount(normalized)
+    if (amount == null || !Number.isFinite(amount) || amount < 0) {
+      return { ok: false, error: `${field.label}は金額で入力してください（例: 46200 / ¥46,200）。` }
+    }
+    return { ok: true, value: formatYenAmount(amount) }
+  }
+  const count = parseIntegerCount(normalized)
+  if (count == null || !Number.isFinite(count) || count < 0) {
+    return { ok: false, error: `${field.label}は0以上の整数で入力してください。` }
+  }
+  return { ok: true, value: String(count) }
+}
+
+function normalizeReceiptCorrectionDraftForPersist(draft: LineImageReceiptAnalysis): LineImageReceiptAnalysis {
+  const normalized = normalizeLineImageReceiptAnalysis({
+    store_name: draft.storeName,
+    date: draft.date,
+    net_sales: draft.netSales,
+    tax_amount: draft.taxAmount,
+    gross_sales: draft.grossSales,
+    party_count: draft.partyCount,
+    guest_count: draft.guestCount,
+    unit_price: draft.unitPrice,
+    items: Array.isArray(draft.items) ? draft.items : [],
+  })
+  if (!normalized) {
+    return {
+      ...draft,
+      items: Array.isArray(draft.items) ? draft.items : [],
+    }
+  }
+  return {
+    ...normalized,
+    items: Array.isArray(draft.items) ? draft.items : [],
+  }
+}
+
 function buildMediaSearchPeriodPrompt(): string {
   return [
     '保存メディア検索を開始します。まず期間を選んで返信してください。',
@@ -2768,6 +3136,247 @@ async function clearPendingMediaSearch(
   if (error) {
     console.error('Failed to clear media search pending state:', error.message)
   }
+}
+
+function resolveReceiptCorrectionConversationKey(roomId: string, userId: string | null): string {
+  return `${roomId || '__unknown_room__'}::${userId || '__anonymous__'}`
+}
+
+function isMissingReceiptCorrectionPendingTableError(error: any): boolean {
+  const code = String(error?.code ?? '')
+  if (code === '42P01') return true
+  const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
+  return text.includes('receipt_correction_pending_confirmations')
+    && (text.includes('does not exist') || text.includes('relation'))
+}
+
+async function savePendingReceiptCorrection(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  state: {
+    receiptEntryId: number
+    stage: ReceiptCorrectionStage
+    currentFieldKey: ReceiptCorrectionFieldKey | null
+    draft: LineImageReceiptAnalysis
+  },
+): Promise<void> {
+  const conversationKey = resolveReceiptCorrectionConversationKey(roomId, userId)
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + RECEIPT_CORRECTION_PENDING_TTL_MIN * 60 * 1000).toISOString()
+  const payload = {
+    conversation_key: conversationKey,
+    room_id: roomId,
+    user_id: userId,
+    receipt_entry_id: state.receiptEntryId,
+    stage: state.stage,
+    current_field_key: state.currentFieldKey,
+    draft_json: state.draft,
+    expires_at: expiresAt,
+    updated_at: nowIso,
+  }
+  const { error } = await supabase
+    .from(RECEIPT_CORRECTION_PENDING_TABLE)
+    .upsert(payload, { onConflict: 'conversation_key' })
+  if (error && !isMissingReceiptCorrectionPendingTableError(error)) {
+    console.error('Failed to save receipt correction pending state:', error.message)
+  }
+}
+
+async function loadPendingReceiptCorrection(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingReceiptCorrection | null> {
+  const conversationKey = resolveReceiptCorrectionConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(RECEIPT_CORRECTION_PENDING_TABLE)
+    .select('id, conversation_key, room_id, user_id, receipt_entry_id, stage, current_field_key, draft_json, expires_at')
+    .eq('conversation_key', conversationKey)
+    .maybeSingle()
+  if (error) {
+    if (!isMissingReceiptCorrectionPendingTableError(error)) {
+      console.error('Failed to load receipt correction pending state:', error.message)
+    }
+    return null
+  }
+  if (!data) return null
+  const expiresAt = String((data as any).expires_at ?? '')
+  if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+    await clearPendingReceiptCorrection(supabase, roomId, userId)
+    return null
+  }
+  const stageRaw = String((data as any).stage ?? '')
+  const stage: ReceiptCorrectionStage = stageRaw === 'input_value' ? 'input_value' : 'select_field'
+  const currentFieldRaw = String((data as any).current_field_key ?? '')
+  const currentFieldKey = normalizeReceiptCorrectionFieldKey(currentFieldRaw)
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    room_id: String((data as any).room_id ?? roomId),
+    user_id: ((data as any).user_id == null) ? null : String((data as any).user_id),
+    receipt_entry_id: Number((data as any).receipt_entry_id ?? 0),
+    stage,
+    current_field_key: currentFieldKey,
+    draft: normalizeReceiptCorrectionDraft((data as any).draft_json),
+    expires_at: expiresAt,
+  }
+}
+
+async function clearPendingReceiptCorrection(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<void> {
+  const conversationKey = resolveReceiptCorrectionConversationKey(roomId, userId)
+  const { error } = await supabase
+    .from(RECEIPT_CORRECTION_PENDING_TABLE)
+    .delete()
+    .eq('conversation_key', conversationKey)
+  if (error && !isMissingReceiptCorrectionPendingTableError(error)) {
+    console.error('Failed to clear receipt correction pending state:', error.message)
+  }
+}
+
+async function startReceiptCorrectionSession(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  options?: { targetLineMessageId?: string | null },
+): Promise<string> {
+  const targetLineMessageId = String(options?.targetLineMessageId ?? '').trim()
+  const target = targetLineMessageId
+    ? await loadLineReceiptEntryForRoomByLineMessageId(supabase, roomId, targetLineMessageId)
+    : await loadLatestLineReceiptEntryForRoom(supabase, roomId)
+  if (!target) {
+    if (targetLineMessageId) {
+      return '指定されたレシートをこのルームで見つけられませんでした。もう一度解析結果カードの「この結果を修正」ボタンを押してください。'
+    }
+    return 'このルームには修正対象のレシートがまだありません。先にレシート画像を送信してください。'
+  }
+  await clearPendingMediaSearch(supabase, roomId, userId)
+  const draft = normalizeReceiptCorrectionDraft(target.receipt)
+  await savePendingReceiptCorrection(supabase, roomId, userId, {
+    receiptEntryId: target.id,
+    stage: 'select_field',
+    currentFieldKey: null,
+    draft,
+  })
+  const targetLabel = [
+    target.receipt.storeName ? `店名:${target.receipt.storeName}` : '',
+    target.receipt.date ? `日付:${target.receipt.date}` : '',
+  ].filter((value) => value.length > 0).join(' / ')
+  return buildReceiptCorrectionFieldSelectionPrompt(
+    draft,
+    targetLabel ? `対象: ${targetLabel}` : (targetLineMessageId ? '対象: 指定レシート' : '対象: 直近のレシート'),
+  )
+}
+
+async function applyPendingReceiptCorrection(
+  supabase: ReturnType<typeof createClient>,
+  pending: PendingReceiptCorrection,
+): Promise<{ ok: true; receipt: LineImageReceiptAnalysis; monthCumulativeGrossSalesYen: number | null } | {
+  ok: false
+  error: string
+}> {
+  const persisted = await updateLineReceiptEntryFromCorrectionDraft(
+    supabase,
+    pending.receipt_entry_id,
+    pending.room_id,
+    pending.draft,
+  )
+  if (!persisted) {
+    return {
+      ok: false,
+      error: 'レシート修正の保存に失敗しました。少し時間を置いて再度お試しください。',
+    }
+  }
+  return {
+    ok: true,
+    receipt: persisted.receipt,
+    monthCumulativeGrossSalesYen: persisted.monthCumulativeGrossSalesYen,
+  }
+}
+
+async function tryHandlePendingReceiptCorrection(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<LineReplyPayload | null> {
+  const pending = await loadPendingReceiptCorrection(supabase, roomId, userId)
+  if (!pending) return null
+  const control = normalizeReceiptCorrectionControl(text)
+  if (control === 'cancel') {
+    await clearPendingReceiptCorrection(supabase, roomId, userId)
+    return 'レシート修正をキャンセルしました。'
+  }
+
+  if (pending.stage === 'select_field') {
+    if (control === 'confirm') {
+      const applied = await applyPendingReceiptCorrection(supabase, pending)
+      if (!applied.ok) return applied.error
+      await clearPendingReceiptCorrection(supabase, roomId, userId)
+      return buildLineReceiptImageAnalysisReply(applied.receipt, applied.monthCumulativeGrossSalesYen)
+    }
+    const field = parseReceiptCorrectionFieldChoice(text)
+    if (!field) {
+      return buildReceiptCorrectionFieldSelectionPrompt(
+        pending.draft,
+        '修正する項目番号（1〜8）を返信してください。',
+      )
+    }
+    await savePendingReceiptCorrection(supabase, roomId, userId, {
+      receiptEntryId: pending.receipt_entry_id,
+      stage: 'input_value',
+      currentFieldKey: field,
+      draft: pending.draft,
+    })
+    return buildReceiptCorrectionValueInputPrompt(field, pending.draft)
+  }
+
+  const currentFieldKey = pending.current_field_key
+  if (!currentFieldKey) {
+    await savePendingReceiptCorrection(supabase, roomId, userId, {
+      receiptEntryId: pending.receipt_entry_id,
+      stage: 'select_field',
+      currentFieldKey: null,
+      draft: pending.draft,
+    })
+    return buildReceiptCorrectionFieldSelectionPrompt(
+      pending.draft,
+      '修正項目を再選択してください。',
+    )
+  }
+  if (control === 'back') {
+    await savePendingReceiptCorrection(supabase, roomId, userId, {
+      receiptEntryId: pending.receipt_entry_id,
+      stage: 'select_field',
+      currentFieldKey: null,
+      draft: pending.draft,
+    })
+    return buildReceiptCorrectionFieldSelectionPrompt(pending.draft)
+  }
+  const normalizedValue = normalizeReceiptCorrectionInputValue(currentFieldKey, text)
+  if (!normalizedValue.ok) {
+    return [
+      normalizedValue.error,
+      buildReceiptCorrectionValueInputPrompt(currentFieldKey, pending.draft),
+    ].join('\n')
+  }
+  const nextDraft = setReceiptCorrectionFieldValue(pending.draft, currentFieldKey, normalizedValue.value)
+  const normalizedDraft = normalizeReceiptCorrectionDraftForPersist(nextDraft)
+  await savePendingReceiptCorrection(supabase, roomId, userId, {
+    receiptEntryId: pending.receipt_entry_id,
+    stage: 'select_field',
+    currentFieldKey: null,
+    draft: normalizedDraft,
+  })
+  const fieldLabel = getReceiptCorrectionFieldConfig(currentFieldKey)?.label ?? '項目'
+  return buildReceiptCorrectionFieldSelectionPrompt(
+    normalizedDraft,
+    `${fieldLabel}を更新しました。続けて修正する場合は番号、完了する場合は「確定」を送ってください。`,
+  )
 }
 
 function resolveHaccpBulkConversationKey(roomId: string, userId: string | null): string {
@@ -3950,6 +4559,192 @@ function buildMidMonthReceiptReportMessage(
   ].join('\n')
 }
 
+function toFiniteReceiptNumber(value: unknown): number | null {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  return n
+}
+
+function buildReceiptSummaryText(receipt: LineImageReceiptAnalysis): string | null {
+  const parts = [
+    receipt.storeName ? `店舗:${receipt.storeName}` : '',
+    receipt.grossSales ? `総売上:${receipt.grossSales}` : '',
+    receipt.date ? `日付:${receipt.date}` : '',
+  ].filter((value) => value.length > 0)
+  const summary = parts.join(' / ')
+  return summary ? summary.slice(0, 240) : null
+}
+
+function normalizeLineReceiptAnalysisFromEntryRow(row: Record<string, unknown>): LineImageReceiptAnalysis | null {
+  const fromPayload = normalizeReceiptCorrectionDraft(row.raw_payload)
+  const storeNameFromColumn = normalizeReceiptFieldText(row.store_name, 80)
+  const dateFromColumn = normalizeReceiptFieldText(row.receipt_date_text, 80)
+  const netSalesYen = toFiniteReceiptNumber(row.net_sales_yen)
+  const taxAmountYen = toFiniteReceiptNumber(row.tax_amount_yen)
+  const grossSalesYen = toFiniteReceiptNumber(row.gross_sales_yen)
+  const unitPriceYen = toFiniteReceiptNumber(row.unit_price_yen)
+  const partyCount = toFiniteReceiptNumber(row.party_count)
+  const guestCount = toFiniteReceiptNumber(row.guest_count)
+
+  const merged: LineImageReceiptAnalysis = {
+    storeName: storeNameFromColumn ?? fromPayload.storeName,
+    date: dateFromColumn ?? fromPayload.date,
+    netSales: netSalesYen == null ? fromPayload.netSales : formatYenAmount(netSalesYen),
+    taxAmount: taxAmountYen == null ? fromPayload.taxAmount : formatYenAmount(taxAmountYen),
+    grossSales: grossSalesYen == null ? fromPayload.grossSales : formatYenAmount(grossSalesYen),
+    partyCount: partyCount == null ? fromPayload.partyCount : String(Math.max(0, Math.round(partyCount))),
+    guestCount: guestCount == null ? fromPayload.guestCount : String(Math.max(0, Math.round(guestCount))),
+    unitPrice: unitPriceYen == null ? fromPayload.unitPrice : formatYenAmount(unitPriceYen),
+    items: Array.isArray(fromPayload.items) ? fromPayload.items : [],
+  }
+  const hasAnyField = !!(
+    merged.storeName ||
+    merged.date ||
+    merged.netSales ||
+    merged.taxAmount ||
+    merged.grossSales ||
+    merged.partyCount ||
+    merged.guestCount ||
+    merged.unitPrice
+  )
+  return hasAnyField ? merged : null
+}
+
+async function loadLatestLineReceiptEntryForRoom(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+): Promise<{ id: number; receipt: LineImageReceiptAnalysis } | null> {
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .select(
+      'id, store_name, receipt_date_text, net_sales_yen, tax_amount_yen, gross_sales_yen, party_count, guest_count, unit_price_yen, raw_payload',
+    )
+    .eq('room_id', roomId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    console.error(`Failed to load latest line_receipt_entries (room=${roomId}):`, error.message)
+    return null
+  }
+  if (!data) return null
+  const receipt = normalizeLineReceiptAnalysisFromEntryRow(data as Record<string, unknown>)
+  const id = Number((data as any).id ?? 0)
+  if (!receipt || !Number.isFinite(id) || id <= 0) return null
+  return {
+    id,
+    receipt,
+  }
+}
+
+async function loadLineReceiptEntryForRoomByLineMessageId(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  lineMessageId: string,
+): Promise<{ id: number; receipt: LineImageReceiptAnalysis } | null> {
+  const normalizedLineMessageId = String(lineMessageId ?? '').trim()
+  if (!normalizedLineMessageId) return null
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .select(
+      'id, store_name, receipt_date_text, net_sales_yen, tax_amount_yen, gross_sales_yen, party_count, guest_count, unit_price_yen, raw_payload',
+    )
+    .eq('room_id', roomId)
+    .eq('line_message_id', normalizedLineMessageId)
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    console.error(
+      `Failed to load line_receipt_entries by line_message_id (room=${roomId}, line_message_id=${normalizedLineMessageId}):`,
+      error.message,
+    )
+    return null
+  }
+  if (!data) return null
+  const receipt = normalizeLineReceiptAnalysisFromEntryRow(data as Record<string, unknown>)
+  const id = Number((data as any).id ?? 0)
+  if (!receipt || !Number.isFinite(id) || id <= 0) return null
+  return {
+    id,
+    receipt,
+  }
+}
+
+async function updateLineReceiptEntryFromCorrectionDraft(
+  supabase: ReturnType<typeof createClient>,
+  receiptEntryId: number,
+  roomId: string,
+  draft: LineImageReceiptAnalysis,
+): Promise<{ receipt: LineImageReceiptAnalysis; monthCumulativeGrossSalesYen: number | null } | null> {
+  if (!Number.isFinite(receiptEntryId) || receiptEntryId <= 0) return null
+  const normalizedDraft = normalizeReceiptCorrectionDraftForPersist(draft)
+  const canonicalStoreName = normalizedDraft.storeName
+    ? (resolveBestStoreName(normalizedDraft.storeName) ?? normalizedDraft.storeName)
+    : null
+  const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
+  const receiptDateIso = parseReceiptDateToIso(normalizedDraft.date)
+  const netSalesYen = parseCurrencyAmount(normalizedDraft.netSales)
+  const taxAmountYen = parseCurrencyAmount(normalizedDraft.taxAmount)
+  const grossSalesYen = parseCurrencyAmount(normalizedDraft.grossSales)
+  const partyCount = parseIntegerCount(normalizedDraft.partyCount)
+  const guestCount = parseIntegerCount(normalizedDraft.guestCount)
+  const unitPriceYen = parseCurrencyAmount(normalizedDraft.unitPrice)
+  const summaryText = buildReceiptSummaryText({
+    ...normalizedDraft,
+    storeName: canonicalStoreName,
+  })
+
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .update({
+      store_name: canonicalStoreName,
+      store_partition_key: storePartitionKey,
+      receipt_date_text: normalizedDraft.date,
+      receipt_date: receiptDateIso,
+      net_sales_yen: netSalesYen,
+      tax_amount_yen: taxAmountYen,
+      gross_sales_yen: grossSalesYen,
+      party_count: partyCount,
+      guest_count: guestCount,
+      unit_price_yen: unitPriceYen,
+      summary_text: summaryText,
+      raw_payload: {
+        ...normalizedDraft,
+        storeName: canonicalStoreName,
+      },
+    })
+    .eq('id', receiptEntryId)
+    .eq('room_id', roomId)
+    .select(
+      'id, store_name, store_partition_key, receipt_date_text, net_sales_yen, tax_amount_yen, gross_sales_yen, party_count, guest_count, unit_price_yen, raw_payload',
+    )
+    .maybeSingle()
+
+  if (error) {
+    console.error(
+      `Failed to update line_receipt_entries for correction (id=${receiptEntryId}, room=${roomId}):`,
+      error.message,
+    )
+    return null
+  }
+  if (!data) return null
+
+  const updatedReceipt = normalizeLineReceiptAnalysisFromEntryRow(data as Record<string, unknown>) ?? {
+    ...normalizedDraft,
+    storeName: canonicalStoreName,
+  }
+  const updatedStorePartitionKey = String((data as any).store_partition_key ?? storePartitionKey).trim() || storePartitionKey
+  const monthCumulativeGrossSalesYen = await loadCurrentMonthCumulativeGrossSalesYen(
+    supabase,
+    updatedStorePartitionKey,
+    new Date(),
+  )
+  return {
+    receipt: updatedReceipt,
+    monthCumulativeGrossSalesYen,
+  }
+}
+
 async function saveLineReceiptEntry(
   supabase: ReturnType<typeof createClient>,
   params: {
@@ -4504,6 +5299,7 @@ function buildLineImageAnalysisReply(preview: string): string {
 function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
   monthCumulativeGrossSalesYen: number | null = null,
+  options?: { correctionCommandText?: string },
 ): LineReplyMessage[] {
   const labelFlex = 3
   const rows: Array<{ label: string; value: string; margin?: 'md' }> = [
@@ -4566,6 +5362,23 @@ function buildLineReceiptImageAnalysisReply(
           layout: 'vertical',
           spacing: 'sm',
           contents: bodyContents,
+        },
+        footer: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          contents: [
+            {
+              type: 'button',
+              style: 'secondary',
+              height: 'sm',
+              action: {
+                type: 'message',
+                label: 'この結果を修正',
+                text: options?.correctionCommandText || 'レシート修正',
+              },
+            },
+          ],
         },
       },
     },
@@ -4799,6 +5612,7 @@ function looksLikeBotInteractionRequest(text: string): boolean {
   const normalized = normalizeForRuleParsing(String(text ?? '')).trim()
   if (!normalized) return false
   const compact = normalized.replace(/\s+/g, '')
+  if (parseReceiptCorrectionStartCommand(normalized)) return true
   if (parseCalendarCommand(normalized).matched) return true
   if (looksLikeMessageSearchQuestion(normalized)) return true
   if (looksLikeCalendarListQuestion(normalized)) return true
@@ -4914,6 +5728,7 @@ function isExplicitBotCommandText(rawText: string): boolean {
   if (/^(会話|トーク|履歴|チャット)(検索|要約|確認)/.test(compact)) return true
   if (/^メディアURL/.test(compact)) return true
   if (/^保存メディアURL/.test(compact)) return true
+  if (/^レシート(?:修正|訂正)/.test(compact)) return true
   return false
 }
 
@@ -6495,7 +7310,7 @@ function isLikelyBotConversationText(text: string): boolean {
   if (looksLikeCalendarListQuestion(normalized)) return true
   if (looksLikeMessageSearchQuestion(normalized)) return true
   if (isLikelyBotDirectedSearchPrompt(normalized)) return true
-  if (/^(予定確認|予定一覧|予定報告|会話検索|履歴検索|トーク検索|チャット検索|メディアURL|保存メディアURL)/.test(compact)) {
+  if (/^(予定確認|予定一覧|予定報告|会話検索|履歴検索|トーク検索|チャット検索|メディアURL|保存メディアURL|レシート修正|レシート訂正)/.test(compact)) {
     return true
   }
   return false

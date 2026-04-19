@@ -792,9 +792,13 @@ const html = String.raw`<!doctype html>
     }
 
     .room-scope-badge.warn {
-      color: #d8c8ff;
-      border-color: rgba(187, 164, 255, 0.42);
-      background: rgba(28, 18, 48, 0.55);
+      color: #fff3d6;
+      border-color: rgba(255, 188, 92, 0.72);
+      background: linear-gradient(180deg, rgba(122, 64, 16, 0.86), rgba(88, 44, 10, 0.88));
+      box-shadow:
+        0 0 0 1px rgba(255, 212, 136, 0.26) inset,
+        0 3px 10px rgba(0, 0, 0, 0.24);
+      font-weight: 700;
     }
 
     @media (max-width: 960px) {
@@ -1244,11 +1248,11 @@ const html = String.raw`<!doctype html>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="roomConfigEffectModalTitle">
       <h3 id="roomConfigEffectModalTitle" class="modal-title">設定の効果確認</h3>
       <div id="roomConfigEffectModalMeta" class="modal-meta">対象ルーム: -</div>
-      <div class="modal-meta">この内容で問題なければ「確認して保存を有効化」を押してください。</div>
+      <div class="modal-meta">効果確認は任意です。確認せずに保存できます。</div>
       <div id="roomConfigEffectPreview" class="effect-preview"></div>
       <div class="modal-actions">
         <button id="cancelRoomConfigEffectBtn" class="button">戻る</button>
-        <button id="confirmRoomConfigEffectBtn" class="button primary">確認して保存を有効化</button>
+        <button id="confirmRoomConfigEffectBtn" class="button primary">確認済みにする（任意）</button>
       </div>
     </div>
   </div>
@@ -1580,16 +1584,8 @@ const html = String.raw`<!doctype html>
 
     function updateRoomConfigSaveButtonState() {
       if (!dom.saveRoomConfigBtn) return;
-      if (!activeRoomConfigRow) {
-        dom.saveRoomConfigBtn.disabled = false;
-        dom.saveRoomConfigBtn.title = '';
-        return;
-      }
-      const draft = buildRoomConfigDraftFromModal();
-      const signature = buildRoomConfigDraftSignature(draft);
-      const reviewed = !!roomConfigReviewSignature && roomConfigReviewSignature === signature;
-      dom.saveRoomConfigBtn.disabled = !reviewed;
-      dom.saveRoomConfigBtn.title = reviewed ? '' : '先に「効果確認」を実行してください。';
+      dom.saveRoomConfigBtn.disabled = false;
+      dom.saveRoomConfigBtn.title = '';
     }
 
     function invalidateRoomConfigReview() {

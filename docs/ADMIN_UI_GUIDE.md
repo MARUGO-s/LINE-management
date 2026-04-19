@@ -97,7 +97,7 @@
 | **ID** | ドラッグハンドルで並び替え、`ID表示` でルーム ID をコピー用モーダル表示。 |
 | **表示名** | ルーム名の編集欄。下に**最終投稿**日時。 |
 | **未処理件数** | 要約・処理待ちなどのメッセージ件数（サーバー値）。 |
-| **設定** | `設定` ボタンで**ルーム設定モーダル**。**バッジ**は有効になっているルーム機能の数（例: `6/10 有効`）を色分け表示。 |
+| **設定** | `設定` ボタンで**ルーム設定モーダル**。**バッジ**は有効になっているルーム機能の数（例: `6/12 有効`）を色分け表示。 |
 | **配信時刻** | ルーム別の上書き時刻。空欄で全体継承。 |
 | **最終回集計** | `継承` / `各回独立` / `1日まとめ`。全体の「最終配信の集計方式」との組み合わせに注意。 |
 | **操作** | `メンバー同期`（**グループ `C…` / 複数人トーク `R…` の行のみ**）: LINE **メンバー ID 一覧 API** で当該トークの全員を取得し **ユーザー権限**（`line_user_permissions`）へ反映。既存ユーザーは権限を維持して表示名を更新、未登録は Webhook 新規と同様の未承認既定で追加。**注意**: 当該 API は LINE 側の仕様で **認証済みまたはプレミアムの公式アカウント**に限定されており、未認証チャネルでは 403 になります。その場合はメッセージ受信 Webhook や「既存ユーザー取込」でユーザーが取り込まれます。`継承`: ルーム個別設定を削除してデフォルトへ。`ルーム削除`: ルームと関連データの削除（確認あり）。 |
@@ -110,6 +110,7 @@
 | チェック | 意味（概要） |
 |----------|----------------|
 | **AI会話返信** | そのルームで、Bot による**会話・意図判定に基づく返信**を許可するか（`bot_reply_enabled`）。 |
+| **AI返信完全無し（このルームは返信しない）** | このルームでは**会話起点の返信を全面停止**するか（`bot_reply_hard_mute_enabled`）。操作コマンド・確認返信・通常返信を含めて送信しません。 |
 | **会話検索（ルーム）** | そのルームで**会話履歴検索**を許可するか（`message_search_enabled`）。`AI会話返信` とは独立して判定されます。 |
 | **資料検索（2段階目）** | 会話検索0件時に提案される**資料ライブラリ検索（はい/いいえ）**を許可するか（`message_search_library_enabled`）。`AI会話返信` とは独立して判定されます。 |
 | **ルーム要約配信（このルーム単体）** | このルームの会話だけを要約し、**このルームに**「このルーム定期要約」として配信するか（`send_room_summary`）。 |
@@ -122,6 +123,13 @@
 | **Gmail予約通知** | Gmail からの予約系メールを検知した際の**このルーム向け通知**などに関わる設定。 |
 
 **要約まわりの相互排他（UI・API 共通）:** 「ルーム単体の要約」と「全体要約をこのルームに配信」は**同時に ON にできません**。一方を ON にすると、他方は自動で OFF になり、チェックボックスも無効化されます。両方 OFF にすれば、このルームには要約系の定期配信は行われません（全体・単体とも）。
+
+**AI返信完全無しの優先度:** `AI返信完全無し` が ON の場合、`AI会話返信` が ON でも返信は送信されません。  
+ただし、返信以外の処理（例: ルームのメディア保存、カレンダー登録処理自体）は設定・権限が許せば継続します。
+
+**効果確認ボタンの判定方式:** 「効果確認」は AI 判定ではなく、チェック状態を条件分岐で文章化する**定型ロジック（ルールベース）**です。
+
+**保存ダイアログの表示文:** ルーム設定保存後の表示は `ルーム設定を保存しました。` の 1 行のみです。
 
 モーダル下部の注記: **資料ライブラリの閲覧権限**はルームではなく、**メディア閲覧画面で資料ごと**に設定します。
 
@@ -145,6 +153,7 @@
 | チェック項目 | 既定 |
 |--------------|------|
 | AI会話返信 | **ON** |
+| AI返信完全無し（このルームは返信しない） | **OFF** |
 | 会話検索（ルーム） | **OFF** |
 | 資料検索（2段階目） | **OFF** |
 | ルーム要約配信（このルーム単体） | **OFF** |
@@ -190,9 +199,29 @@
 | **予定閲覧** | カレンダー**一覧・確認**（「予定確認」「5月の会議は」など、予定の検索・閲覧）を許可するか（`can_calendar_view`）。**予定作成・予定更新とは独立**です。 |
 | **予定作成** | カレンダー**新規作成**操作を許可するか（`can_calendar_create`）。 |
 | **予定更新** | カレンダー**変更**（編集・削除に相当する操作）を許可するか（`can_calendar_update`）。 |
-| **メディア** | **メディア保存・メディア系機能**にアクセスできるか（`can_media_access`）。ルームの「LINE添付保存」とセットで効きます。 |
+| **メディア** | **メディア検索 / `メディアURL` などのメディア系機能**にアクセスできるか（`can_media_access`）。保存自体はルームの「LINE添付保存（ルーム）」設定とも組み合わせて判定されます。 |
 
 ※ **LINE Bot 側の挙動**（この画面に項目なし）: **第1段（最大180日）→ 第2段（必要時フル相当）→ 第3段（資料のはい/いいえ）** で段階試行。拡大・フォローアップ・資料の各保留（`message_search_expand_pending_confirmations` / `message_search_followup_pending_confirmations` / `message_search_library_pending_confirmations`）や `会話検索フル` 省略の詳細は **`README.md` §8** を参照。
+
+**「メディア」チェックの実際の意味（重要）:**  
+`can_media_access` は主に **メディア検索 / `メディアURL` 利用可否**を制御します。  
+一方、メディア保存そのものはルーム設定 `media_file_access_enabled`（LINE添付保存）側の影響を受けます。
+
+### 5.2.1 新規ユーザーの初期権限（自動登録時）
+
+`line-webhook` が初めてユーザーを `line_user_permissions` に作成するときは、承認待ちとして次の値で作られます。
+
+| 項目 | 初期値 |
+|------|--------|
+| `is_active`（利用可） | **false** |
+| `can_message_search`（会話検索） | **false** |
+| `can_library_search`（資料検索） | **false** |
+| `can_calendar_view`（予定閲覧） | **false** |
+| `can_calendar_create`（予定作成） | **false** |
+| `can_calendar_update`（予定更新） | **false** |
+| `can_media_access`（メディア） | **false** |
+| `assigned_store`（所属店舗） | `null` |
+| `assigned_job_title`（役職） | `null` |
 
 ### 5.3 ルーム選択（会話検索の対象）
 
@@ -307,6 +336,7 @@
 |-----------|-------------------------------|
 | 配信を有効化 | `global_settings.is_enabled` 等 |
 | AI会話返信 | `room_summary_settings.bot_reply_enabled` |
+| AI返信完全無し（このルームは返信しない） | `room_summary_settings.bot_reply_hard_mute_enabled` |
 | 会話検索（ルーム） | `room_summary_settings.message_search_enabled` |
 | 資料検索（2段階目） | `room_summary_settings.message_search_library_enabled` |
 | ルーム要約配信（このルーム単体） | `room_summary_settings.send_room_summary` |
@@ -321,6 +351,7 @@
 | 利用可（ユーザー） | `line_user_permissions.is_active` |
 | 会話検索 / 資料検索 | `can_message_search` / `can_library_search` |
 | 予定閲覧 / 予定作成 / 予定更新 | `can_calendar_view` / `can_calendar_create` / `can_calendar_update` |
+| メディア（ユーザー） | `can_media_access`（メディア検索 / `メディアURL` 利用可否） |
 | ルーム除外（検索） | `excluded_message_search_room_ids` |
 | （LINE のみ・参考）古い帯の追加検索の保留 | `message_search_expand_pending_confirmations`（管理 UI からは編集しません） |
 | （LINE のみ・参考）会話検索フォローアップ保留 | `message_search_followup_pending_confirmations` |
@@ -353,5 +384,14 @@
 | gmail-alert-cron | 食べログの `要望` から提携定型文（予約台帳転記依頼）を除外し、該当時は `なし` を表示。 |
 | gmail-alert-cron | 食べログ表示は `予約番号` を非表示、`予約回数` を表示（`N回`）。 |
 | DB + gmail-alert-cron | 食べログ来店履歴のロジック集計を追加。`tabelog_reservation_visit_events`（メール単位の重複防止）と `tabelog_reservation_visit_summaries`（`名前 + 電話番号` の累積回数）を管理し、`record_tabelog_reservation_visit` で加算。 |
+| DB | `room_summary_settings.bot_reply_hard_mute_enabled`（boolean、default false）を追加。 |
+| line-webhook | `bot_reply_hard_mute_enabled` が ON のルームでは、会話起点の返信（操作コマンド・確認返信・通常返信）を送信しない。 |
+| line-webhook | 上記が ON でも、返信以外の処理（メディア保存、カレンダー登録処理自体）は設定・権限に従って継続。 |
+| 管理 UI（index.html / admin-ui） | ルーム設定／新規ルーム既定に「AI返信完全無し（このルームは返信しない）」を追加。 |
+| 管理 UI（index.html / admin-ui） | ルーム機能バッジの分母を **12** に更新。 |
+| 管理 UI（index.html / admin-ui） | ルーム保存後ダイアログを `ルーム設定を保存しました。` の1行表示に簡略化。 |
+| 管理 UI（index.html / admin-ui） | 「効果確認」は AI ではなく、チェック状態を定型表示するルールベース判定。 |
+| ユーザー権限（説明明確化） | 「メディア」は `can_media_access`（メディア検索 / `メディアURL` 利用）を指し、保存可否はルーム設定 `media_file_access_enabled` 側でも制御。 |
+| ユーザー新規作成（line-webhook） | 新規ユーザーは承認待ち既定（`is_active=false`、各 `can_*` false）で作成。 |
 
 ---
