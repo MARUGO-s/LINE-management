@@ -2898,17 +2898,24 @@
       const status = String(row && row.status ? row.status : '').toLowerCase();
       const raw = String(row && row.reason ? row.reason : '').trim();
       const hasJa = /[ぁ-んァ-ヶ一-龠々]/.test(raw);
+      const lineDetail = buildLineSendFailureDetail(row);
       const map = {
         no_messages: '未処理メッセージがないため、今回は配信対象がありません。',
         not_scheduled: 'この時間は配信スケジュール外のため、配信を実行しませんでした。',
         overall_schedule_skip: 'ルーム要約候補はありましたが、全体配信の時刻外のため全体配信をスキップしました。',
         line_config_missing: 'LINE配信設定（トークンまたは送信先）の不足により配信できませんでした。',
         no_room_summary: '要約対象がなく、ルーム要約を生成できませんでした。',
-        line_send_failed: 'LINEへの送信に失敗しました。',
+        line_send_failed: lineDetail
+          ? ('LINEへの送信に失敗しました。' + lineDetail)
+          : 'LINEへの送信に失敗しました。',
         gmail_alert_sent: 'Gmail予約メール通知を送信しました。',
-        gmail_alert_send_failed: 'Gmail予約メール通知の送信に失敗しました。',
+        gmail_alert_send_failed: lineDetail
+          ? ('Gmail予約メール通知の送信に失敗しました。' + lineDetail)
+          : 'Gmail予約メール通知の送信に失敗しました。',
         calendar_tomorrow_sent: '翌日予定通知を送信しました。',
-        calendar_tomorrow_send_failed: '翌日予定通知の送信に失敗しました。',
+        calendar_tomorrow_send_failed: lineDetail
+          ? ('翌日予定通知の送信に失敗しました。' + lineDetail)
+          : '翌日予定通知の送信に失敗しました。',
         llm_config_missing: 'GROQ APIキー未設定のため要約処理を実行できませんでした。',
         db_update_failed: '配信後のメッセージ状態更新に失敗しました。',
         delivered: '配信に成功しました。',
@@ -2919,6 +2926,80 @@
       if (map[status]) return map[status];
       if (hasJa && raw) return raw;
       return '理由の詳細は内部ログを確認してください。';
+    }
+
+    function buildLineSendFailureDetail(row) {
+      const status = String(row && row.status ? row.status : '').toLowerCase();
+      const raw = String(row && row.reason ? row.reason : '').trim();
+      if (!raw) return '';
+      if (
+        status !== 'line_send_failed' &&
+        status !== 'gmail_alert_send_failed' &&
+        status !== 'calendar_tomorrow_send_failed'
+      ) return '';
+      const messages = extractLineErrorMessages(raw);
+      if (!messages.length) return '';
+      const translated = [];
+      for (const message of messages) {
+        const readable = translateLineErrorMessage(message);
+        const text = readable || message;
+        if (translated.indexOf(text) === -1) translated.push(text);
+      }
+      if (!translated.length) return '';
+      const head = translated.slice(0, 2).join(' / ');
+      const httpStatus = Number(row && row.line_http_status);
+      if (Number.isFinite(httpStatus) && httpStatus > 0) {
+        return '（HTTP ' + httpStatus + ': ' + head + '）';
+      }
+      return '（' + head + '）';
+    }
+
+    function extractLineErrorMessages(raw) {
+      const text = String(raw || '').trim();
+      if (!text) return [];
+      const parts = text.split(' | ');
+      const result = [];
+      for (const part of parts) {
+        let candidate = String(part || '').trim();
+        if (!candidate) continue;
+        const colon = candidate.indexOf(':');
+        if (colon > 0) {
+          const prefix = candidate.slice(0, colon).trim();
+          if (/^[CUR][0-9a-f]{32}$/i.test(prefix)) {
+            candidate = candidate.slice(colon + 1).trim();
+          }
+        }
+        if (!candidate) continue;
+        if (candidate.startsWith('{') || candidate.startsWith('[')) {
+          try {
+            const parsed = JSON.parse(candidate);
+            if (parsed && typeof parsed.message === 'string' && parsed.message.trim()) {
+              candidate = parsed.message.trim();
+            }
+          } catch (_) {
+            const m = candidate.match(/"message"\s*:\s*"([^"]+)"/);
+            if (m && m[1]) candidate = String(m[1]).trim();
+          }
+        } else {
+          const m = candidate.match(/"message"\s*:\s*"([^"]+)"/);
+          if (m && m[1]) candidate = String(m[1]).trim();
+        }
+        if (!candidate) continue;
+        if (result.indexOf(candidate) === -1) result.push(candidate);
+      }
+      return result;
+    }
+
+    function translateLineErrorMessage(message) {
+      const lower = String(message || '').toLowerCase();
+      if (!lower) return '';
+      if (lower.includes('reached your monthly limit')) return '月間送信上限に到達しています';
+      if (lower.includes('rate limit')) return 'APIレート制限に到達しています';
+      if (lower.includes('invalid') && lower.includes('token')) return 'チャネルアクセストークンが無効です';
+      if (lower.includes('invalid') && (lower.includes('user') || lower.includes('to'))) return '送信先IDが無効です';
+      if (lower.includes('not found')) return '送信先ルーム/ユーザーが見つかりません';
+      if (lower.includes('forbidden') || lower.includes('not authorized')) return '送信権限がありません';
+      return '';
     }
 
     async function api(path, options) {
