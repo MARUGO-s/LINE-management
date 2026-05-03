@@ -291,6 +291,11 @@ Deno.serve(async (req) => {
       return json(receiptSalesState, 200)
     }
 
+    if (req.method === "GET" && path === "/analytics/monthly") {
+      const result = await fetchAnalyticsMonthly(supabase, url)
+      return json(result, 200)
+    }
+
     if (req.method === "POST" && path === "/documents") {
       const created = await uploadDocumentFile(req, supabase)
       return json({ success: true, document: created }, 200)
@@ -2095,6 +2100,98 @@ async function fetchReceiptSalesState(
     series,
     available_store_count: storeOptions.length,
     source_row_count: rows.length,
+    generated_at: new Date().toISOString(),
+  }
+}
+
+async function fetchAnalyticsMonthly(
+  supabase: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const storeKeyRaw = toSafeString(url.searchParams.get("store_key"))
+  const monthsRaw = Number(url.searchParams.get("months") ?? "12")
+  const months = Number.isFinite(monthsRaw) && monthsRaw >= 1 ? Math.min(Math.floor(monthsRaw), 36) : 12
+
+  const now = new Date()
+  const jstParts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(now)
+  const currentYear = Number(jstParts.find((p) => p.type === "year")?.value ?? now.getUTCFullYear())
+  const currentMonth = Number(jstParts.find((p) => p.type === "month")?.value ?? 1)
+
+  const monthKeys: string[] = []
+  for (let i = months - 1; i >= 0; i--) {
+    const totalMonths = currentYear * 12 + (currentMonth - 1) - i
+    const y = Math.floor(totalMonths / 12)
+    const m = (totalMonths % 12) + 1
+    monthKeys.push(`${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}`)
+  }
+
+  const firstMonth = monthKeys[0]
+  const lastMonth = monthKeys[monthKeys.length - 1]
+  const startDateStr = `${firstMonth}-01`
+  const lastMonthNum = Number(lastMonth.slice(5, 7))
+  const lastMonthYear = Number(lastMonth.slice(0, 4))
+  const nextYear = lastMonthNum === 12 ? lastMonthYear + 1 : lastMonthYear
+  const nextMonth = lastMonthNum === 12 ? 1 : lastMonthNum + 1
+  const endDateStr = `${String(nextYear).padStart(4, "0")}-${String(nextMonth).padStart(2, "0")}-01`
+
+  let query = supabase
+    .from("line_receipt_entries")
+    .select("store_partition_key, store_name, receipt_date, gross_sales_yen, net_sales_yen, party_count, guest_count")
+    .gte("receipt_date", startDateStr)
+    .lt("receipt_date", endDateStr)
+    .limit(50000)
+
+  if (storeKeyRaw) query = query.eq("store_partition_key", storeKeyRaw)
+
+  const { data, error } = await query
+  if (error) throw { status: 500, message: `Failed to fetch analytics monthly data: ${error.message}` } satisfies AppError
+
+  type MonthlyRow = {
+    month: string
+    gross_sales_yen: number
+    net_sales_yen: number
+    party_count: number
+    guest_count: number
+    receipt_count: number
+    avg_unit_price_yen: number | null
+  }
+
+  const monthMap = new Map<string, MonthlyRow>()
+  for (const key of monthKeys) {
+    monthMap.set(key, { month: key, gross_sales_yen: 0, net_sales_yen: 0, party_count: 0, guest_count: 0, receipt_count: 0, avg_unit_price_yen: null })
+  }
+
+  const storeSet = new Map<string, string>()
+
+  for (const row of (Array.isArray(data) ? data : [])) {
+    const r = row as Record<string, unknown>
+    const dateStr = toSafeString(r.receipt_date)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) continue
+    const monthKey = dateStr.slice(0, 7)
+    const bucket = monthMap.get(monthKey)
+    if (!bucket) continue
+    bucket.gross_sales_yen += toNonNegativeInteger(r.gross_sales_yen)
+    bucket.net_sales_yen += toNonNegativeInteger(r.net_sales_yen)
+    bucket.party_count += toNonNegativeInteger(r.party_count)
+    bucket.guest_count += toNonNegativeInteger(r.guest_count)
+    bucket.receipt_count += 1
+    const sk = toSafeString(r.store_partition_key)
+    if (sk && !storeSet.has(sk)) storeSet.set(sk, toSafeString(r.store_name) || sk)
+  }
+
+  for (const bucket of monthMap.values()) {
+    bucket.avg_unit_price_yen = bucket.guest_count > 0 ? Math.round(bucket.gross_sales_yen / bucket.guest_count) : null
+  }
+
+  return {
+    months: monthKeys.length,
+    store_key: storeKeyRaw || null,
+    series: [...monthMap.values()],
+    available_stores: [...storeSet.entries()].map(([k, v]) => ({ store_key: k, store_name: v })),
     generated_at: new Date().toISOString(),
   }
 }

@@ -29,3 +29,8 @@ const LABEL_SET = new Set<string>(MARUGO_GROUP_STORE_OPTIONS as unknown as strin
 export function isMarugoGroupStoreLabel(value: string): boolean {
   return LABEL_SET.has(value)
 }
+
+/** 店舗ごとの緯度・経度（天候データ取得用） store_partition_key → 座標 */
+export const STORE_COORDINATES: Record<string, { lat: number; lon: number }> = {
+  bistrocavacava: { lat: 35.6870, lon: 139.7210 }, // 新宿区荒木町9-7
+}

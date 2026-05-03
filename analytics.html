@@ -1,0 +1,1007 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#006c3a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="LINE Analytics">
+  <link rel="icon" href="icons/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16x16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+  <link rel="manifest" href="site.webmanifest">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;700&family=Barlow+Condensed:wght@600;700&display=swap">
+  <title>売上分析</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg0: #061320;
+      --bg1: #173247;
+      --card: rgba(8,21,35,0.84);
+      --line: rgba(155,220,255,0.25);
+      --txt: #e7f6ff;
+      --sub: #a6cadf;
+      --ok: #69edbf;
+      --accent: #57d8ff;
+      --warn: #ffd17e;
+      --bad: #ff7c9f;
+      --radius: 16px;
+      --shadow: 0 20px 45px rgba(0,0,0,0.35);
+      --c-gross: #59dcff;
+      --c-net: #6cf0be;
+      --c-tax: #ffd07d;
+      --c-party: #9de6b6;
+      --c-guest: #ff9fbf;
+      --c-rain: #7ab4ff;
+      --c-temp: #ffb347;
+    }
+    body[data-theme='light'] {
+      --bg0: #f5fbff; --bg1: #deedf8;
+      --card: rgba(255,255,255,0.92); --line: rgba(45,106,151,0.24);
+      --txt: #132a3b; --sub: #4f7187; --ok: #0f8d5f;
+      --accent: #157fba; --warn: #b67a1e; --bad: #d54c74;
+      --shadow: 0 14px 34px rgba(20,59,89,0.16);
+      background:
+        radial-gradient(900px 500px at -20% -10%,#d0ebfb 0%,transparent 60%),
+        radial-gradient(900px 500px at 120% 0%,#c6e0f3 0%,transparent 55%),
+        linear-gradient(145deg,var(--bg0),var(--bg1)) !important;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      color: var(--txt);
+      font-family: "Zen Kaku Gothic New", sans-serif;
+      background:
+        radial-gradient(900px 500px at -20% -10%,#215f84 0%,transparent 60%),
+        radial-gradient(900px 500px at 120% 0%,#185273 0%,transparent 55%),
+        linear-gradient(145deg,var(--bg0),var(--bg1));
+      padding: 20px;
+    }
+    .app { max-width: 1360px; margin: 0 auto; display: grid; gap: 16px; }
+    .hero, .card {
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+    .hero {
+      padding: 18px 20px;
+      background: linear-gradient(160deg,rgba(87,216,255,0.15),rgba(8,21,35,0.65));
+    }
+    .hero h1 {
+      font-family: "Barlow Condensed", sans-serif;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      font-size: clamp(2rem,3.2vw,2.8rem);
+      line-height: 0.95;
+    }
+    .hero p { margin-top: 10px; color: var(--sub); }
+    .status { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; color: var(--sub); font-size: 0.88rem; align-items: center; }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: rgba(8,21,35,0.6);
+      text-decoration: none;
+      color: inherit;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    button.pill { font: inherit; cursor: pointer; }
+    .pill.ok { color: var(--ok); border-color: color-mix(in srgb,var(--ok) 55%,transparent); }
+    .pill.link { color: #9be8ff; display: inline-flex; align-items: center; }
+    .card { background: var(--card); padding: 16px; }
+    .card-title { font-size: 1.08rem; padding-bottom: 8px; border-bottom: 1px solid rgba(155,220,255,0.18); margin-bottom: 14px; }
+    .controls { display: flex; gap: 9px; flex-wrap: wrap; align-items: center; }
+    .input, .select, .btn {
+      min-height: 38px; border-radius: 11px;
+      border: 1px solid var(--line);
+      background: rgba(8,21,35,0.6);
+      color: var(--txt); padding: 0 12px; font: inherit;
+    }
+    .btn { cursor: pointer; font-weight: 700; }
+    .btn.primary {
+      border-color: color-mix(in srgb,var(--accent) 60%,transparent);
+      background: linear-gradient(180deg,rgba(87,216,255,0.32),rgba(10,116,158,0.32));
+    }
+    .btn.active {
+      background: linear-gradient(180deg,rgba(87,216,255,0.45),rgba(10,116,158,0.45));
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    .meta { margin-top: 8px; color: var(--sub); font-size: 0.87rem; }
+
+    /* KPI cards */
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 10px; }
+    .kpi-card {
+      border: 1px solid rgba(155,220,255,0.18);
+      border-radius: 12px;
+      background: rgba(5,17,28,0.5);
+      padding: 12px 14px;
+    }
+    body[data-theme='light'] .kpi-card { background: rgba(230,243,253,0.6); }
+    .kpi-label { font-size: 0.78rem; color: var(--sub); margin-bottom: 4px; }
+    .kpi-value { font-family: "Barlow Condensed", sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--accent); }
+    .kpi-sub { font-size: 0.78rem; color: var(--sub); margin-top: 2px; }
+
+    /* Chart layout */
+    .charts-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
+    .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 760px) { .charts-row { grid-template-columns: 1fr; } }
+    .chart-card { background: var(--card); border-radius: var(--radius); border: 1px solid var(--line); padding: 16px; box-shadow: var(--shadow); }
+    .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
+    .chart-title { font-size: 0.95rem; font-weight: 700; }
+    .chart-wrap { position: relative; height: 260px; }
+    .chart-wrap.tall { height: 320px; }
+    .chart-wrap.short { height: 200px; }
+    .chart-tab-group { display: flex; gap: 6px; }
+    .chart-tab {
+      font-size: 0.78rem; padding: 3px 10px; border-radius: 8px;
+      border: 1px solid var(--line); background: rgba(8,21,35,0.5);
+      color: var(--sub); cursor: pointer; font: inherit;
+    }
+    .chart-tab.active { background: rgba(87,216,255,0.18); border-color: var(--accent); color: var(--accent); }
+
+    /* weather badge */
+    .weather-badge { font-size: 0.78rem; color: var(--sub); display: flex; gap: 8px; flex-wrap: wrap; }
+    .weather-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+
+    /* loading / error */
+    .loading-overlay {
+      display: none; position: absolute; inset: 0;
+      background: rgba(6,19,32,0.7); border-radius: 8px;
+      align-items: center; justify-content: center;
+      font-size: 0.9rem; color: var(--sub);
+    }
+    .loading-overlay.show { display: flex; }
+
+    /* weekday labels */
+    .weekday-note { font-size: 0.78rem; color: var(--sub); margin-top: 6px; }
+
+    /* canvas overflow 防止 / grid item min-width reset */
+    html { overflow-x: hidden; }
+    .chart-wrap canvas { max-width: 100% !important; display: block; }
+    .chart-card { overflow: hidden; min-width: 0; }
+    .chart-wrap { overflow: hidden; min-width: 0; width: 100%; }
+    .charts-grid, .charts-row { min-width: 0; }
+    .app { min-width: 0; }
+    /* grid items must not expand beyond their track */
+    .app > * { min-width: 0; }
+    .hero, .card { min-width: 0; overflow: hidden; }
+
+    /* ── mobile ── */
+    @media (max-width: 600px) {
+      body { padding: 10px; overflow-x: hidden; }
+      .app { gap: 10px; }
+
+      /* hero */
+      .hero { padding: 14px; }
+      .hero h1 { font-size: 1.7rem; }
+      .hero p { display: none; }
+      .status { gap: 6px; font-size: 0.8rem; }
+      .pill { padding: 3px 8px; }
+      /* ナビリンクをスクロール可能な1行に */
+      .status { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .status::-webkit-scrollbar { display: none; }
+
+      /* cards */
+      .card { padding: 12px; }
+      .card-title { font-size: 0.97rem; margin-bottom: 10px; }
+
+      /* 接続カード：トークン保存済みなら折りたたみ */
+      .auth-saved .auth-url-row { display: none; }
+      .auth-saved .auth-full-row { display: none; }
+      .auth-compact { display: flex !important; }
+
+      /* 接続フォームをフル幅縦並びに */
+      .controls { flex-direction: column; align-items: stretch; }
+      .controls .input, .controls .select, .controls .btn { width: 100%; min-width: 0; }
+      /* 接続ボタン行だけ横並び */
+      .btn-row { flex-direction: row !important; }
+      .btn-row .btn { flex: 1; }
+
+      /* 絞り込み：店舗select フル幅、タブはスクロール */
+      #storeSelect { width: 100%; }
+      #periodTabs {
+        overflow-x: auto; -webkit-overflow-scrolling: touch;
+        flex-wrap: nowrap; width: 100%;
+        padding-bottom: 4px;
+      }
+      #periodTabs::-webkit-scrollbar { display: none; }
+      .chart-tab { white-space: nowrap; padding: 5px 12px; font-size: 0.82rem; }
+      #reloadBtn { width: 100%; }
+
+      /* KPI: 2列固定 */
+      .kpi-grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+      .kpi-card { padding: 10px 10px; }
+      .kpi-value { font-size: 1.3rem; }
+      .kpi-label { font-size: 0.72rem; }
+
+      /* charts */
+      .chart-card { padding: 12px; }
+      .chart-wrap { height: 220px; }
+      .chart-wrap.tall { height: 250px; }
+      .chart-head { margin-bottom: 8px; }
+      .chart-title { font-size: 0.88rem; }
+      /* 天候バッジをコンパクト化 */
+      .weather-badge { font-size: 0.72rem; gap: 6px; }
+      #weatherStatus { display: none; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <header class="hero">
+    <h1>売上分析</h1>
+    <p>レシートデータの多角的な分析ダッシュボード</p>
+    <div class="status">
+      <span id="authState" class="pill">未接続</span>
+      <span id="lastRefresh" class="pill">最終更新: なし</span>
+      <a href="./sales.html" class="pill link">月次グラフ</a>
+      <a href="./index.html" class="pill link">管理画面</a>
+      <button id="themeBtn" type="button" class="pill">ライトモード</button>
+    </div>
+  </header>
+
+  <!-- Auth -->
+  <section class="card" id="authCard">
+    <h2 class="card-title">接続</h2>
+    <div class="controls">
+      <input id="projectUrlInput" class="input" type="text" readonly tabindex="-1">
+      <input id="tokenInput" class="input" type="password" placeholder="ADMIN_DASHBOARD_TOKEN">
+      <div class="controls btn-row">
+        <button id="saveTokenBtn" class="btn primary">保存して接続</button>
+        <button id="clearTokenBtn" class="btn">削除</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Filters -->
+  <section class="card">
+    <h2 class="card-title">絞り込み</h2>
+    <div class="controls">
+      <select id="storeSelect" class="select" aria-label="店舗選択">
+        <option value="">（店舗を選択）</option>
+      </select>
+      <div class="chart-tab-group" id="periodTabs">
+        <button class="chart-tab active" data-period="month">今月</button>
+        <button class="chart-tab" data-period="prev">先月</button>
+        <button class="chart-tab" data-period="3m">3ヶ月</button>
+        <button class="chart-tab" data-period="6m">6ヶ月</button>
+        <button class="chart-tab" data-period="12m">12ヶ月</button>
+      </div>
+      <button id="reloadBtn" class="btn primary">再読み込み</button>
+    </div>
+    <div id="filterMeta" class="meta">未取得</div>
+  </section>
+
+  <!-- KPI -->
+  <section class="card">
+    <h2 class="card-title">月間サマリー <span id="kpiPeriodLabel" style="font-size:0.85rem;color:var(--sub);font-weight:400"></span></h2>
+    <div class="kpi-grid" id="kpiGrid">
+      <div class="kpi-card"><div class="kpi-label">月間総売上</div><div class="kpi-value" id="kpiGross">-</div></div>
+      <div class="kpi-card"><div class="kpi-label">月間純売上</div><div class="kpi-value" id="kpiNet">-</div></div>
+      <div class="kpi-card"><div class="kpi-label">月間会計組数</div><div class="kpi-value" id="kpiParty">-</div><div class="kpi-sub" id="kpiPartyAvg"></div></div>
+      <div class="kpi-card"><div class="kpi-label">月間客数</div><div class="kpi-value" id="kpiGuest">-</div><div class="kpi-sub" id="kpiGuestAvg"></div></div>
+      <div class="kpi-card"><div class="kpi-label">客単価（平均）</div><div class="kpi-value" id="kpiUnit">-</div></div>
+      <div class="kpi-card"><div class="kpi-label">営業日数</div><div class="kpi-value" id="kpiDays">-</div><div class="kpi-sub" id="kpiReceipts"></div></div>
+    </div>
+  </section>
+
+  <!-- Charts -->
+  <div class="charts-grid">
+
+    <!-- Chart 1: 日次売上推移 + 降水量 -->
+    <div class="chart-card">
+      <div class="chart-head">
+        <span class="chart-title">日次売上推移</span>
+        <div class="weather-badge">
+          <span><span class="weather-dot" style="background:var(--c-rain)"></span>降水量</span>
+          <span><span class="weather-dot" style="background:var(--c-temp)"></span>最高気温</span>
+          <span id="weatherStatus" style="color:var(--sub)"></span>
+        </div>
+      </div>
+      <div class="chart-wrap tall" style="position:relative">
+        <canvas id="chartDaily"></canvas>
+        <div class="loading-overlay" id="loadingDaily">読み込み中…</div>
+      </div>
+    </div>
+
+    <!-- Charts row: 曜日別 + 客数組数 -->
+    <div class="charts-row">
+      <div class="chart-card">
+        <div class="chart-head">
+          <span class="chart-title">曜日別平均</span>
+          <div class="chart-tab-group" id="weekdayMetricTabs">
+            <button class="chart-tab active" data-metric="gross">売上</button>
+            <button class="chart-tab" data-metric="guest">客数</button>
+            <button class="chart-tab" data-metric="party">組数</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chartWeekday"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-head">
+          <span class="chart-title">客数・組数推移</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chartCount"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart 4: 天候相関 散布図 -->
+    <div class="charts-row">
+      <div class="chart-card">
+        <div class="chart-head">
+          <span class="chart-title">天候相関（気温 vs 売上）</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chartTempScatter"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-head">
+          <span class="chart-title">天候相関（降水量 vs 売上）</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="chartRainScatter"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart 5: 月別推移 -->
+    <div class="chart-card">
+      <div class="chart-head">
+        <span class="chart-title">月別売上推移（直近12ヶ月）</span>
+      </div>
+      <div class="chart-wrap tall" style="position:relative">
+        <canvas id="chartMonthly"></canvas>
+        <div class="loading-overlay" id="loadingMonthly">読み込み中…</div>
+      </div>
+    </div>
+
+  </div><!-- /charts-grid -->
+</div><!-- /app -->
+
+<script>
+'use strict';
+
+const TOKEN_KEY = 'line_summary_admin_token';
+const THEME_KEY = 'line_reservation_calendar_theme';
+const PROJECT_URL = 'https://jhpmzqxqvapdkyvvhyra.supabase.co';
+
+/* ── store coordinates for weather (store_partition_key → {lat,lon}) ── */
+const STORE_COORDS = {
+  bistrocavacava: { lat: 35.6870, lon: 139.7210 },
+};
+
+/* ── state ── */
+const state = {
+  theme: localStorage.getItem(THEME_KEY) || 'dark',
+  period: 'month',    // month | prev | 3m | 6m | 12m
+  storeKey: '',
+  storeOptions: [],
+  dailySeries: [],    // [{date, gross_sales_yen, net_sales_yen, party_count, guest_count, receipt_count}]
+  monthlySeries: [],  // [{month, gross_sales_yen, ...}]
+  weather: {},        // date → {temp, rain}
+  charts: {},
+  weekdayMetric: 'gross',
+};
+
+/* ── dom refs ── */
+const $ = (id) => document.getElementById(id);
+const dom = {
+  authState: $('authState'), lastRefresh: $('lastRefresh'),
+  projectUrl: $('projectUrlInput'), tokenInput: $('tokenInput'),
+  saveToken: $('saveTokenBtn'), clearToken: $('clearTokenBtn'),
+  storeSelect: $('storeSelect'), reloadBtn: $('reloadBtn'),
+  filterMeta: $('filterMeta'), themeBtn: $('themeBtn'),
+  kpiPeriodLabel: $('kpiPeriodLabel'),
+  kpiGross: $('kpiGross'), kpiNet: $('kpiNet'),
+  kpiParty: $('kpiParty'), kpiPartyAvg: $('kpiPartyAvg'),
+  kpiGuest: $('kpiGuest'), kpiGuestAvg: $('kpiGuestAvg'),
+  kpiUnit: $('kpiUnit'), kpiDays: $('kpiDays'), kpiReceipts: $('kpiReceipts'),
+  weatherStatus: $('weatherStatus'),
+  loadingDaily: $('loadingDaily'), loadingMonthly: $('loadingMonthly'),
+};
+
+/* ── helpers ── */
+function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+function removeToken() { localStorage.removeItem(TOKEN_KEY); }
+
+function yen(v) {
+  if (v == null) return '-';
+  return '¥' + Number(v).toLocaleString('ja-JP');
+}
+function num(v) { return v == null ? '-' : Number(v).toLocaleString('ja-JP'); }
+
+function currentJstMonth() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit' }).formatToParts(now);
+  const y = parts.find(p => p.type === 'year')?.value;
+  const m = parts.find(p => p.type === 'month')?.value;
+  return `${y}-${m}`;
+}
+
+function prevMonth(m) {
+  const [y, mo] = m.split('-').map(Number);
+  return mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`;
+}
+
+function periodToMonths(period) {
+  if (period === 'month') return [currentJstMonth()];
+  if (period === 'prev') return [prevMonth(currentJstMonth())];
+  const n = parseInt(period);
+  const cur = currentJstMonth();
+  const result = [];
+  for (let i = n - 1; i >= 0; i--) {
+    let [y, mo] = cur.split('-').map(Number);
+    const total = y * 12 + mo - 1 - i;
+    result.push(`${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, '0')}`);
+  }
+  return result;
+}
+
+function dateRange(months) {
+  const sorted = [...months].sort();
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const [y, mo] = last.split('-').map(Number);
+  const ny = mo === 12 ? y + 1 : y;
+  const nm = mo === 12 ? 1 : mo + 1;
+  return {
+    from: `${first}-01`,
+    to: `${String(ny).padStart(4,'0')}-${String(nm).padStart(2,'0')}-01`,
+  };
+}
+
+function dayOfWeek(dateStr) {
+  // 0=Sun ... 6=Sat
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+/* ── auth ── */
+function updateAuthBadge() {
+  const ok = !!getToken();
+  dom.authState.textContent = ok ? 'トークン保存済み' : '未接続';
+  dom.authState.classList.toggle('ok', ok);
+  dom.projectUrl.value = PROJECT_URL;
+  // モバイル: トークン保存済みなら接続カードを折りたたむ
+  const authCard = document.getElementById('authCard');
+  if (authCard) authCard.style.display = ok ? 'none' : '';
+}
+
+dom.saveToken.addEventListener('click', () => {
+  const t = dom.tokenInput.value.trim();
+  if (!t) return alert('トークンを入力してください。');
+  setToken(t);
+  dom.tokenInput.value = '';
+  updateAuthBadge();
+  loadAll();
+});
+
+dom.clearToken.addEventListener('click', () => {
+  removeToken();
+  dom.tokenInput.value = '';
+  updateAuthBadge();
+});
+
+/* ── theme ── */
+function applyTheme(t) {
+  state.theme = t;
+  document.body.setAttribute('data-theme', t);
+  dom.themeBtn.textContent = t === 'dark' ? 'ライトモード' : 'ダークモード';
+  localStorage.setItem(THEME_KEY, t);
+  refreshAllCharts();
+}
+
+dom.themeBtn.addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
+
+/* ── period tabs ── */
+document.getElementById('periodTabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-period]');
+  if (!btn) return;
+  document.querySelectorAll('#periodTabs .chart-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  state.period = btn.dataset.period;
+  loadAll();
+});
+
+/* ── weekday metric tabs ── */
+document.getElementById('weekdayMetricTabs').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-metric]');
+  if (!btn) return;
+  document.querySelectorAll('#weekdayMetricTabs .chart-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  state.weekdayMetric = btn.dataset.metric;
+  renderWeekdayChart();
+});
+
+/* ── reload ── */
+dom.reloadBtn.addEventListener('click', loadAll);
+
+/* ── store select ── */
+dom.storeSelect.addEventListener('change', () => {
+  state.storeKey = dom.storeSelect.value;
+  loadAll();
+});
+
+/* ── API fetch ── */
+async function apiFetch(path) {
+  const token = getToken();
+  if (!token) throw new Error('トークンが未設定です。');
+  const url = PROJECT_URL.replace(/\/+$/, '') + '/functions/v1/admin-api' + path;
+  const res = await fetch(url, { headers: { 'x-admin-token': token } });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API error ${res.status}: ${text.slice(0, 120)}`);
+  }
+  return res.json();
+}
+
+/* ── weather fetch (Open-Meteo, direct from browser) ── */
+async function fetchWeather(storeKey, fromDate, toDate) {
+  const coords = STORE_COORDS[storeKey];
+  if (!coords) return {};
+  const params = new URLSearchParams({
+    latitude: coords.lat,
+    longitude: coords.lon,
+    start_date: fromDate,
+    end_date: toDate,
+    daily: 'temperature_2m_max,precipitation_sum',
+    timezone: 'Asia/Tokyo',
+  });
+  try {
+    const res = await fetch(`https://archive-api.open-meteo.com/v1/archive?${params}`);
+    if (!res.ok) return {};
+    const data = await res.json();
+    const dates = data?.daily?.time ?? [];
+    const temps = data?.daily?.temperature_2m_max ?? [];
+    const rains = data?.daily?.precipitation_sum ?? [];
+    const map = {};
+    dates.forEach((d, i) => { map[d] = { temp: temps[i], rain: rains[i] }; });
+    return map;
+  } catch {
+    return {};
+  }
+}
+
+/* ── main load ── */
+async function loadAll() {
+  const token = getToken();
+  if (!token) { dom.filterMeta.textContent = 'トークンを保存してください。'; return; }
+
+  const months = periodToMonths(state.period);
+  const { from, to } = dateRange(months);
+  const isSingleMonth = months.length === 1;
+  const displayMonth = months[months.length - 1];
+
+  dom.filterMeta.textContent = '読み込み中…';
+  dom.loadingDaily.classList.add('show');
+  dom.loadingMonthly.classList.add('show');
+
+  try {
+    // Fetch daily data for the selected period (use first month for store list if needed)
+    const monthParam = isSingleMonth ? months[0] : displayMonth;
+    const salesData = await apiFetch(`/receipts/sales?month=${monthParam}&store_key=${state.storeKey}`);
+
+    // Update store options (from first load)
+    if (salesData.store_options?.length) {
+      updateStoreSelect(salesData.store_options, salesData.selected_store_key);
+    }
+    if (!state.storeKey && salesData.selected_store_key) {
+      state.storeKey = salesData.selected_store_key;
+    }
+
+    // For multi-month, fetch all months in parallel and merge
+    let dailySeries = salesData.series ?? [];
+    if (!isSingleMonth) {
+      const otherMonths = months.slice(0, -1);
+      const extra = await Promise.all(
+        otherMonths.map(m => apiFetch(`/receipts/sales?month=${m}&store_key=${state.storeKey}`).catch(() => null))
+      );
+      for (const d of extra) {
+        if (d?.series) dailySeries = [...d.series, ...dailySeries];
+      }
+    }
+    state.dailySeries = dailySeries;
+
+    // Monthly trend (always 12m)
+    const monthlyData = await apiFetch(`/analytics/monthly?months=12&store_key=${state.storeKey}`).catch(() => null);
+    state.monthlySeries = monthlyData?.series ?? [];
+
+    // Weather
+    dom.weatherStatus.textContent = '天候取得中…';
+    state.weather = await fetchWeather(state.storeKey, from, to);
+    const weatherCount = Object.keys(state.weather).length;
+    dom.weatherStatus.textContent = weatherCount > 0 ? `天候データ ${weatherCount}日分` : '天候データなし';
+
+    // KPI
+    const totals = salesData.totals;
+    dom.kpiPeriodLabel.textContent = isSingleMonth ? `（${displayMonth}）` : `（${months[0]}〜${displayMonth}）`;
+    dom.kpiGross.textContent = yen(totals?.total_gross_sales_yen);
+    dom.kpiNet.textContent = yen(totals?.total_net_sales_yen);
+    dom.kpiParty.textContent = num(totals?.total_party_count) + ' 組';
+    dom.kpiPartyAvg.textContent = totals?.avg_party_count ? `1日平均 ${totals.avg_party_count} 組` : '';
+    dom.kpiGuest.textContent = num(totals?.total_guest_count) + ' 名';
+    dom.kpiGuestAvg.textContent = totals?.avg_guest_count ? `1日平均 ${totals.avg_guest_count} 名` : '';
+    dom.kpiUnit.textContent = yen(totals?.avg_unit_price_yen);
+    const activeDays = dailySeries.filter(d => d.receipt_count > 0).length;
+    dom.kpiDays.textContent = activeDays + ' 日';
+    dom.kpiReceipts.textContent = totals?.receipt_count ? `レシート ${totals.receipt_count} 件` : '';
+
+    dom.filterMeta.textContent = `対象: ${salesData.selected_store_name ?? '-'} / ${months.length === 1 ? displayMonth : months[0] + '〜' + displayMonth} / レシート ${totals?.receipt_count ?? 0}件`;
+    dom.lastRefresh.textContent = '最終更新: ' + new Date().toLocaleTimeString('ja-JP');
+
+    renderAllCharts();
+  } catch (e) {
+    dom.filterMeta.textContent = 'エラー: ' + e.message;
+  } finally {
+    dom.loadingDaily.classList.remove('show');
+    dom.loadingMonthly.classList.remove('show');
+  }
+}
+
+function updateStoreSelect(options, selectedKey) {
+  const prev = dom.storeSelect.value || state.storeKey;
+  dom.storeSelect.innerHTML = '';
+  for (const opt of options) {
+    const el = document.createElement('option');
+    el.value = opt.store_key;
+    el.textContent = opt.store_name;
+    dom.storeSelect.appendChild(el);
+  }
+  const match = options.find(o => o.store_key === prev);
+  if (match) dom.storeSelect.value = match.store_key;
+  state.storeOptions = options;
+}
+
+/* ── Chart.js defaults ── */
+function chartDefaults() {
+  const isDark = state.theme === 'dark';
+  return {
+    gridColor: isDark ? 'rgba(155,220,255,0.12)' : 'rgba(45,106,151,0.15)',
+    tickColor: isDark ? '#a6cadf' : '#4f7187',
+    legendColor: isDark ? '#e7f6ff' : '#132a3b',
+  };
+}
+
+function destroyChart(key) {
+  if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; }
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.body).getPropertyValue(name).trim();
+}
+
+/* ── Chart 1: daily sales + weather ── */
+function renderDailyChart() {
+  destroyChart('daily');
+  const series = state.dailySeries;
+  if (!series.length) return;
+  const { gridColor, tickColor, legendColor } = chartDefaults();
+  const labels = series.map(d => d.date.slice(5)); // MM-DD
+  const gross = series.map(d => d.gross_sales_yen);
+  const net = series.map(d => d.net_sales_yen);
+  const rain = series.map(d => state.weather[d.date]?.rain ?? null);
+  const temp = series.map(d => state.weather[d.date]?.temp ?? null);
+
+  const datasets = [
+    {
+      type: 'bar', label: '降水量(mm)', data: rain, yAxisID: 'yRain',
+      backgroundColor: 'rgba(122,180,255,0.35)', borderColor: 'rgba(122,180,255,0.7)',
+      borderWidth: 1, order: 3,
+    },
+    {
+      type: 'line', label: '総売上', data: gross, yAxisID: 'ySales',
+      borderColor: cssVar('--c-gross'), backgroundColor: 'rgba(89,220,255,0.1)',
+      tension: 0.3, pointRadius: 3, fill: true, order: 1,
+    },
+    {
+      type: 'line', label: '純売上', data: net, yAxisID: 'ySales',
+      borderColor: cssVar('--c-net'), backgroundColor: 'transparent',
+      tension: 0.3, pointRadius: 2, borderDash: [4, 3], order: 2,
+    },
+    {
+      type: 'line', label: '最高気温(℃)', data: temp, yAxisID: 'yTemp',
+      borderColor: cssVar('--c-temp'), backgroundColor: 'transparent',
+      tension: 0.4, pointRadius: 2, borderDash: [2, 4], order: 2,
+    },
+  ];
+
+  state.charts.daily = new Chart($('chartDaily').getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: legendColor, font: { size: 11 } } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const v = ctx.raw;
+              if (v == null) return null;
+              if (ctx.dataset.yAxisID === 'ySales') return ` ${ctx.dataset.label}: ¥${Number(v).toLocaleString()}`;
+              if (ctx.dataset.yAxisID === 'yTemp') return ` 最高気温: ${v}℃`;
+              if (ctx.dataset.yAxisID === 'yRain') return ` 降水量: ${v}mm`;
+              return ` ${ctx.dataset.label}: ${v}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: tickColor, font: { size: 10 }, maxRotation: 45 }, grid: { color: gridColor } },
+        ySales: {
+          type: 'linear', position: 'left', ticks: { color: tickColor, font: { size: 10 }, callback: v => '¥' + (v/10000).toFixed(0) + '万' },
+          grid: { color: gridColor },
+        },
+        yRain: {
+          type: 'linear', position: 'right', min: 0,
+          ticks: { color: cssVar('--c-rain'), font: { size: 10 }, callback: v => v + 'mm' },
+          grid: { display: false },
+        },
+        yTemp: {
+          type: 'linear', position: 'right', display: false,
+        },
+      },
+    },
+  });
+}
+
+/* ── Chart 2: weekday avg ── */
+function renderWeekdayChart() {
+  destroyChart('weekday');
+  const series = state.dailySeries.filter(d => d.receipt_count > 0);
+  if (!series.length) return;
+  const { gridColor, tickColor, legendColor } = chartDefaults();
+  const DOW = ['日', '月', '火', '水', '木', '金', '土'];
+  const buckets = Array.from({ length: 7 }, () => ({ sum: 0, count: 0 }));
+  for (const d of series) {
+    const dow = dayOfWeek(d.date);
+    const metric = state.weekdayMetric === 'gross' ? d.gross_sales_yen
+      : state.weekdayMetric === 'guest' ? d.guest_count : d.party_count;
+    buckets[dow].sum += metric;
+    buckets[dow].count += 1;
+  }
+  const avgs = buckets.map(b => b.count > 0 ? Math.round(b.sum / b.count) : 0);
+  const maxAvg = Math.max(...avgs);
+  const bgColors = DOW.map((_, i) => {
+    if (i === 0 || i === 6) return 'rgba(255,156,159,0.7)'; // 休日
+    return 'rgba(89,220,255,0.55)';
+  });
+
+  const labelMap = { gross: '平均総売上', guest: '平均客数', party: '平均組数' };
+  const valueLabel = state.weekdayMetric === 'gross'
+    ? v => '¥' + Number(v).toLocaleString()
+    : v => v + (state.weekdayMetric === 'guest' ? '名' : '組');
+
+  state.charts.weekday = new Chart($('chartWeekday').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: DOW,
+      datasets: [{
+        label: labelMap[state.weekdayMetric], data: avgs,
+        backgroundColor: bgColors, borderRadius: 6, borderSkipped: false,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ' ' + valueLabel(ctx.raw) } },
+      },
+      scales: {
+        x: { ticks: { color: tickColor, font: { size: 12 } }, grid: { color: gridColor } },
+        y: { ticks: { color: tickColor, font: { size: 10 }, callback: valueLabel }, grid: { color: gridColor }, beginAtZero: true },
+      },
+    },
+  });
+}
+
+/* ── Chart 3: guest / party count ── */
+function renderCountChart() {
+  destroyChart('count');
+  const series = state.dailySeries;
+  if (!series.length) return;
+  const { gridColor, tickColor, legendColor } = chartDefaults();
+  const labels = series.map(d => d.date.slice(5));
+
+  state.charts.count = new Chart($('chartCount').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: '客数', data: series.map(d => d.guest_count),
+          borderColor: cssVar('--c-guest'), backgroundColor: 'rgba(255,159,191,0.08)',
+          tension: 0.3, pointRadius: 3, fill: true,
+        },
+        {
+          label: '組数', data: series.map(d => d.party_count),
+          borderColor: cssVar('--c-party'), backgroundColor: 'transparent',
+          tension: 0.3, pointRadius: 3, borderDash: [5, 3],
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: legendColor, font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: tickColor, font: { size: 10 }, maxRotation: 45 }, grid: { color: gridColor } },
+        y: { ticks: { color: tickColor, font: { size: 10 } }, grid: { color: gridColor }, beginAtZero: true },
+      },
+    },
+  });
+}
+
+function showNoData(canvasId, message = 'データなし') {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = 'rgba(166,202,223,0.4)';
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(message, canvas.width / 2, canvas.height / 2);
+}
+
+/* ── Chart 4a: temp scatter ── */
+function renderTempScatter() {
+  destroyChart('tempScatter');
+  const pts = state.dailySeries
+    .filter(d => d.receipt_count > 0 && state.weather[d.date]?.temp != null)
+    .map(d => ({ x: state.weather[d.date].temp, y: d.gross_sales_yen, date: d.date }));
+  if (!pts.length) { showNoData('chartTempScatter', '天候データなし（過去月を選択してください）'); return; }
+  const { gridColor, tickColor, legendColor } = chartDefaults();
+
+  state.charts.tempScatter = new Chart($('chartTempScatter').getContext('2d'), {
+    type: 'scatter',
+    data: {
+      datasets: [{
+        label: '総売上 vs 最高気温',
+        data: pts,
+        backgroundColor: 'rgba(255,179,71,0.65)',
+        pointRadius: 6, pointHoverRadius: 8,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => [`${ctx.raw.date}`, `気温: ${ctx.raw.x}℃`, `売上: ¥${Number(ctx.raw.y).toLocaleString()}`],
+          },
+        },
+      },
+      scales: {
+        x: { title: { display: true, text: '最高気温 (℃)', color: tickColor }, ticks: { color: tickColor }, grid: { color: gridColor } },
+        y: { title: { display: true, text: '総売上', color: tickColor }, ticks: { color: tickColor, callback: v => '¥' + (v/10000).toFixed(0) + '万' }, grid: { color: gridColor } },
+      },
+    },
+  });
+}
+
+/* ── Chart 4b: rain scatter ── */
+function renderRainScatter() {
+  destroyChart('rainScatter');
+  const pts = state.dailySeries
+    .filter(d => d.receipt_count > 0 && state.weather[d.date]?.rain != null)
+    .map(d => ({ x: state.weather[d.date].rain, y: d.gross_sales_yen, date: d.date }));
+  if (!pts.length) { showNoData('chartRainScatter', '天候データなし（過去月を選択してください）'); return; }
+  const { gridColor, tickColor } = chartDefaults();
+
+  state.charts.rainScatter = new Chart($('chartRainScatter').getContext('2d'), {
+    type: 'scatter',
+    data: {
+      datasets: [{
+        label: '総売上 vs 降水量',
+        data: pts,
+        backgroundColor: 'rgba(122,180,255,0.65)',
+        pointRadius: 6, pointHoverRadius: 8,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => [`${ctx.raw.date}`, `降水量: ${ctx.raw.x}mm`, `売上: ¥${Number(ctx.raw.y).toLocaleString()}`],
+          },
+        },
+      },
+      scales: {
+        x: { title: { display: true, text: '降水量 (mm)', color: tickColor }, ticks: { color: tickColor }, grid: { color: gridColor }, min: 0 },
+        y: { title: { display: true, text: '総売上', color: tickColor }, ticks: { color: tickColor, callback: v => '¥' + (v/10000).toFixed(0) + '万' }, grid: { color: gridColor } },
+      },
+    },
+  });
+}
+
+/* ── Chart 5: monthly trend ── */
+function renderMonthlyChart() {
+  destroyChart('monthly');
+  const series = state.monthlySeries;
+  if (!series.length) { showNoData('chartMonthly', 'データなし'); return; }
+  const { gridColor, tickColor, legendColor } = chartDefaults();
+  const labels = series.map(d => d.month.slice(0, 7));
+
+  state.charts.monthly = new Chart($('chartMonthly').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar', label: '月間総売上',
+          data: series.map(d => d.gross_sales_yen),
+          backgroundColor: 'rgba(89,220,255,0.5)', borderColor: cssVar('--c-gross'),
+          borderWidth: 1, yAxisID: 'ySales', order: 2,
+        },
+        {
+          type: 'line', label: '月間客数',
+          data: series.map(d => d.guest_count),
+          borderColor: cssVar('--c-guest'), backgroundColor: 'transparent',
+          tension: 0.3, pointRadius: 4, yAxisID: 'yCount', order: 1,
+        },
+        {
+          type: 'line', label: '月間組数',
+          data: series.map(d => d.party_count),
+          borderColor: cssVar('--c-party'), backgroundColor: 'transparent',
+          tension: 0.3, pointRadius: 4, yAxisID: 'yCount', order: 1, borderDash: [5, 3],
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: legendColor, font: { size: 11 } } } },
+      scales: {
+        x: { ticks: { color: tickColor, font: { size: 11 } }, grid: { color: gridColor } },
+        ySales: {
+          type: 'linear', position: 'left',
+          ticks: { color: tickColor, font: { size: 10 }, callback: v => '¥' + (v/10000).toFixed(0) + '万' },
+          grid: { color: gridColor },
+        },
+        yCount: {
+          type: 'linear', position: 'right',
+          ticks: { color: tickColor, font: { size: 10 } },
+          grid: { display: false }, beginAtZero: true,
+        },
+      },
+    },
+  });
+}
+
+function renderAllCharts() {
+  renderDailyChart();
+  renderWeekdayChart();
+  renderCountChart();
+  renderTempScatter();
+  renderRainScatter();
+  renderMonthlyChart();
+}
+
+function refreshAllCharts() {
+  // Re-render after theme change
+  renderAllCharts();
+}
+
+/* ── init ── */
+applyTheme(state.theme);
+updateAuthBadge();
+dom.tokenInput.value = getToken() ? '' : '';
+if (getToken()) loadAll();
+</script>
+</body>
+</html>

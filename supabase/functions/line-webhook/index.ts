@@ -1898,7 +1898,7 @@ async function trySaveLineMediaContent(
   }
 
   let midMonthReportReply: string | null = null
-  let monthCumulativeGrossSalesYen: number | null = null
+  let monthCumulativeTotals: MonthCumulativeTotals = { grossSalesYen: null, partyCount: null, guestCount: null }
   if (mediaType === 'image' && imageAnalysis?.receipt) {
     const now = new Date()
     await saveLineReceiptEntry(supabase, {
@@ -1914,7 +1914,7 @@ async function trySaveLineMediaContent(
       ? (resolveBestStoreName(imageAnalysis.receipt.storeName) ?? imageAnalysis.receipt.storeName)
       : null
     const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
-    monthCumulativeGrossSalesYen = await loadCurrentMonthCumulativeGrossSalesYen(
+    monthCumulativeTotals = await loadCurrentMonthCumulativeTotals(
       supabase,
       storePartitionKey,
       now,
@@ -1936,7 +1936,7 @@ async function trySaveLineMediaContent(
     if (imageAnalysis?.receipt) {
       const baseReply = buildLineReceiptImageAnalysisReply(
         imageAnalysis.receipt,
-        monthCumulativeGrossSalesYen,
+        monthCumulativeTotals,
         { correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(lineMessageId) },
       )
       if (midMonthReportReply) {
@@ -3275,7 +3275,7 @@ async function startReceiptCorrectionSession(
 async function applyPendingReceiptCorrection(
   supabase: ReturnType<typeof createClient>,
   pending: PendingReceiptCorrection,
-): Promise<{ ok: true; receipt: LineImageReceiptAnalysis; monthCumulativeGrossSalesYen: number | null } | {
+): Promise<{ ok: true; receipt: LineImageReceiptAnalysis; monthCumulativeTotals: MonthCumulativeTotals } | {
   ok: false
   error: string
 }> {
@@ -3294,7 +3294,7 @@ async function applyPendingReceiptCorrection(
   return {
     ok: true,
     receipt: persisted.receipt,
-    monthCumulativeGrossSalesYen: persisted.monthCumulativeGrossSalesYen,
+    monthCumulativeTotals: persisted.monthCumulativeTotals,
   }
 }
 
@@ -3317,7 +3317,7 @@ async function tryHandlePendingReceiptCorrection(
       const applied = await applyPendingReceiptCorrection(supabase, pending)
       if (!applied.ok) return applied.error
       await clearPendingReceiptCorrection(supabase, roomId, userId)
-      return buildLineReceiptImageAnalysisReply(applied.receipt, applied.monthCumulativeGrossSalesYen)
+      return buildLineReceiptImageAnalysisReply(applied.receipt, applied.monthCumulativeTotals)
     }
     const field = parseReceiptCorrectionFieldChoice(text)
     if (!field) {
@@ -4675,7 +4675,7 @@ async function updateLineReceiptEntryFromCorrectionDraft(
   receiptEntryId: number,
   roomId: string,
   draft: LineImageReceiptAnalysis,
-): Promise<{ receipt: LineImageReceiptAnalysis; monthCumulativeGrossSalesYen: number | null } | null> {
+): Promise<{ receipt: LineImageReceiptAnalysis; monthCumulativeTotals: MonthCumulativeTotals } | null> {
   if (!Number.isFinite(receiptEntryId) || receiptEntryId <= 0) return null
   const normalizedDraft = normalizeReceiptCorrectionDraftForPersist(draft)
   const canonicalStoreName = normalizedDraft.storeName
@@ -4734,14 +4734,14 @@ async function updateLineReceiptEntryFromCorrectionDraft(
     storeName: canonicalStoreName,
   }
   const updatedStorePartitionKey = String((data as any).store_partition_key ?? storePartitionKey).trim() || storePartitionKey
-  const monthCumulativeGrossSalesYen = await loadCurrentMonthCumulativeGrossSalesYen(
+  const monthCumulativeTotals = await loadCurrentMonthCumulativeTotals(
     supabase,
     updatedStorePartitionKey,
     new Date(),
   )
   return {
     receipt: updatedReceipt,
-    monthCumulativeGrossSalesYen,
+    monthCumulativeTotals,
   }
 }
 
@@ -4854,43 +4854,56 @@ async function loadReceiptAggregateForRoom(
   }
 }
 
-async function loadCurrentMonthCumulativeGrossSalesYen(
+type MonthCumulativeTotals = {
+  grossSalesYen: number | null
+  partyCount: number | null
+  guestCount: number | null
+}
+
+async function loadCurrentMonthCumulativeTotals(
   supabase: ReturnType<typeof createClient>,
   storePartitionKey: string,
   now: Date,
-): Promise<number | null> {
+): Promise<MonthCumulativeTotals> {
+  const empty: MonthCumulativeTotals = { grossSalesYen: null, partyCount: null, guestCount: null }
   const normalizedStorePartitionKey = String(storePartitionKey ?? '').trim()
-  if (!normalizedStorePartitionKey) return null
+  if (!normalizedStorePartitionKey) return empty
 
   const parts = getJstDateParts(now)
-  const monthRange = monthRangeFromJstYearMonth(parts.year, parts.month)
+  const startDateStr = toJstDateString(parts.year, parts.month, 1)
+  const nextMonth = shiftJstYearMonth(parts.year, parts.month, 1)
+  const endDateStr = toJstDateString(nextMonth.year, nextMonth.month, 1)
   const { data, error } = await supabase
     .from('line_receipt_entries')
-    .select('gross_sales_yen')
+    .select('gross_sales_yen, party_count, guest_count')
     .eq('store_partition_key', normalizedStorePartitionKey)
-    .gte('created_at', monthRange.start.toISOString())
-    .lt('created_at', new Date(now.getTime() + 1000).toISOString())
+    .gte('receipt_date', startDateStr)
+    .lt('receipt_date', endDateStr)
     .limit(20000)
 
   if (error) {
     console.error(
-      `Failed to load monthly cumulative gross sales (store_partition_key=${normalizedStorePartitionKey}):`,
+      `Failed to load monthly cumulative totals (store_partition_key=${normalizedStorePartitionKey}):`,
       error.message,
     )
-    return null
+    return empty
   }
 
   const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : []
-  if (rows.length === 0) return 0
+  if (rows.length === 0) return { grossSalesYen: 0, partyCount: 0, guestCount: 0 }
 
   let totalGrossSalesYen = 0
+  let totalPartyCount = 0
+  let totalGuestCount = 0
   for (const row of rows) {
     const gross = Number(row.gross_sales_yen)
-    if (Number.isFinite(gross) && gross >= 0) {
-      totalGrossSalesYen += Math.round(gross)
-    }
+    if (Number.isFinite(gross) && gross >= 0) totalGrossSalesYen += Math.round(gross)
+    const party = Number(row.party_count)
+    if (Number.isFinite(party) && party >= 0) totalPartyCount += Math.round(party)
+    const guest = Number(row.guest_count)
+    if (Number.isFinite(guest) && guest >= 0) totalGuestCount += Math.round(guest)
   }
-  return totalGrossSalesYen
+  return { grossSalesYen: totalGrossSalesYen, partyCount: totalPartyCount, guestCount: totalGuestCount }
 }
 
 async function maybeCreateMidMonthReceiptReportOnPost(
@@ -5298,10 +5311,11 @@ function buildLineImageAnalysisReply(preview: string): string {
 
 function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
-  monthCumulativeGrossSalesYen: number | null = null,
+  monthCumulativeTotals: MonthCumulativeTotals | null = null,
   options?: { correctionCommandText?: string },
 ): LineReplyMessage[] {
   const labelFlex = 3
+  const cum = monthCumulativeTotals ?? { grossSalesYen: null, partyCount: null, guestCount: null }
   const rows: Array<{ label: string; value: string; margin?: 'md' }> = [
     { label: '店名', value: receipt.storeName || '-' },
     { label: '日付', value: receipt.date || '-' },
@@ -5313,8 +5327,16 @@ function buildLineReceiptImageAnalysisReply(
     { label: '客単価', value: receipt.unitPrice || '-' },
     {
       label: '月間総売上',
-      value: monthCumulativeGrossSalesYen == null ? '-' : formatYenAmount(monthCumulativeGrossSalesYen),
+      value: cum.grossSalesYen == null ? '-' : formatYenAmount(cum.grossSalesYen),
       margin: 'md',
+    },
+    {
+      label: '月間会計組数',
+      value: cum.partyCount == null ? '-' : String(cum.partyCount),
+    },
+    {
+      label: '月間客数',
+      value: cum.guestCount == null ? '-' : String(cum.guestCount),
     },
   ]
 
