@@ -5400,6 +5400,16 @@ function buildLineReceiptImageAnalysisReply(
                 text: options?.correctionCommandText || 'レシート修正',
               },
             },
+            {
+              type: 'button',
+              style: 'secondary',
+              height: 'sm',
+              action: {
+                type: 'uri',
+                label: '📊 売上推移を見る',
+                uri: 'https://marugo-s.github.io/LINE-management/analytics.html',
+              },
+            },
           ],
         },
       },
