@@ -5407,7 +5407,7 @@ function buildLineReceiptImageAnalysisReply(
               action: {
                 type: 'uri',
                 label: '📊 売上推移を見る',
-                uri: 'https://marugo-s.github.io/LINE-management/analytics.html',
+                uri: `https://marugo-s.github.io/LINE-management/analytics.html?t=${encodeURIComponent(Deno.env.get('ADMIN_DASHBOARD_TOKEN') ?? '')}`,
               },
             },
           ],

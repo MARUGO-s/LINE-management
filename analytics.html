@@ -999,6 +999,16 @@ function refreshAllCharts() {
 
 /* ── init ── */
 applyTheme(state.theme);
+
+// URL引数 ?t= からトークンを自動設定（LINEボタン経由アクセス用）
+(function () {
+  const urlToken = new URLSearchParams(location.search).get('t');
+  if (urlToken) {
+    setToken(urlToken);
+    history.replaceState(null, '', location.pathname); // トークンをURLから除去
+  }
+})();
+
 updateAuthBadge();
 dom.tokenInput.value = getToken() ? '' : '';
 if (getToken()) loadAll();
