@@ -2033,7 +2033,9 @@ async function fetchReceiptSalesState(
     return collator.compare(a.store_key, b.store_key)
   })
 
-  const selectedStoreKey = selectedStoreKeyRaw && storeTotals.has(selectedStoreKeyRaw)
+  // store_key 指定あり → そのまま使用（データなしでも空で返す）
+  // store_key 指定なし → データのある最初の店舗をデフォルトに
+  const selectedStoreKey = selectedStoreKeyRaw
     ? selectedStoreKeyRaw
     : (storeOptions[0]?.store_key ?? "")
   const selectedStore = selectedStoreKey ? storeTotals.get(selectedStoreKey) ?? null : null
