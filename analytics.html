@@ -862,7 +862,7 @@ function renderTempScatter() {
   const pts = state.dailySeries
     .filter(d => d.receipt_count > 0 && state.weather[d.date]?.temp != null)
     .map(d => ({ x: state.weather[d.date].temp, y: d.gross_sales_yen, date: d.date }));
-  if (!pts.length) { showNoData('chartTempScatter', '天候データなし（過去月を選択してください）'); return; }
+  if (!pts.length) { showNoData('chartTempScatter', '天候データなし'); return; }
   const { gridColor, tickColor, legendColor } = chartDefaults();
 
   state.charts.tempScatter = new Chart($('chartTempScatter').getContext('2d'), {
@@ -899,7 +899,7 @@ function renderRainScatter() {
   const pts = state.dailySeries
     .filter(d => d.receipt_count > 0 && state.weather[d.date]?.rain != null)
     .map(d => ({ x: state.weather[d.date].rain, y: d.gross_sales_yen, date: d.date }));
-  if (!pts.length) { showNoData('chartRainScatter', '天候データなし（過去月を選択してください）'); return; }
+  if (!pts.length) { showNoData('chartRainScatter', '天候データなし'); return; }
   const { gridColor, tickColor } = chartDefaults();
 
   state.charts.rainScatter = new Chart($('chartRainScatter').getContext('2d'), {
