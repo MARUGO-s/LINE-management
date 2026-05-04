@@ -260,6 +260,7 @@ type RoomReplyPolicy = {
   calendarLowConfidenceConfirmReplyEnabled: boolean
   /** 無返信自動登録で高確度登録成功後、登録内容を LINE で返信する（bot_reply_enabled 併用） */
   calendarRegistrationReplyEnabled: boolean
+  receiptMidreportEnabled: boolean
   settingsSource: 'row' | 'fallback'
 }
 
@@ -1924,6 +1925,7 @@ async function trySaveLineMediaContent(
       roomId,
       lineMessageId,
       now,
+      roomReplyPolicy.receiptMidreportEnabled,
     )
   }
 
@@ -4946,7 +4948,9 @@ async function maybeCreateMidMonthReceiptReportOnPost(
   roomId: string,
   lineMessageId: string,
   now: Date,
+  receiptMidreportEnabled: boolean,
 ): Promise<Array<Record<string, unknown>> | null> {
+  if (!receiptMidreportEnabled) return null
   const parts = getJstDateParts(now)
   if (parts.day !== 15) return null
 
@@ -5515,6 +5519,7 @@ async function loadRoomReplyPolicy(
     calendarSilentAutoRegisterEnabled: false,
     calendarLowConfidenceConfirmReplyEnabled: false,
     calendarRegistrationReplyEnabled: false,
+    receiptMidreportEnabled: true,
     settingsSource: 'fallback',
   } satisfies RoomReplyPolicy
   const normalizedRoomId = String(roomId ?? '').trim()
@@ -5555,6 +5560,7 @@ async function loadRoomReplyPolicy(
     const calendarSilentAutoRegisterEnabled = data?.calendar_silent_auto_register_enabled === true
     const calendarLowConfidenceConfirmReplyEnabled = data?.calendar_low_confidence_confirm_reply_enabled === true
     const calendarRegistrationReplyEnabled = data?.calendar_registration_reply_enabled === true
+    const receiptMidreportEnabled = data?.receipt_midreport_enabled !== false
     const requiresRegistration =
       data?.is_enabled === false &&
       data?.bot_reply_enabled === false &&
@@ -5580,6 +5586,7 @@ async function loadRoomReplyPolicy(
       calendarSilentAutoRegisterEnabled,
       calendarLowConfidenceConfirmReplyEnabled,
       calendarRegistrationReplyEnabled,
+      receiptMidreportEnabled,
       settingsSource: 'row',
     }
     cache.set(normalizedRoomId, policy)
