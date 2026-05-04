@@ -968,13 +968,16 @@ function renderDailyChart() {
   // 祝日バンドを描くプラグイン
   const holidayPlugin = {
     id: 'holidayBands',
-    beforeDraw(chart) {
-      const { ctx, chartArea, scales } = chart;
-      if (!chartArea || !scales.x) return;
+    afterDraw(chart) {
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      // 総売上ライン（dataset index 1）の要素座標を使う（常にデータあり）
+      const meta = chart.getDatasetMeta(1);
+      if (!meta?.data?.length) return;
       ctx.save();
       const barW = chartArea.width / Math.max(series.length, 1);
       series.forEach((d, i) => {
-        const x = scales.x.getPixelForValue(i);
+        const x = meta.data[i]?.x;
         if (x == null) return;
         const dow = new Date(d.date).getDay(); // 0=日, 6=土
         const isHoliday = JAPANESE_HOLIDAYS.has(d.date);
@@ -1009,8 +1012,10 @@ function renderDailyChart() {
   const weatherIconPlugin = {
     id: 'weatherIcons',
     afterDraw(chart) {
-      const { ctx, chartArea, scales } = chart;
-      if (!chartArea || !scales.x) return;
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const meta = chart.getDatasetMeta(1);
+      if (!meta?.data?.length) return;
       ctx.save();
       ctx.font = '13px serif';
       ctx.textAlign = 'center';
@@ -1019,7 +1024,8 @@ function renderDailyChart() {
         const w = state.weather[d.date];
         const icon = weatherIcon(w?.rain ?? null, w?.temp ?? null);
         if (!icon) return;
-        const x = scales.x.getPixelForValue(i);
+        const x = meta.data[i]?.x;
+        if (x == null) return;
         const y = chartArea.bottom + 14;
         ctx.fillText(icon, x, y);
       });
