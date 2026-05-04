@@ -1648,7 +1648,12 @@ Deno.serve(async (req) => {
         }
         const replyResult = await replyLineMessage(replyToken, aiAutoCreateReply, lineAccessToken)
         if (!replyResult.ok) {
-          console.error('Failed to reply AI auto-create result:', replyResult.error)
+          console.error('Failed to reply AI auto-create result (reply):', replyResult.error)
+          // replyトークン失効（画像解析等の処理に30秒以上かかった場合）のためpush APIにフォールバック
+          const pushResult = await pushLineMessage(roomId, aiAutoCreateReply, lineAccessToken)
+          if (!pushResult.ok) {
+            console.error('Failed to push AI auto-create result (push):', pushResult.error)
+          }
         }
       }
     }
@@ -5358,9 +5363,8 @@ function buildLineReceiptImageAnalysisReply(
   const rows: Array<{ label: string; value: string; margin?: 'md' }> = [
     { label: '店名', value: receipt.storeName || '-' },
     { label: '日付', value: receipt.date || '-' },
-    { label: '純売上', value: receipt.netSales || '-' },
     { label: '消費税', value: receipt.taxAmount || '-' },
-    { label: '総売上', value: receipt.grossSales || '-' },
+    { label: '総売上（税込）', value: receipt.grossSales || '-' },
     { label: '会計組数', value: receipt.partyCount || '-' },
     { label: '客数', value: receipt.guestCount || '-' },
     { label: '客単価', value: receipt.unitPrice || '-' },
@@ -12343,4 +12347,44 @@ async function replyLineMessage(
     sentMessageIds = []
   }
   return { ok: true, sentMessageIds }
+}
+
+async function pushLineMessage(
+  to: string,
+  payload: LineReplyPayload,
+  channelAccessToken: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const maxMessages = 5
+  const preparedMessages = normalizeLineReplyMessages(payload)
+  const messages = applyLineReplyMessageLimit(preparedMessages, maxMessages)
+
+  const response = await fetch('https://api.line.me/v2/bot/message/push', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${channelAccessToken}`,
+    },
+    body: JSON.stringify({
+      to,
+      messages: messages.map((message) => {
+        if (message.type === 'flex') {
+          return {
+            type: 'flex',
+            altText: message.altText.slice(0, 400),
+            contents: message.contents,
+          }
+        }
+        return {
+          type: 'text',
+          text: message.text.slice(0, 4900),
+        }
+      }),
+    }),
+  })
+
+  if (!response.ok) {
+    const errText = await response.text()
+    return { ok: false, error: `LINE push API error (${response.status}): ${errText}` }
+  }
+  return { ok: true }
 }

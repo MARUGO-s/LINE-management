@@ -39,15 +39,69 @@
       --c-temp: #ffb347;
     }
     body[data-theme='light'] {
-      --bg0: #f5fbff; --bg1: #deedf8;
-      --card: rgba(255,255,255,0.92); --line: rgba(45,106,151,0.24);
-      --txt: #132a3b; --sub: #4f7187; --ok: #0f8d5f;
-      --accent: #157fba; --warn: #b67a1e; --bad: #d54c74;
-      --shadow: 0 14px 34px rgba(20,59,89,0.16);
+      --bg0: #f0f8ff; --bg1: #d8ecf8;
+      --card: rgba(255,255,255,0.95); --line: rgba(45,106,151,0.22);
+      --txt: #0f2436; --sub: #4a6d85; --ok: #0b7d52;
+      --accent: #0f73b0; --warn: #a06b10; --bad: #c0405f;
+      --shadow: 0 8px 28px rgba(15,50,80,0.12);
       background:
-        radial-gradient(900px 500px at -20% -10%,#d0ebfb 0%,transparent 60%),
-        radial-gradient(900px 500px at 120% 0%,#c6e0f3 0%,transparent 55%),
+        radial-gradient(900px 500px at -20% -10%,#c8e8f8 0%,transparent 60%),
+        radial-gradient(900px 500px at 120% 0%,#bcd8f0 0%,transparent 55%),
         linear-gradient(145deg,var(--bg0),var(--bg1)) !important;
+    }
+    body[data-theme='light'] .hero {
+      background: linear-gradient(160deg,rgba(15,115,176,0.10),rgba(180,218,240,0.55));
+      border-color: rgba(45,106,151,0.20);
+    }
+    body[data-theme='light'] .pill {
+      background: rgba(255,255,255,0.80);
+      border-color: rgba(45,106,151,0.28);
+      color: var(--txt);
+    }
+    body[data-theme='light'] .pill.ok {
+      background: rgba(11,125,82,0.08);
+      color: var(--ok);
+    }
+    body[data-theme='light'] .pill.link {
+      color: var(--accent);
+      background: rgba(15,115,176,0.08);
+      border-color: rgba(15,115,176,0.30);
+    }
+    body[data-theme='light'] button.pill[style*="border-color: var(--warn)"],
+    body[data-theme='light'] button.pill.warn { border-color: var(--warn); color: var(--warn); }
+    body[data-theme='light'] .input,
+    body[data-theme='light'] .select {
+      background: rgba(255,255,255,0.90);
+      border-color: rgba(45,106,151,0.28);
+      color: var(--txt);
+    }
+    body[data-theme='light'] .btn {
+      background: rgba(240,248,255,0.90);
+      border-color: rgba(45,106,151,0.28);
+      color: var(--txt);
+    }
+    body[data-theme='light'] .btn.primary {
+      background: linear-gradient(180deg,rgba(15,115,176,0.18),rgba(15,115,176,0.10));
+      border-color: rgba(15,115,176,0.40);
+      color: var(--accent);
+    }
+    body[data-theme='light'] .btn.active {
+      background: rgba(15,115,176,0.16);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    body[data-theme='light'] .chart-tab {
+      background: rgba(255,255,255,0.75);
+      border-color: rgba(45,106,151,0.24);
+      color: var(--sub);
+    }
+    body[data-theme='light'] .chart-tab.active {
+      background: rgba(15,115,176,0.14);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+    body[data-theme='light'] .loading-overlay {
+      background: rgba(230,243,253,0.88);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -259,8 +313,8 @@
     <div class="status">
       <span id="authState" class="pill">未接続</span>
       <span id="lastRefresh" class="pill">最終更新: なし</span>
-      <a href="./sales.html" class="pill link">月次グラフ</a>
-      <a href="./index.html" class="pill link">管理画面</a>
+      <a href="./analytics.html" class="pill link">月次グラフ</a>
+      <a href="./index.html" class="pill link" id="adminLink">管理画面</a>
       <button id="themeBtn" type="button" class="pill">ライトモード</button>
     </div>
   </header>
@@ -302,7 +356,7 @@
     <h2 class="card-title">月間サマリー <span id="kpiPeriodLabel" style="font-size:0.85rem;color:var(--sub);font-weight:400"></span></h2>
     <div class="kpi-grid" id="kpiGrid">
       <div class="kpi-card"><div class="kpi-label">月間総売上</div><div class="kpi-value" id="kpiGross">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeGrossMom"></span><span class="kpi-badge flat" id="kpiBadgeGrossYoy"></span></div></div>
-      <div class="kpi-card"><div class="kpi-label">月間純売上</div><div class="kpi-value" id="kpiNet">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeNetMom"></span><span class="kpi-badge flat" id="kpiBadgeNetYoy"></span></div></div>
+
       <div class="kpi-card"><div class="kpi-label">月間会計組数</div><div class="kpi-value" id="kpiParty">-</div><div class="kpi-sub" id="kpiPartyAvg"></div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgePartyMom"></span><span class="kpi-badge flat" id="kpiBadgePartyYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">月間客数</div><div class="kpi-value" id="kpiGuest">-</div><div class="kpi-sub" id="kpiGuestAvg"></div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeGuestMom"></span><span class="kpi-badge flat" id="kpiBadgeGuestYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">客単価（平均）</div><div class="kpi-value" id="kpiUnit">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeUnitMom"></span><span class="kpi-badge flat" id="kpiBadgeUnitYoy"></span></div></div>
@@ -575,12 +629,11 @@ const dom = {
   storeSelect: $('storeSelect'), reloadBtn: $('reloadBtn'),
   filterMeta: $('filterMeta'), themeBtn: $('themeBtn'),
   kpiPeriodLabel: $('kpiPeriodLabel'),
-  kpiGross: $('kpiGross'), kpiNet: $('kpiNet'),
+  kpiGross: $('kpiGross'),
   kpiParty: $('kpiParty'), kpiPartyAvg: $('kpiPartyAvg'),
   kpiGuest: $('kpiGuest'), kpiGuestAvg: $('kpiGuestAvg'),
   kpiUnit: $('kpiUnit'), kpiDays: $('kpiDays'), kpiReceipts: $('kpiReceipts'),
   kpiBadgeGrossMom: $('kpiBadgeGrossMom'), kpiBadgeGrossYoy: $('kpiBadgeGrossYoy'),
-  kpiBadgeNetMom: $('kpiBadgeNetMom'), kpiBadgeNetYoy: $('kpiBadgeNetYoy'),
   kpiBadgePartyMom: $('kpiBadgePartyMom'), kpiBadgePartyYoy: $('kpiBadgePartyYoy'),
   kpiBadgeGuestMom: $('kpiBadgeGuestMom'), kpiBadgeGuestYoy: $('kpiBadgeGuestYoy'),
   kpiBadgeUnitMom: $('kpiBadgeUnitMom'), kpiBadgeUnitYoy: $('kpiBadgeUnitYoy'),
@@ -611,7 +664,7 @@ function setBadge(el, cur, prev, label) {
 
 function applyKpiBadges(displayMonth, monthlySeries) {
   const clearAll = () => {
-    ['GrossMom','GrossYoy','NetMom','NetYoy','PartyMom','PartyYoy','GuestMom','GuestYoy','UnitMom','UnitYoy']
+    ['GrossMom','GrossYoy','PartyMom','PartyYoy','GuestMom','GuestYoy','UnitMom','UnitYoy']
       .forEach(k => { const el = dom['kpiBadge' + k]; if (el) { el.textContent = ''; el.className = 'kpi-badge flat'; } });
   };
   if (!displayMonth || !Array.isArray(monthlySeries) || monthlySeries.length === 0) { clearAll(); return; }
@@ -625,8 +678,6 @@ function applyKpiBadges(displayMonth, monthlySeries) {
   const yoy = byMonth[yoyMo];
   setBadge(dom.kpiBadgeGrossMom,  cur.gross_sales_yen,   prev?.gross_sales_yen,   '前月比');
   setBadge(dom.kpiBadgeGrossYoy,  cur.gross_sales_yen,   yoy?.gross_sales_yen,    '前年比');
-  setBadge(dom.kpiBadgeNetMom,    cur.net_sales_yen,     prev?.net_sales_yen,     '前月比');
-  setBadge(dom.kpiBadgeNetYoy,    cur.net_sales_yen,     yoy?.net_sales_yen,      '前年比');
   setBadge(dom.kpiBadgePartyMom,  cur.party_count,       prev?.party_count,       '前月比');
   setBadge(dom.kpiBadgePartyYoy,  cur.party_count,       yoy?.party_count,        '前年比');
   setBadge(dom.kpiBadgeGuestMom,  cur.guest_count,       prev?.guest_count,       '前月比');
@@ -718,6 +769,12 @@ function applyTheme(t) {
 
 dom.themeBtn.addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
 
+/* LINEブラウザからのアクセス時は管理画面リンクを非表示 */
+if (/Line\//i.test(navigator.userAgent)) {
+  const adminLink = document.getElementById('adminLink');
+  if (adminLink) adminLink.style.display = 'none';
+}
+
 /* ── period tabs ── */
 document.getElementById('periodTabs').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-period]');
@@ -764,9 +821,11 @@ async function apiFetch(path) {
 async function fetchWeather(storeKey, fromDate, toDate) {
   const coords = STORE_COORDS[storeKey];
   if (!coords) return {};
-  // アーカイブAPIは未来日を受け付けないので今日でキャップ
+  // アーカイブAPIは直近3日分のデータをまだ持っていないので3日前でキャップ
   const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  const clampedTo = toDate > todayStr ? todayStr : toDate;
+  const d = new Date(todayStr); d.setDate(d.getDate() - 3);
+  const archiveCap = d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const clampedTo = toDate > archiveCap ? archiveCap : toDate;
   const params = new URLSearchParams({
     latitude: coords.lat,
     longitude: coords.lon,
@@ -847,7 +906,6 @@ async function loadAll() {
     const totals = salesData.totals;
     dom.kpiPeriodLabel.textContent = isSingleMonth ? `（${displayMonth}）` : `（${months[0]}〜${displayMonth}）`;
     dom.kpiGross.textContent = yen(totals?.total_gross_sales_yen);
-    dom.kpiNet.textContent = yen(totals?.total_net_sales_yen);
     dom.kpiParty.textContent = num(totals?.total_party_count) + ' 組';
     dom.kpiPartyAvg.textContent = totals?.avg_party_count ? `1日平均 ${totals.avg_party_count} 組` : '';
     dom.kpiGuest.textContent = num(totals?.total_guest_count) + ' 名';
@@ -938,7 +996,6 @@ function renderDailyChart() {
   const { gridColor, tickColor, legendColor } = chartDefaults();
   const labels = series.map(d => d.date.slice(5)); // MM-DD
   const gross = series.map(d => d.gross_sales_yen);
-  const net = series.map(d => d.net_sales_yen);
   const rain = series.map(d => state.weather[d.date]?.rain ?? null);
   const temp = series.map(d => state.weather[d.date]?.temp ?? null);
 
@@ -954,11 +1011,6 @@ function renderDailyChart() {
       tension: 0.3, pointRadius: 3, fill: true, order: 1,
     },
     {
-      type: 'line', label: '純売上', data: net, yAxisID: 'ySales',
-      borderColor: cssVar('--c-net'), backgroundColor: 'transparent',
-      tension: 0.3, pointRadius: 2, borderDash: [4, 3], order: 2,
-    },
-    {
       type: 'line', label: '最高気温(℃)', data: temp, yAxisID: 'yTemp',
       borderColor: cssVar('--c-temp'), backgroundColor: 'transparent',
       tension: 0.4, pointRadius: 2, borderDash: [2, 4], order: 2,
@@ -968,24 +1020,41 @@ function renderDailyChart() {
   // 祝日バンドを描くプラグイン
   const holidayPlugin = {
     id: 'holidayBands',
-    beforeDraw(chart) {
+    afterDraw(chart) {
       const { ctx, chartArea } = chart;
       if (!chartArea) return;
-      const meta = chart.getDatasetMeta(0);
+      // 総売上ライン（dataset index 1）の要素座標を使う（常にデータあり）
+      const meta = chart.getDatasetMeta(1);
       if (!meta?.data?.length) return;
       ctx.save();
-      const barW = meta.data[0]?.width ?? (chartArea.width / Math.max(series.length, 1));
+      const barW = chartArea.width / Math.max(series.length, 1);
       series.forEach((d, i) => {
-        if (!JAPANESE_HOLIDAYS.has(d.date)) return;
         const x = meta.data[i]?.x;
         if (x == null) return;
-        ctx.fillStyle = 'rgba(255,90,90,0.10)';
+        const dow = new Date(d.date).getDay(); // 0=日, 6=土
+        const isHoliday = JAPANESE_HOLIDAYS.has(d.date);
+        const isSat = dow === 6;
+        const isSun = dow === 0;
+        if (!isHoliday && !isSat && !isSun) return;
+
+        // 背景バンド（祝日 > 日曜 > 土曜の優先順で色を決定）
+        if (isHoliday) {
+          ctx.fillStyle = 'rgba(255,90,90,0.12)';
+        } else if (isSun) {
+          ctx.fillStyle = 'rgba(255,110,110,0.08)';
+        } else {
+          ctx.fillStyle = 'rgba(100,160,255,0.08)';
+        }
         ctx.fillRect(x - barW / 2, chartArea.top, barW, chartArea.bottom - chartArea.top);
+
+        // ラベル（祝日優先、次に曜日）
+        const label = isHoliday ? '祝' : isSun ? '日' : '土';
+        const color = (isHoliday || isSun) ? 'rgba(255,90,90,0.9)' : 'rgba(100,160,255,0.9)';
         ctx.font = 'bold 9px sans-serif';
-        ctx.fillStyle = 'rgba(255,90,90,0.9)';
+        ctx.fillStyle = color;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillText('祝', x, chartArea.top + 2);
+        ctx.fillText(label, x, chartArea.top + 2);
       });
       ctx.restore();
     },
@@ -997,7 +1066,7 @@ function renderDailyChart() {
     afterDraw(chart) {
       const { ctx, chartArea } = chart;
       if (!chartArea) return;
-      const meta = chart.getDatasetMeta(0);
+      const meta = chart.getDatasetMeta(1);
       if (!meta?.data?.length) return;
       ctx.save();
       ctx.font = '13px serif';
@@ -1009,7 +1078,8 @@ function renderDailyChart() {
         if (!icon) return;
         const x = meta.data[i]?.x;
         if (x == null) return;
-        const y = chartArea.bottom + 14;
+        const y = chart.scales.x.bottom + 1;
+        ctx.textBaseline = 'top';
         ctx.fillText(icon, x, y);
       });
       ctx.restore();
@@ -1021,7 +1091,7 @@ function renderDailyChart() {
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-      layout: { padding: { bottom: 20 } },
+      layout: { padding: { bottom: 18 } },
       plugins: {
         legend: { labels: { color: legendColor, font: { size: 11 } } },
         tooltip: {
@@ -1045,7 +1115,7 @@ function renderDailyChart() {
         },
       },
       scales: {
-        x: { ticks: { color: tickColor, font: { size: 10 }, maxRotation: 45, padding: 18 }, grid: { color: gridColor } },
+        x: { ticks: { color: tickColor, font: { size: 10 }, maxRotation: 45, padding: 2 }, grid: { color: gridColor } },
         ySales: {
           type: 'linear', position: 'left', ticks: { color: tickColor, font: { size: 10 }, callback: v => '¥' + (v/10000).toFixed(0) + '万' },
           grid: { color: gridColor },
