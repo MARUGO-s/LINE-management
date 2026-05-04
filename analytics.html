@@ -438,6 +438,31 @@ const STORE_ADDRESS = {
   marugoD:             '愛知県刈谷市中山町',
 };
 
+const STORE_NAMES = {
+  marugo:              'マルゴ',
+  marugosecond:        'マルゴ セカンド',
+  marugogrande:        'マルゴ グランデ',
+  sannanaichi:         'サンナナイチ バル',
+  shenlong:            'シェンロン&クラウディア',
+  claudia2:            'クラウディア2',
+  sauvage:             'ソバージュ',
+  barpelota:           'バルぺロタ',
+  briccola:            'トラットリア ブリッコラ',
+  violette:            'ヴィオレット',
+  marugootto:          'マルゴ オット',
+  donaiya:             '元祖どないや 新宿三丁目店',
+  marugoyotsuya:       'マルゴ 四谷',
+  sushikoruri:         '鮨こるり',
+  bistrocavacava:      'BISTRO CAVA CAVA',
+  marugoS:             'マルゴエス',
+  marugoshinbashi:     'マルゴ 新橋',
+  marugomarunouchi:    'マルゴ丸の内',
+  yakinikumarugo:      '焼肉マルゴ',
+  erics:               'エリックスバイエリックトロション',
+  mitan:               'ミタン',
+  marugoD:             'マルゴ D',
+};
+
 /* ── state ── */
 const state = {
   theme: localStorage.getItem(THEME_KEY) || 'dark',
@@ -717,14 +742,27 @@ async function loadAll() {
 function updateStoreSelect(options, selectedKey) {
   const prev = dom.storeSelect.value || state.storeKey;
   dom.storeSelect.innerHTML = '';
+
+  // APIから返ってきた店舗（レシートあり）
+  const apiKeys = new Set(options.map(o => o.store_key));
   for (const opt of options) {
     const el = document.createElement('option');
     el.value = opt.store_key;
     el.textContent = opt.store_name;
     dom.storeSelect.appendChild(el);
   }
-  const match = options.find(o => o.store_key === prev);
-  if (match) dom.storeSelect.value = match.store_key;
+
+  // 座標登録済みでAPIに未登場の店舗（レシートなし）
+  for (const key of Object.keys(STORE_COORDS)) {
+    if (apiKeys.has(key)) continue;
+    const el = document.createElement('option');
+    el.value = key;
+    el.textContent = (STORE_NAMES[key] ?? key) + '　（データなし）';
+    dom.storeSelect.appendChild(el);
+  }
+
+  const allKeys = [...apiKeys, ...Object.keys(STORE_COORDS)];
+  if (prev && allKeys.includes(prev)) dom.storeSelect.value = prev;
   state.storeOptions = options;
 }
 
