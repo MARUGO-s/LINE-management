@@ -784,6 +784,19 @@ function cssVar(name) {
   return getComputedStyle(document.body).getPropertyValue(name).trim();
 }
 
+/* ── 天気アイコン変換 ── */
+function weatherIcon(rain, temp) {
+  if (rain == null && temp == null) return '';
+  if (rain != null && rain > 10) return '🌧';
+  if (rain != null && rain > 0.5) return '🌦';
+  if (temp != null && temp >= 30) return '🌡';
+  if (temp != null && temp >= 23) return '☀️';
+  if (temp != null && temp >= 15) return '🌤';
+  if (temp != null && temp >= 5)  return '⛅';
+  if (temp != null && temp < 5)   return '❄️';
+  return '';
+}
+
 /* ── Chart 1: daily sales + weather ── */
 function renderDailyChart() {
   destroyChart('daily');
@@ -819,11 +832,34 @@ function renderDailyChart() {
     },
   ];
 
+  // 天気アイコンをx軸ラベルの上に描くプラグイン
+  const weatherIconPlugin = {
+    id: 'weatherIcons',
+    afterDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      if (!scales.x) return;
+      ctx.save();
+      ctx.font = '13px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      series.forEach((d, i) => {
+        const w = state.weather[d.date];
+        const icon = weatherIcon(w?.rain ?? null, w?.temp ?? null);
+        if (!icon) return;
+        const x = scales.x.getPixelForTick(i);
+        const y = chartArea.bottom + 14;
+        ctx.fillText(icon, x, y);
+      });
+      ctx.restore();
+    },
+  };
+
   state.charts.daily = new Chart($('chartDaily').getContext('2d'), {
     type: 'bar',
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
+      layout: { padding: { bottom: 20 } },
       plugins: {
         legend: { labels: { color: legendColor, font: { size: 11 } } },
         tooltip: {
@@ -840,7 +876,7 @@ function renderDailyChart() {
         },
       },
       scales: {
-        x: { ticks: { color: tickColor, font: { size: 10 }, maxRotation: 45 }, grid: { color: gridColor } },
+        x: { ticks: { color: tickColor, font: { size: 10 }, maxRotation: 45, padding: 18 }, grid: { color: gridColor } },
         ySales: {
           type: 'linear', position: 'left', ticks: { color: tickColor, font: { size: 10 }, callback: v => '¥' + (v/10000).toFixed(0) + '万' },
           grid: { color: gridColor },
@@ -855,6 +891,7 @@ function renderDailyChart() {
         },
       },
     },
+    plugins: [weatherIconPlugin],
   });
 }
 
