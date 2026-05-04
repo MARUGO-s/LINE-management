@@ -1028,7 +1028,8 @@ function renderDailyChart() {
         if (!icon) return;
         const x = meta.data[i]?.x;
         if (x == null) return;
-        const y = chart.height - 3;
+        const y = chart.scales.x.bottom + 2;
+        ctx.textBaseline = 'top';
         ctx.fillText(icon, x, y);
       });
       ctx.restore();
@@ -1040,7 +1041,7 @@ function renderDailyChart() {
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-      layout: { padding: { bottom: 36 } },
+      layout: { padding: { bottom: 22 } },
       plugins: {
         legend: { labels: { color: legendColor, font: { size: 11 } } },
         tooltip: {
