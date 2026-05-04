@@ -1234,6 +1234,8 @@ const html = String.raw`<!doctype html>
         <label class="room-scope-option" title="無返信自動登録がONで、AIが高確度と判断してカレンダーに書き込んだあと、登録内容をこのトークに返信します。AI会話返信もONが必要です。低確度の確認返信とは別に設定できます。"><input id="roomConfigCalendarRegistrationReply" type="checkbox">会話から予定を検知したGoogleカレンダーへの登録内容をLINEで返信する（高確度でも）</label>
         <label class="room-scope-option" title="無返信自動登録がONのときのみ有効です。AIの信頼度が「要確認」レンジのとき、LINEで「登録しますか？」と返信し、はい／いいえで確定します。OFFのときは無言のまま件名に（仮）を付けて登録します（AI会話返信もONが必要）。"><input id="roomConfigCalendarLowConfidenceConfirmReply" type="checkbox">低確度のときは確認の返信を送る（はい／いいえ）</label>
         <label class="room-scope-option"><input id="roomConfigGmailAlert" type="checkbox">Gmail予約通知</label>
+        <label class="room-scope-option"><input id="roomConfigReceiptMidreportEnabled" type="checkbox">売上中間報告をこのルームに送信（15日）</label>
+        <label class="room-scope-option"><input id="roomConfigReceiptMonthendReportEnabled" type="checkbox">売上月末レポートをこのルームに送信（月末）</label>
       </div>
       <div class="modal-meta" style="margin-top:8px;">※資料ライブラリの閲覧権限は資料ごとに「メディア閲覧」画面で設定します。</div>
       <div class="modal-actions">
@@ -1275,6 +1277,8 @@ const html = String.raw`<!doctype html>
         <label class="room-scope-option" title="無返信自動登録がONで高確度登録のあと、登録内容をLINEで返信します。AI会話返信もONが必要です。"><input id="newRoomCalendarRegistrationReply" type="checkbox">会話から予定を検知したGoogleカレンダーへの登録内容をLINEで返信する（高確度でも）</label>
         <label class="room-scope-option" title="無返信自動登録がONのときのみ有効です。AIの信頼度が「要確認」レンジのとき、LINEで「登録しますか？」と返信し、はい／いいえで確定します。OFFのときは無言のまま件名に（仮）を付けて登録します（AI会話返信もONが必要）。"><input id="newRoomCalendarLowConfidenceConfirmReply" type="checkbox">低確度のときは確認の返信を送る（はい／いいえ）</label>
         <label class="room-scope-option"><input id="newRoomGmailAlertEnabled" type="checkbox">Gmail予約通知</label>
+        <label class="room-scope-option"><input id="newRoomReceiptMidreportEnabled" type="checkbox">売上中間報告をこのルームに送信（15日）</label>
+        <label class="room-scope-option"><input id="newRoomReceiptMonthendReportEnabled" type="checkbox">売上月末レポートをこのルームに送信（月末）</label>
       </div>
       <div class="modal-meta" style="margin-top:8px;">※資料ライブラリの閲覧権限は資料ごとに「メディア閲覧」画面で設定します。</div>
       <div class="controls" style="margin-top:10px;">
@@ -1306,6 +1310,8 @@ const html = String.raw`<!doctype html>
     const NEW_ROOM_DEFAULT_CALENDAR_AUTO_CREATE_KEY = 'line_summary_new_room_default_calendar_auto_create';
     const NEW_ROOM_DEFAULT_SILENT_AUTO_REGISTER_KEY = 'line_summary_new_room_default_silent_auto_register';
     const NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY = 'line_summary_new_room_default_gmail_alert';
+    const NEW_ROOM_DEFAULT_RECEIPT_MIDREPORT_KEY = 'line_summary_new_room_default_receipt_midreport';
+    const NEW_ROOM_DEFAULT_RECEIPT_MONTHEND_REPORT_KEY = 'line_summary_new_room_default_receipt_monthend_report';
     const NEW_ROOM_DEFAULT_CALENDAR_LOW_CONF_CONFIRM_KEY = 'line_summary_new_room_default_calendar_low_conf_confirm';
     const NEW_ROOM_DEFAULT_CALENDAR_REGISTRATION_REPLY_KEY = 'line_summary_new_room_default_calendar_registration_reply';
     const NEW_ROOM_DEFAULT_BOT_REPLY_HARD_MUTE_KEY = 'line_summary_new_room_default_bot_reply_hard_mute';
@@ -1358,6 +1364,8 @@ const html = String.raw`<!doctype html>
       newRoomCalendarRegistrationReply: document.getElementById('newRoomCalendarRegistrationReply'),
       newRoomCalendarLowConfidenceConfirmReply: document.getElementById('newRoomCalendarLowConfidenceConfirmReply'),
       newRoomGmailAlertEnabled: document.getElementById('newRoomGmailAlertEnabled'),
+      newRoomReceiptMidreportEnabled: document.getElementById('newRoomReceiptMidreportEnabled'),
+      newRoomReceiptMonthendReportEnabled: document.getElementById('newRoomReceiptMonthendReportEnabled'),
       newRoomSummaryMode: document.getElementById('newRoomSummaryMode'),
       openNewRoomConfigBtn: document.getElementById('openNewRoomConfigBtn'),
       newRoomConfigSummary: document.getElementById('newRoomConfigSummary'),
@@ -1391,6 +1399,8 @@ const html = String.raw`<!doctype html>
       roomConfigCalendarRegistrationReply: document.getElementById('roomConfigCalendarRegistrationReply'),
       roomConfigCalendarLowConfidenceConfirmReply: document.getElementById('roomConfigCalendarLowConfidenceConfirmReply'),
       roomConfigGmailAlert: document.getElementById('roomConfigGmailAlert'),
+      roomConfigReceiptMidreportEnabled: document.getElementById('roomConfigReceiptMidreportEnabled'),
+      roomConfigReceiptMonthendReportEnabled: document.getElementById('roomConfigReceiptMonthendReportEnabled'),
       cancelRoomConfigBtn: document.getElementById('cancelRoomConfigBtn'),
       reviewRoomConfigBtn: document.getElementById('reviewRoomConfigBtn'),
       saveRoomConfigBtn: document.getElementById('saveRoomConfigBtn'),
@@ -1527,6 +1537,12 @@ const html = String.raw`<!doctype html>
       }
       dom.newRoomCalendarLowConfidenceConfirmReply.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_CALENDAR_LOW_CONF_CONFIRM_KEY, false);
       dom.newRoomGmailAlertEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, false);
+      if (dom.newRoomReceiptMidreportEnabled) {
+        dom.newRoomReceiptMidreportEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_RECEIPT_MIDREPORT_KEY, true);
+      }
+      if (dom.newRoomReceiptMonthendReportEnabled) {
+        dom.newRoomReceiptMonthendReportEnabled.checked = loadBooleanSetting(NEW_ROOM_DEFAULT_RECEIPT_MONTHEND_REPORT_KEY, true);
+      }
       syncNewRoomCalendarSubOptions();
       syncNewRoomMediaSubOptions();
       refreshNewRoomConfigSummary();
@@ -1545,13 +1561,15 @@ const html = String.raw`<!doctype html>
         (dom.newRoomGoogleCalendarAutoRegister.checked ? 1 : 0) +
         (dom.newRoomGoogleCalendarAutoRegister.checked && dom.newRoomCalendarRegistrationReply && dom.newRoomCalendarRegistrationReply.checked ? 1 : 0) +
         (dom.newRoomGoogleCalendarAutoRegister.checked && dom.newRoomCalendarLowConfidenceConfirmReply.checked ? 1 : 0) +
-        (dom.newRoomGmailAlertEnabled.checked ? 1 : 0);
+        (dom.newRoomGmailAlertEnabled.checked ? 1 : 0) +
+        (dom.newRoomReceiptMidreportEnabled && dom.newRoomReceiptMidreportEnabled.checked ? 1 : 0) +
+        (dom.newRoomReceiptMonthendReportEnabled && dom.newRoomReceiptMonthendReportEnabled.checked ? 1 : 0);
       const summary = dom.newRoomSummaryMode.value === 'daily_rollup'
         ? '1日まとめ'
         : dom.newRoomSummaryMode.value === 'independent'
         ? '各回独立'
         : '継承';
-      return enabledCount + '/12 有効 ・ 最終回:' + summary;
+      return enabledCount + '/14 有効 ・ 最終回:' + summary;
     }
 
     function refreshNewRoomConfigSummary() {
@@ -1575,6 +1593,8 @@ const html = String.raw`<!doctype html>
         calendar_low_confidence_confirm_reply_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked && !!dom.roomConfigCalendarLowConfidenceConfirmReply.checked,
         calendar_registration_reply_enabled: !!dom.roomConfigGoogleCalendarAutoRegister.checked && !!(dom.roomConfigCalendarRegistrationReply && dom.roomConfigCalendarRegistrationReply.checked),
         gmail_reservation_alert_enabled: !!dom.roomConfigGmailAlert.checked,
+        receipt_midreport_enabled: !!(dom.roomConfigReceiptMidreportEnabled && dom.roomConfigReceiptMidreportEnabled.checked),
+        receipt_monthend_report_enabled: !!(dom.roomConfigReceiptMonthendReportEnabled && dom.roomConfigReceiptMonthendReportEnabled.checked),
       };
     }
 
@@ -1617,6 +1637,8 @@ const html = String.raw`<!doctype html>
       if (config.calendar_tomorrow_reminder_enabled) enabledFeatures.push('明日予定配信');
       if (config.media_file_access_enabled) enabledFeatures.push('LINE添付保存（ルーム）');
       if (config.gmail_reservation_alert_enabled) enabledFeatures.push('Gmail予約通知');
+      if (config.receipt_midreport_enabled) enabledFeatures.push('売上中間報告（15日）');
+      if (config.receipt_monthend_report_enabled) enabledFeatures.push('売上月末レポート（月末）');
       if (config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) {
         enabledFeatures.push('会話から予定検知 → Googleカレンダーへ無返信で自動登録');
       }
@@ -2491,6 +2513,8 @@ const html = String.raw`<!doctype html>
         calendar_low_confidence_confirm_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarLowConfConfirm, false),
         calendar_registration_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarRegistrationReply, false),
         gmail_reservation_alert_enabled: gmailAlertEnabledInput ? !!gmailAlertEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
+        receipt_midreport_enabled: parseDatasetBoolean(tr.dataset.roomReceiptMidreportEnabled, true),
+        receipt_monthend_report_enabled: parseDatasetBoolean(tr.dataset.roomReceiptMonthendReportEnabled, true),
       };
       return {
         ...featureConfig,
@@ -2518,6 +2542,8 @@ const html = String.raw`<!doctype html>
       tr.dataset.roomCalendarLowConfConfirm = String(!!config.calendar_low_confidence_confirm_reply_enabled);
       tr.dataset.roomCalendarRegistrationReply = String(!!config.calendar_registration_reply_enabled);
       tr.dataset.roomGmailAlertEnabled = String(!!config.gmail_reservation_alert_enabled);
+      tr.dataset.roomReceiptMidreportEnabled = String(config.receipt_midreport_enabled !== false);
+      tr.dataset.roomReceiptMonthendReportEnabled = String(config.receipt_monthend_report_enabled !== false);
       const badge = tr.querySelector('.room-config-badge');
       if (badge) {
         const tone = roomConfigToneClass(getRoomConfigEnabledCount(normalizedConfig));
@@ -2540,6 +2566,8 @@ const html = String.raw`<!doctype html>
       if (config.calendar_low_confidence_confirm_reply_enabled && config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) enabledCount += 1;
       if (config.calendar_registration_reply_enabled && config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) enabledCount += 1;
       if (config.gmail_reservation_alert_enabled) enabledCount += 1;
+      if (config.receipt_midreport_enabled) enabledCount += 1;
+      if (config.receipt_monthend_report_enabled) enabledCount += 1;
       return enabledCount;
     }
 
@@ -2551,7 +2579,7 @@ const html = String.raw`<!doctype html>
 
     function buildRoomConfigSummary(config) {
       const enabledCount = getRoomConfigEnabledCount(config);
-      return enabledCount + '/12 有効';
+      return enabledCount + '/14 有効';
     }
 
     function buildRoomConfigSavedMessage(tr, config) {
@@ -2605,6 +2633,8 @@ const html = String.raw`<!doctype html>
           calendar_low_confidence_confirm_reply_enabled: !!(setting && setting.calendar_low_confidence_confirm_reply_enabled),
           calendar_registration_reply_enabled: !!(setting && setting.calendar_registration_reply_enabled),
           gmail_reservation_alert_enabled: setting && setting.gmail_reservation_alert_enabled === true,
+          receipt_midreport_enabled: setting ? setting.receipt_midreport_enabled !== false : true,
+          receipt_monthend_report_enabled: setting ? setting.receipt_monthend_report_enabled !== false : true,
         }
         const tr = document.createElement('tr');
         tr.dataset.roomId = room.room_id;
@@ -2626,6 +2656,8 @@ const html = String.raw`<!doctype html>
         tr.dataset.roomCalendarLowConfConfirm = String(!!(setting && setting.calendar_low_confidence_confirm_reply_enabled));
         tr.dataset.roomCalendarRegistrationReply = String(!!(setting && setting.calendar_registration_reply_enabled));
         tr.dataset.roomGmailAlertEnabled = String(roomFeatureConfig.gmail_reservation_alert_enabled);
+        tr.dataset.roomReceiptMidreportEnabled = String(roomFeatureConfig.receipt_midreport_enabled);
+        tr.dataset.roomReceiptMonthendReportEnabled = String(roomFeatureConfig.receipt_monthend_report_enabled);
         tr.dataset.messageCleanupTiming = String((setting && setting.message_cleanup_timing) || '');
         const configSummary = buildRoomConfigSummary({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
@@ -2643,6 +2675,8 @@ const html = String.raw`<!doctype html>
           calendar_low_confidence_confirm_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarLowConfConfirm, false),
           calendar_registration_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarRegistrationReply, false),
           gmail_reservation_alert_enabled: parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
+          receipt_midreport_enabled: parseDatasetBoolean(tr.dataset.roomReceiptMidreportEnabled, true),
+          receipt_monthend_report_enabled: parseDatasetBoolean(tr.dataset.roomReceiptMonthendReportEnabled, true),
         });
         const configToneClass = roomConfigToneClass(getRoomConfigEnabledCount({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
@@ -2660,6 +2694,8 @@ const html = String.raw`<!doctype html>
           calendar_low_confidence_confirm_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarLowConfConfirm, false),
           calendar_registration_reply_enabled: parseDatasetBoolean(tr.dataset.roomCalendarRegistrationReply, false),
           gmail_reservation_alert_enabled: parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
+          receipt_midreport_enabled: parseDatasetBoolean(tr.dataset.roomReceiptMidreportEnabled, true),
+          receipt_monthend_report_enabled: parseDatasetBoolean(tr.dataset.roomReceiptMonthendReportEnabled, true),
         }));
         const roomIdRaw = String(room.room_id || '');
         const canSyncChatMembers = roomIdRaw.startsWith('C') || roomIdRaw.startsWith('R');
@@ -2716,6 +2752,12 @@ const html = String.raw`<!doctype html>
       }
       dom.roomConfigCalendarLowConfidenceConfirmReply.checked = !!config.calendar_low_confidence_confirm_reply_enabled;
       dom.roomConfigGmailAlert.checked = !!config.gmail_reservation_alert_enabled;
+      if (dom.roomConfigReceiptMidreportEnabled) {
+        dom.roomConfigReceiptMidreportEnabled.checked = config.receipt_midreport_enabled !== false;
+      }
+      if (dom.roomConfigReceiptMonthendReportEnabled) {
+        dom.roomConfigReceiptMonthendReportEnabled.checked = config.receipt_monthend_report_enabled !== false;
+      }
       syncRoomConfigCalendarSubOptions();
       syncRoomConfigMediaSubOptions();
       invalidateRoomConfigReview();
@@ -3008,6 +3050,8 @@ const html = String.raw`<!doctype html>
         calendar_low_confidence_confirm_reply_enabled: roomConfig.calendar_low_confidence_confirm_reply_enabled,
         calendar_registration_reply_enabled: roomConfig.calendar_registration_reply_enabled,
         gmail_reservation_alert_enabled: roomConfig.gmail_reservation_alert_enabled,
+        receipt_midreport_enabled: roomConfig.receipt_midreport_enabled !== false,
+        receipt_monthend_report_enabled: roomConfig.receipt_monthend_report_enabled !== false,
         delivery_hours: parseHoursInput(hoursInput ? hoursInput.value : '', true),
         message_cleanup_timing: roomCleanupTiming,
         last_delivery_summary_mode: roomSummaryMode,
@@ -3048,6 +3092,8 @@ const html = String.raw`<!doctype html>
         payload.calendar_low_confidence_confirm_reply_enabled = !!opts.overrideConfig.calendar_low_confidence_confirm_reply_enabled;
         payload.calendar_registration_reply_enabled = !!opts.overrideConfig.calendar_registration_reply_enabled;
         payload.gmail_reservation_alert_enabled = !!opts.overrideConfig.gmail_reservation_alert_enabled;
+        payload.receipt_midreport_enabled = opts.overrideConfig.receipt_midreport_enabled !== false;
+        payload.receipt_monthend_report_enabled = opts.overrideConfig.receipt_monthend_report_enabled !== false;
         payload.is_enabled = computeRoomEnabledFromFeatureConfig(opts.overrideConfig);
       }
 
@@ -3107,6 +3153,8 @@ const html = String.raw`<!doctype html>
         calendar_low_confidence_confirm_reply_enabled: !!dom.newRoomGoogleCalendarAutoRegister.checked && !!dom.newRoomCalendarLowConfidenceConfirmReply.checked,
         calendar_registration_reply_enabled: !!dom.newRoomGoogleCalendarAutoRegister.checked && !!(dom.newRoomCalendarRegistrationReply && dom.newRoomCalendarRegistrationReply.checked),
         gmail_reservation_alert_enabled: !!dom.newRoomGmailAlertEnabled.checked,
+        receipt_midreport_enabled: !!(dom.newRoomReceiptMidreportEnabled && dom.newRoomReceiptMidreportEnabled.checked),
+        receipt_monthend_report_enabled: !!(dom.newRoomReceiptMonthendReportEnabled && dom.newRoomReceiptMonthendReportEnabled.checked),
       };
       const payload = {
         room_id: roomId,
@@ -3126,6 +3174,8 @@ const html = String.raw`<!doctype html>
         calendar_low_confidence_confirm_reply_enabled: newRoomFeatureConfig.calendar_low_confidence_confirm_reply_enabled,
         calendar_registration_reply_enabled: newRoomFeatureConfig.calendar_registration_reply_enabled,
         gmail_reservation_alert_enabled: newRoomFeatureConfig.gmail_reservation_alert_enabled,
+        receipt_midreport_enabled: newRoomFeatureConfig.receipt_midreport_enabled,
+        receipt_monthend_report_enabled: newRoomFeatureConfig.receipt_monthend_report_enabled,
         delivery_hours: parseHoursInput(dom.newRoomHours.value, true),
         message_cleanup_timing: null,
         last_delivery_summary_mode: normalizeOptionalSelectValue(dom.newRoomSummaryMode.value),
@@ -3560,6 +3610,8 @@ const html = String.raw`<!doctype html>
       dom.newRoomCalendarRegistrationReply,
       dom.newRoomCalendarLowConfidenceConfirmReply,
       dom.newRoomGmailAlertEnabled,
+      dom.newRoomReceiptMidreportEnabled,
+      dom.newRoomReceiptMonthendReportEnabled,
       dom.newRoomSummaryMode,
     ].forEach(function(el) {
       if (!el) return;
@@ -3621,6 +3673,16 @@ const html = String.raw`<!doctype html>
     dom.newRoomGmailAlertEnabled.addEventListener('change', function() {
       saveBooleanSetting(NEW_ROOM_DEFAULT_GMAIL_ALERT_KEY, !!dom.newRoomGmailAlertEnabled.checked);
     });
+    if (dom.newRoomReceiptMidreportEnabled) {
+      dom.newRoomReceiptMidreportEnabled.addEventListener('change', function() {
+        saveBooleanSetting(NEW_ROOM_DEFAULT_RECEIPT_MIDREPORT_KEY, !!dom.newRoomReceiptMidreportEnabled.checked);
+      });
+    }
+    if (dom.newRoomReceiptMonthendReportEnabled) {
+      dom.newRoomReceiptMonthendReportEnabled.addEventListener('change', function() {
+        saveBooleanSetting(NEW_ROOM_DEFAULT_RECEIPT_MONTHEND_REPORT_KEY, !!dom.newRoomReceiptMonthendReportEnabled.checked);
+      });
+    }
     [
       dom.newRoomBotReplyEnabled,
       dom.newRoomBotReplyHardMute,
@@ -3635,6 +3697,8 @@ const html = String.raw`<!doctype html>
       dom.newRoomCalendarRegistrationReply,
       dom.newRoomCalendarLowConfidenceConfirmReply,
       dom.newRoomGmailAlertEnabled,
+      dom.newRoomReceiptMidreportEnabled,
+      dom.newRoomReceiptMonthendReportEnabled,
       dom.newRoomSummaryMode,
     ].forEach(function(el) {
       if (!el) return;
@@ -3681,6 +3745,8 @@ const html = String.raw`<!doctype html>
       dom.roomConfigCalendarRegistrationReply,
       dom.roomConfigCalendarLowConfidenceConfirmReply,
       dom.roomConfigGmailAlert,
+      dom.roomConfigReceiptMidreportEnabled,
+      dom.roomConfigReceiptMonthendReportEnabled,
     ].forEach(function(el) {
       if (!el) return;
       el.addEventListener('change', invalidateRoomConfigReview);

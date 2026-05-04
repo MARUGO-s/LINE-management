@@ -461,6 +461,8 @@ Deno.serve(async (req) => {
           media_file_access_enabled: payload.media_file_access_enabled,
           image_analysis_reply_enabled: payload.image_analysis_reply_enabled,
           gmail_reservation_alert_enabled: payload.gmail_reservation_alert_enabled,
+          receipt_midreport_enabled: payload.receipt_midreport_enabled,
+          receipt_monthend_report_enabled: payload.receipt_monthend_report_enabled,
           room_sort_order: payload.room_sort_order,
           delivery_hours: payload.delivery_hours,
           message_cleanup_timing: payload.message_cleanup_timing,
@@ -4348,6 +4350,8 @@ function buildRoomSettingsPayload(body: unknown): {
   media_file_access_enabled: boolean
   image_analysis_reply_enabled: boolean
   gmail_reservation_alert_enabled: boolean
+  receipt_midreport_enabled: boolean
+  receipt_monthend_report_enabled: boolean
   room_sort_order: number | null
   delivery_hours: number[] | null
   message_cleanup_timing: MessageCleanupTiming | null
@@ -4457,6 +4461,18 @@ function buildRoomSettingsPayload(body: unknown): {
   }
   const gmailReservationAlertEnabled = gmailReservationAlertEnabledRaw === true
 
+  const receiptMidreportEnabledRaw = body.receipt_midreport_enabled
+  if (receiptMidreportEnabledRaw != null && typeof receiptMidreportEnabledRaw !== "boolean") {
+    throw { status: 400, message: "receipt_midreport_enabled must be boolean when provided." } satisfies AppError
+  }
+  const receiptMidreportEnabled = receiptMidreportEnabledRaw !== false
+
+  const receiptMonthendReportEnabledRaw = body.receipt_monthend_report_enabled
+  if (receiptMonthendReportEnabledRaw != null && typeof receiptMonthendReportEnabledRaw !== "boolean") {
+    throw { status: 400, message: "receipt_monthend_report_enabled must be boolean when provided." } satisfies AppError
+  }
+  const receiptMonthendReportEnabled = receiptMonthendReportEnabledRaw !== false
+
   const roomNameRaw = typeof body.room_name === "string" ? body.room_name.trim() : ""
   const roomSortOrderRaw = body.room_sort_order
   let roomSortOrder: number | null = null
@@ -4499,6 +4515,8 @@ function buildRoomSettingsPayload(body: unknown): {
     media_file_access_enabled: mediaFileAccessEnabled,
     image_analysis_reply_enabled: imageAnalysisReplyEnabled,
     gmail_reservation_alert_enabled: gmailReservationAlertEnabled,
+    receipt_midreport_enabled: receiptMidreportEnabled,
+    receipt_monthend_report_enabled: receiptMonthendReportEnabled,
     room_sort_order: roomSortOrder,
     delivery_hours: deliveryHours,
     message_cleanup_timing: roomCleanupTiming,
