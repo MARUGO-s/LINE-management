@@ -314,7 +314,7 @@
       <span id="authState" class="pill">未接続</span>
       <span id="lastRefresh" class="pill">最終更新: なし</span>
       <a href="./analytics.html" class="pill link">月次グラフ</a>
-      <a href="./index.html" class="pill link">管理画面</a>
+      <a href="./index.html" class="pill link" id="adminLink">管理画面</a>
       <button id="themeBtn" type="button" class="pill">ライトモード</button>
     </div>
   </header>
@@ -768,6 +768,12 @@ function applyTheme(t) {
 }
 
 dom.themeBtn.addEventListener('click', () => applyTheme(state.theme === 'dark' ? 'light' : 'dark'));
+
+/* LINEブラウザからのアクセス時は管理画面リンクを非表示 */
+if (/Line\//i.test(navigator.userAgent)) {
+  const adminLink = document.getElementById('adminLink');
+  if (adminLink) adminLink.style.display = 'none';
+}
 
 /* ── period tabs ── */
 document.getElementById('periodTabs').addEventListener('click', (e) => {
