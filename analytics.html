@@ -764,9 +764,11 @@ async function apiFetch(path) {
 async function fetchWeather(storeKey, fromDate, toDate) {
   const coords = STORE_COORDS[storeKey];
   if (!coords) return {};
-  // アーカイブAPIは未来日を受け付けないので今日でキャップ
+  // アーカイブAPIは直近3日分のデータをまだ持っていないので3日前でキャップ
   const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  const clampedTo = toDate > todayStr ? todayStr : toDate;
+  const d = new Date(todayStr); d.setDate(d.getDate() - 3);
+  const archiveCap = d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const clampedTo = toDate > archiveCap ? archiveCap : toDate;
   const params = new URLSearchParams({
     latitude: coords.lat,
     longitude: coords.lon,
