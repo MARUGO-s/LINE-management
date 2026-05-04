@@ -969,13 +969,16 @@ function renderDailyChart() {
   const holidayPlugin = {
     id: 'holidayBands',
     beforeDraw(chart) {
-      const { ctx, chartArea, scales } = chart;
-      if (!scales.x || !chartArea) return;
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const meta = chart.getDatasetMeta(0);
+      if (!meta?.data?.length) return;
       ctx.save();
-      const barW = scales.x.width / Math.max(series.length, 1);
+      const barW = meta.data[0]?.width ?? (chartArea.width / Math.max(series.length, 1));
       series.forEach((d, i) => {
         if (!JAPANESE_HOLIDAYS.has(d.date)) return;
-        const x = scales.x.getPixelForTick(i);
+        const x = meta.data[i]?.x;
+        if (x == null) return;
         ctx.fillStyle = 'rgba(255,90,90,0.10)';
         ctx.fillRect(x - barW / 2, chartArea.top, barW, chartArea.bottom - chartArea.top);
         ctx.font = 'bold 9px sans-serif';
@@ -992,8 +995,10 @@ function renderDailyChart() {
   const weatherIconPlugin = {
     id: 'weatherIcons',
     afterDraw(chart) {
-      const { ctx, chartArea, scales } = chart;
-      if (!scales.x) return;
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const meta = chart.getDatasetMeta(0);
+      if (!meta?.data?.length) return;
       ctx.save();
       ctx.font = '13px serif';
       ctx.textAlign = 'center';
@@ -1002,7 +1007,8 @@ function renderDailyChart() {
         const w = state.weather[d.date];
         const icon = weatherIcon(w?.rain ?? null, w?.temp ?? null);
         if (!icon) return;
-        const x = scales.x.getPixelForTick(i);
+        const x = meta.data[i]?.x;
+        if (x == null) return;
         const y = chartArea.bottom + 14;
         ctx.fillText(icon, x, y);
       });
