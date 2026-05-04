@@ -303,6 +303,7 @@
           <span><span class="weather-dot" style="background:var(--c-rain)"></span>降水量</span>
           <span><span class="weather-dot" style="background:var(--c-temp)"></span>最高気温</span>
           <span id="weatherStatus" style="color:var(--sub)"></span>
+          <span id="weatherAddress" style="color:var(--sub)"></span>
         </div>
       </div>
       <div class="chart-wrap tall" style="position:relative">
@@ -384,6 +385,10 @@ const STORE_COORDS = {
   bistrocavacava: { lat: 35.6870, lon: 139.7210 },
 };
 
+const STORE_ADDRESS = {
+  bistrocavacava: '新宿区荒木町',
+};
+
 /* ── state ── */
 const state = {
   theme: localStorage.getItem(THEME_KEY) || 'dark',
@@ -411,6 +416,7 @@ const dom = {
   kpiGuest: $('kpiGuest'), kpiGuestAvg: $('kpiGuestAvg'),
   kpiUnit: $('kpiUnit'), kpiDays: $('kpiDays'), kpiReceipts: $('kpiReceipts'),
   weatherStatus: $('weatherStatus'),
+  weatherAddress: $('weatherAddress'),
   loadingDaily: $('loadingDaily'), loadingMonthly: $('loadingMonthly'),
 };
 
@@ -630,6 +636,8 @@ async function loadAll() {
     state.weather = weatherMap;
     const weatherCount = Object.keys(state.weather).length;
     dom.weatherStatus.textContent = weatherCount > 0 ? `天候データ ${weatherCount}日分` : '天候データなし';
+    const addr = STORE_ADDRESS[state.storeKey];
+    dom.weatherAddress.textContent = addr ? `📍 ${addr}` : '';
 
     // KPI
     const totals = salesData.totals;
