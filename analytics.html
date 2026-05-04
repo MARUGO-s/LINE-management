@@ -617,13 +617,14 @@ async function loadAll() {
     }
     state.dailySeries = dailySeries;
 
-    // Monthly trend (always 12m)
-    const monthlyData = await apiFetch(`/analytics/monthly?months=12&store_key=${state.storeKey}`).catch(() => null);
-    state.monthlySeries = monthlyData?.series ?? [];
-
-    // Weather
+    // Monthly trend と Weather を並列取得
     dom.weatherStatus.textContent = '天候取得中…';
-    state.weather = await fetchWeather(state.storeKey, from, to);
+    const [monthlyData, weatherMap] = await Promise.all([
+      apiFetch(`/analytics/monthly?months=12&store_key=${state.storeKey}`).catch(() => null),
+      fetchWeather(state.storeKey, from, to),
+    ]);
+    state.monthlySeries = monthlyData?.series ?? [];
+    state.weather = weatherMap;
     const weatherCount = Object.keys(state.weather).length;
     dom.weatherStatus.textContent = weatherCount > 0 ? `天候データ ${weatherCount}日分` : '天候データなし';
 
