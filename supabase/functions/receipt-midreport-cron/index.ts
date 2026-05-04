@@ -102,6 +102,32 @@ Deno.serve(async () => {
   }
 
   const roomIds = [...roomAggregateMap.keys()]
+
+  const settingColumn = schedule.reportKind === "mid_month"
+    ? "receipt_midreport_enabled"
+    : "receipt_monthend_report_enabled"
+  const { data: roomSettings, error: settingsError } = await supabase
+    .from("room_summary_settings")
+    .select(`room_id,${settingColumn}`)
+    .in("room_id", roomIds)
+
+  if (settingsError) {
+    return json({
+      ok: false,
+      error: `Failed to load room_summary_settings: ${settingsError.message}`,
+    }, 500)
+  }
+
+  const disabledRooms = new Set<string>()
+  if (Array.isArray(roomSettings)) {
+    for (const row of roomSettings as Array<Record<string, unknown>>) {
+      const rid = String(row.room_id ?? "").trim()
+      if (rid && row[settingColumn] === false) {
+        disabledRooms.add(rid)
+      }
+    }
+  }
+
   const { data: existingRows, error: existingError } = await supabase
     .from("line_receipt_mid_reports")
     .select("room_id")
@@ -127,6 +153,11 @@ Deno.serve(async () => {
   const errors: string[] = []
 
   for (const [roomId, aggregate] of roomAggregateMap.entries()) {
+    if (disabledRooms.has(roomId)) {
+      skippedRoomIds.push(roomId)
+      continue
+    }
+
     if (existingSet.has(roomId)) {
       skippedRoomIds.push(roomId)
       continue
