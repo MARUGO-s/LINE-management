@@ -969,23 +969,37 @@ function renderDailyChart() {
   const holidayPlugin = {
     id: 'holidayBands',
     beforeDraw(chart) {
-      const { ctx, chartArea } = chart;
-      if (!chartArea) return;
-      const meta = chart.getDatasetMeta(0);
-      if (!meta?.data?.length) return;
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea || !scales.x) return;
       ctx.save();
-      const barW = meta.data[0]?.width ?? (chartArea.width / Math.max(series.length, 1));
+      const barW = chartArea.width / Math.max(series.length, 1);
       series.forEach((d, i) => {
-        if (!JAPANESE_HOLIDAYS.has(d.date)) return;
-        const x = meta.data[i]?.x;
+        const x = scales.x.getPixelForValue(i);
         if (x == null) return;
-        ctx.fillStyle = 'rgba(255,90,90,0.10)';
+        const dow = new Date(d.date).getDay(); // 0=日, 6=土
+        const isHoliday = JAPANESE_HOLIDAYS.has(d.date);
+        const isSat = dow === 6;
+        const isSun = dow === 0;
+        if (!isHoliday && !isSat && !isSun) return;
+
+        // 背景バンド（祝日 > 日曜 > 土曜の優先順で色を決定）
+        if (isHoliday) {
+          ctx.fillStyle = 'rgba(255,90,90,0.12)';
+        } else if (isSun) {
+          ctx.fillStyle = 'rgba(255,110,110,0.08)';
+        } else {
+          ctx.fillStyle = 'rgba(100,160,255,0.08)';
+        }
         ctx.fillRect(x - barW / 2, chartArea.top, barW, chartArea.bottom - chartArea.top);
+
+        // ラベル（祝日優先、次に曜日）
+        const label = isHoliday ? '祝' : isSun ? '日' : '土';
+        const color = (isHoliday || isSun) ? 'rgba(255,90,90,0.9)' : 'rgba(100,160,255,0.9)';
         ctx.font = 'bold 9px sans-serif';
-        ctx.fillStyle = 'rgba(255,90,90,0.9)';
+        ctx.fillStyle = color;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
-        ctx.fillText('祝', x, chartArea.top + 2);
+        ctx.fillText(label, x, chartArea.top + 2);
       });
       ctx.restore();
     },
@@ -995,10 +1009,8 @@ function renderDailyChart() {
   const weatherIconPlugin = {
     id: 'weatherIcons',
     afterDraw(chart) {
-      const { ctx, chartArea } = chart;
-      if (!chartArea) return;
-      const meta = chart.getDatasetMeta(0);
-      if (!meta?.data?.length) return;
+      const { ctx, chartArea, scales } = chart;
+      if (!chartArea || !scales.x) return;
       ctx.save();
       ctx.font = '13px serif';
       ctx.textAlign = 'center';
@@ -1007,8 +1019,7 @@ function renderDailyChart() {
         const w = state.weather[d.date];
         const icon = weatherIcon(w?.rain ?? null, w?.temp ?? null);
         if (!icon) return;
-        const x = meta.data[i]?.x;
-        if (x == null) return;
+        const x = scales.x.getPixelForValue(i);
         const y = chartArea.bottom + 14;
         ctx.fillText(icon, x, y);
       });
