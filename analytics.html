@@ -125,6 +125,11 @@
     .kpi-label { font-size: 0.78rem; color: var(--sub); margin-bottom: 4px; }
     .kpi-value { font-family: "Barlow Condensed", sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--accent); }
     .kpi-sub { font-size: 0.78rem; color: var(--sub); margin-top: 2px; }
+    .kpi-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; min-height: 1.4em; }
+    .kpi-badge { font-size: 0.72rem; font-weight: 700; border-radius: 4px; padding: 1px 5px; }
+    .kpi-badge.up { color: var(--ok); background: rgba(105,237,191,0.12); }
+    .kpi-badge.down { color: var(--bad); background: rgba(255,124,159,0.12); }
+    .kpi-badge.flat { color: var(--sub); }
 
     /* Chart layout */
     .charts-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
@@ -159,6 +164,19 @@
 
     /* weekday labels */
     .weekday-note { font-size: 0.78rem; color: var(--sub); margin-top: 6px; }
+
+    /* weather cross table */
+    .cross-table { border-collapse: collapse; font-size: 0.82rem; min-width: 100%; }
+    .cross-table th, .cross-table td { padding: 7px 10px; text-align: center; border: 1px solid var(--line); white-space: nowrap; }
+    .cross-table thead th { color: var(--sub); font-weight: 600; background: rgba(155,220,255,0.06); }
+    .cross-table tbody th { font-weight: 700; color: var(--txt); background: rgba(155,220,255,0.04); }
+    .cross-table tfoot th, .cross-table tfoot td { color: var(--sub); font-weight: 700; background: rgba(155,220,255,0.06); }
+    .cross-table td.hot { background: rgba(105,237,191,0.18); color: var(--ok); font-weight: 700; }
+    .cross-table td.cold { background: rgba(255,124,159,0.12); color: var(--bad); }
+    .cross-table td.empty { color: var(--sub); opacity: 0.5; }
+    body[data-theme='light'] .cross-table thead th,
+    body[data-theme='light'] .cross-table tfoot td { background: rgba(45,106,151,0.08); }
+    body[data-theme='light'] .cross-table tbody th { background: rgba(45,106,151,0.04); }
 
     /* canvas overflow 防止 / grid item min-width reset */
     html { overflow-x: hidden; }
@@ -283,11 +301,11 @@
   <section class="card">
     <h2 class="card-title">月間サマリー <span id="kpiPeriodLabel" style="font-size:0.85rem;color:var(--sub);font-weight:400"></span></h2>
     <div class="kpi-grid" id="kpiGrid">
-      <div class="kpi-card"><div class="kpi-label">月間総売上</div><div class="kpi-value" id="kpiGross">-</div></div>
-      <div class="kpi-card"><div class="kpi-label">月間純売上</div><div class="kpi-value" id="kpiNet">-</div></div>
-      <div class="kpi-card"><div class="kpi-label">月間会計組数</div><div class="kpi-value" id="kpiParty">-</div><div class="kpi-sub" id="kpiPartyAvg"></div></div>
-      <div class="kpi-card"><div class="kpi-label">月間客数</div><div class="kpi-value" id="kpiGuest">-</div><div class="kpi-sub" id="kpiGuestAvg"></div></div>
-      <div class="kpi-card"><div class="kpi-label">客単価（平均）</div><div class="kpi-value" id="kpiUnit">-</div></div>
+      <div class="kpi-card"><div class="kpi-label">月間総売上</div><div class="kpi-value" id="kpiGross">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeGrossMom"></span><span class="kpi-badge flat" id="kpiBadgeGrossYoy"></span></div></div>
+      <div class="kpi-card"><div class="kpi-label">月間純売上</div><div class="kpi-value" id="kpiNet">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeNetMom"></span><span class="kpi-badge flat" id="kpiBadgeNetYoy"></span></div></div>
+      <div class="kpi-card"><div class="kpi-label">月間会計組数</div><div class="kpi-value" id="kpiParty">-</div><div class="kpi-sub" id="kpiPartyAvg"></div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgePartyMom"></span><span class="kpi-badge flat" id="kpiBadgePartyYoy"></span></div></div>
+      <div class="kpi-card"><div class="kpi-label">月間客数</div><div class="kpi-value" id="kpiGuest">-</div><div class="kpi-sub" id="kpiGuestAvg"></div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeGuestMom"></span><span class="kpi-badge flat" id="kpiBadgeGuestYoy"></span></div></div>
+      <div class="kpi-card"><div class="kpi-label">客単価（平均）</div><div class="kpi-value" id="kpiUnit">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeUnitMom"></span><span class="kpi-badge flat" id="kpiBadgeUnitYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">営業日数</div><div class="kpi-value" id="kpiDays">-</div><div class="kpi-sub" id="kpiReceipts"></div></div>
     </div>
   </section>
@@ -368,6 +386,15 @@
         <canvas id="chartMonthly"></canvas>
         <div class="loading-overlay" id="loadingMonthly">読み込み中…</div>
       </div>
+    </div>
+
+    <!-- Chart 6: 曜日×天候クロス表 -->
+    <div class="chart-card">
+      <div class="chart-head">
+        <span class="chart-title">曜日 × 天候 クロス表</span>
+        <span style="font-size:0.78rem;color:var(--sub)">平均総売上（円）</span>
+      </div>
+      <div id="weatherCrossTable" style="overflow-x:auto"></div>
     </div>
 
   </div><!-- /charts-grid -->
@@ -489,6 +516,11 @@ const dom = {
   kpiParty: $('kpiParty'), kpiPartyAvg: $('kpiPartyAvg'),
   kpiGuest: $('kpiGuest'), kpiGuestAvg: $('kpiGuestAvg'),
   kpiUnit: $('kpiUnit'), kpiDays: $('kpiDays'), kpiReceipts: $('kpiReceipts'),
+  kpiBadgeGrossMom: $('kpiBadgeGrossMom'), kpiBadgeGrossYoy: $('kpiBadgeGrossYoy'),
+  kpiBadgeNetMom: $('kpiBadgeNetMom'), kpiBadgeNetYoy: $('kpiBadgeNetYoy'),
+  kpiBadgePartyMom: $('kpiBadgePartyMom'), kpiBadgePartyYoy: $('kpiBadgePartyYoy'),
+  kpiBadgeGuestMom: $('kpiBadgeGuestMom'), kpiBadgeGuestYoy: $('kpiBadgeGuestYoy'),
+  kpiBadgeUnitMom: $('kpiBadgeUnitMom'), kpiBadgeUnitYoy: $('kpiBadgeUnitYoy'),
   weatherStatus: $('weatherStatus'),
   weatherAddress: $('weatherAddress'),
   loadingDaily: $('loadingDaily'), loadingMonthly: $('loadingMonthly'),
@@ -504,6 +536,41 @@ function yen(v) {
   return '¥' + Number(v).toLocaleString('ja-JP');
 }
 function num(v) { return v == null ? '-' : Number(v).toLocaleString('ja-JP'); }
+
+function setBadge(el, cur, prev, label) {
+  if (!el) return;
+  if (cur == null || prev == null || prev === 0) { el.textContent = ''; el.className = 'kpi-badge flat'; return; }
+  const pct = ((cur - prev) / prev) * 100;
+  const sign = pct >= 0 ? '+' : '';
+  el.textContent = `${label} ${sign}${pct.toFixed(1)}%`;
+  el.className = 'kpi-badge ' + (pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat');
+}
+
+function applyKpiBadges(displayMonth, monthlySeries) {
+  const clearAll = () => {
+    ['GrossMom','GrossYoy','NetMom','NetYoy','PartyMom','PartyYoy','GuestMom','GuestYoy','UnitMom','UnitYoy']
+      .forEach(k => { const el = dom['kpiBadge' + k]; if (el) { el.textContent = ''; el.className = 'kpi-badge flat'; } });
+  };
+  if (!displayMonth || !Array.isArray(monthlySeries) || monthlySeries.length === 0) { clearAll(); return; }
+  const byMonth = Object.fromEntries(monthlySeries.map(r => [r.month, r]));
+  const cur = byMonth[displayMonth];
+  if (!cur) { clearAll(); return; }
+  const [y, mo] = displayMonth.split('-').map(Number);
+  const prevMo = mo === 1 ? `${y - 1}-12` : `${y}-${String(mo - 1).padStart(2, '0')}`;
+  const yoyMo = `${y - 1}-${String(mo).padStart(2, '0')}`;
+  const prev = byMonth[prevMo];
+  const yoy = byMonth[yoyMo];
+  setBadge(dom.kpiBadgeGrossMom,  cur.gross_sales_yen,   prev?.gross_sales_yen,   '前月比');
+  setBadge(dom.kpiBadgeGrossYoy,  cur.gross_sales_yen,   yoy?.gross_sales_yen,    '前年比');
+  setBadge(dom.kpiBadgeNetMom,    cur.net_sales_yen,     prev?.net_sales_yen,     '前月比');
+  setBadge(dom.kpiBadgeNetYoy,    cur.net_sales_yen,     yoy?.net_sales_yen,      '前年比');
+  setBadge(dom.kpiBadgePartyMom,  cur.party_count,       prev?.party_count,       '前月比');
+  setBadge(dom.kpiBadgePartyYoy,  cur.party_count,       yoy?.party_count,        '前年比');
+  setBadge(dom.kpiBadgeGuestMom,  cur.guest_count,       prev?.guest_count,       '前月比');
+  setBadge(dom.kpiBadgeGuestYoy,  cur.guest_count,       yoy?.guest_count,        '前年比');
+  setBadge(dom.kpiBadgeUnitMom,   cur.avg_unit_price_yen, prev?.avg_unit_price_yen, '前月比');
+  setBadge(dom.kpiBadgeUnitYoy,   cur.avg_unit_price_yen, yoy?.avg_unit_price_yen,  '前年比');
+}
 
 function currentJstMonth() {
   const now = new Date();
@@ -703,7 +770,7 @@ async function loadAll() {
     // Monthly trend と Weather を並列取得
     dom.weatherStatus.textContent = '天候取得中…';
     const [monthlyData, weatherMap] = await Promise.all([
-      apiFetch(`/analytics/monthly?months=12&store_key=${state.storeKey}`).catch(() => null),
+      apiFetch(`/analytics/monthly?months=14&store_key=${state.storeKey}`).catch(() => null),
       fetchWeather(state.storeKey, from, to),
     ]);
     state.monthlySeries = monthlyData?.series ?? [];
@@ -726,6 +793,9 @@ async function loadAll() {
     const activeDays = dailySeries.filter(d => d.receipt_count > 0).length;
     dom.kpiDays.textContent = activeDays + ' 日';
     dom.kpiReceipts.textContent = totals?.receipt_count ? `レシート ${totals.receipt_count} 件` : '';
+
+    if (isSingleMonth) applyKpiBadges(displayMonth, state.monthlySeries);
+    else applyKpiBadges(null, state.monthlySeries);
 
     dom.filterMeta.textContent = `対象: ${salesData.selected_store_name ?? '-'} / ${months.length === 1 ? displayMonth : months[0] + '〜' + displayMonth} / レシート ${totals?.receipt_count ?? 0}件`;
     dom.lastRefresh.textContent = '最終更新: ' + new Date().toLocaleTimeString('ja-JP');
@@ -1119,6 +1189,89 @@ function renderMonthlyChart() {
   });
 }
 
+/* ── Chart 6: weekday × weather cross table ── */
+function weatherCategory(rain) {
+  if (rain == null) return null;
+  if (rain < 1)  return '晴れ';
+  if (rain < 5)  return '小雨';
+  if (rain < 20) return '雨';
+  return '大雨';
+}
+
+function renderWeatherCrossTable() {
+  const container = document.getElementById('weatherCrossTable');
+  if (!container) return;
+
+  const series = state.dailySeries.filter(d => d.receipt_count > 0);
+  if (!series.length) { container.innerHTML = '<p style="color:var(--sub);font-size:0.85rem;padding:12px">データなし</p>'; return; }
+
+  const DAYS = ['月', '火', '水', '木', '金', '土', '日'];
+  const CATS = ['晴れ', '小雨', '雨', '大雨'];
+  const CAT_ICON = { '晴れ': '☀️', '小雨': '🌦', '雨': '🌧', '大雨': '⛈' };
+
+  // acc[day][cat] = { sum, count }
+  const acc = {};
+  DAYS.forEach(d => { acc[d] = {}; CATS.forEach(c => { acc[d][c] = { sum: 0, n: 0 }; }); acc[d]['_all'] = { sum: 0, n: 0 }; });
+  const catAcc = {}; CATS.forEach(c => { catAcc[c] = { sum: 0, n: 0 }; }); catAcc['_all'] = { sum: 0, n: 0 };
+
+  for (const row of series) {
+    const date = new Date(row.date + 'T00:00:00+09:00');
+    const dow = DAYS[(date.getDay() + 6) % 7]; // 0=Mon
+    const w = state.weather[row.date];
+    const cat = w ? weatherCategory(w.rain) : null;
+    const g = row.gross_sales_yen;
+    acc[dow]['_all'].sum += g; acc[dow]['_all'].n++;
+    catAcc['_all'].sum += g; catAcc['_all'].n++;
+    if (cat) {
+      acc[dow][cat].sum += g; acc[dow][cat].n++;
+      catAcc[cat].sum += g; catAcc[cat].n++;
+    }
+  }
+
+  const avg = (b) => b.n ? Math.round(b.sum / b.n) : null;
+
+  // Collect all non-null values for heatmap scale
+  const allVals = [];
+  DAYS.forEach(d => CATS.forEach(c => { const v = avg(acc[d][c]); if (v) allVals.push(v); }));
+  const maxVal = allVals.length ? Math.max(...allVals) : 1;
+  const minVal = allVals.length ? Math.min(...allVals) : 0;
+
+  function cellClass(v) {
+    if (v == null) return 'empty';
+    const ratio = maxVal === minVal ? 0.5 : (v - minVal) / (maxVal - minVal);
+    if (ratio >= 0.7) return 'hot';
+    if (ratio <= 0.3) return 'cold';
+    return '';
+  }
+
+  const fmt = v => v == null ? '-' : '¥' + v.toLocaleString('ja-JP');
+
+  let html = '<table class="cross-table"><thead><tr><th>曜日</th>';
+  CATS.forEach(c => { html += `<th>${CAT_ICON[c]} ${c}</th>`; });
+  html += '<th>全天候平均</th><th>日数</th></tr></thead><tbody>';
+
+  DAYS.forEach(d => {
+    html += `<tr><th>${d}</th>`;
+    CATS.forEach(c => {
+      const v = avg(acc[d][c]);
+      const cls = cellClass(v);
+      html += `<td class="${cls}">${fmt(v)}${acc[d][c].n ? `<br><span style="font-size:0.68rem;opacity:0.6">${acc[d][c].n}日</span>` : ''}</td>`;
+    });
+    const allV = avg(acc[d]['_all']);
+    html += `<td style="font-weight:700;color:var(--accent)">${fmt(allV)}</td><td style="color:var(--sub)">${acc[d]['_all'].n}</td></tr>`;
+  });
+
+  html += '</tbody><tfoot><tr><th>天候平均</th>';
+  CATS.forEach(c => {
+    const v = avg(catAcc[c]);
+    html += `<td>${fmt(v)}${catAcc[c].n ? `<br><span style="font-size:0.68rem;opacity:0.6">${catAcc[c].n}日</span>` : ''}</td>`;
+  });
+  const grandAvg = avg(catAcc['_all']);
+  html += `<td style="font-weight:700;color:var(--accent)">${fmt(grandAvg)}</td><td style="color:var(--sub)">${catAcc['_all'].n}</td></tr></tfoot></table>`;
+
+  container.innerHTML = html;
+}
+
 function renderAllCharts() {
   renderDailyChart();
   renderWeekdayChart();
@@ -1126,6 +1279,7 @@ function renderAllCharts() {
   renderTempScatter();
   renderRainScatter();
   renderMonthlyChart();
+  renderWeatherCrossTable();
 }
 
 function refreshAllCharts() {

@@ -132,12 +132,12 @@ Deno.serve(async () => {
       continue
     }
 
-    const reportText = buildReceiptReportMessage(aggregate, {
+    const reportMessages = buildReceiptReportFlexMessages(aggregate, {
       reportTitle: schedule.reportTitle,
       periodStartDate: schedule.periodStartDate,
       periodEndDate: schedule.periodEndDate,
     })
-    const sendResult = await sendLinePushTextMessage(roomId, reportText, lineAccessToken)
+    const sendResult = await sendLinePushMessages(roomId, reportMessages, lineAccessToken)
     if (!sendResult.ok) {
       errors.push(`${roomId}: ${sendResult.error}`)
       continue
@@ -347,26 +347,65 @@ function formatAverageCount(value: number | null): string {
   return value.toFixed(2).replace(/\.?0+$/, "")
 }
 
-function buildReceiptReportMessage(
+function buildReceiptReportFlexMessages(
   aggregate: ReceiptAggregate,
   opts: { reportTitle: string; periodStartDate: string; periodEndDate: string },
-): string {
-  return [
-    `【${opts.reportTitle}】`,
-    `対象期間: ${opts.periodStartDate}〜${opts.periodEndDate}`,
-    `総売上合計: ${formatYenAmount(aggregate.totalGrossSalesYen)}`,
-    `組数合計: ${aggregate.totalPartyCount.toLocaleString("ja-JP")}`,
-    `客数合計: ${aggregate.totalGuestCount.toLocaleString("ja-JP")}`,
-    `総売上平均: ${aggregate.avgGrossSalesYen == null ? "-" : formatYenAmount(aggregate.avgGrossSalesYen)}`,
-    `組数平均: ${formatAverageCount(aggregate.avgPartyCount)}`,
-    `客数平均: ${formatAverageCount(aggregate.avgGuestCount)}`,
-    `レシート件数: ${aggregate.receiptCount.toLocaleString("ja-JP")}`,
-  ].join("\n")
+): Array<Record<string, unknown>> {
+  const adminToken = Deno.env.get("ADMIN_DASHBOARD_TOKEN") ?? ""
+  const dashboardUri = `https://marugo-s.github.io/LINE-management/analytics.html${adminToken ? `?t=${encodeURIComponent(adminToken)}` : ""}`
+
+  const row = (label: string, value: string): Record<string, unknown> => ({
+    type: "box", layout: "baseline", spacing: "sm",
+    contents: [
+      { type: "text", text: label, size: "sm", color: "#888888", flex: 4, wrap: false },
+      { type: "text", text: value, size: "sm", color: "#1F1F1F", flex: 6, wrap: true, weight: "bold" },
+    ],
+  })
+
+  const avgUnit = aggregate.avgGrossSalesYen == null ? null
+    : (aggregate.totalGuestCount > 0 ? Math.round(aggregate.totalGrossSalesYen / aggregate.totalGuestCount) : null)
+
+  const altText = `【${opts.reportTitle}】${opts.periodStartDate}〜${opts.periodEndDate} 総売上: ${formatYenAmount(aggregate.totalGrossSalesYen)}`
+
+  return [{
+    type: "flex",
+    altText: altText.slice(0, 400),
+    contents: {
+      type: "bubble",
+      header: {
+        type: "box", layout: "vertical", paddingAll: "16dp",
+        backgroundColor: "#006c3a",
+        contents: [
+          { type: "text", text: `📊 ${opts.reportTitle}`, size: "lg", weight: "bold", color: "#FFFFFF" },
+          { type: "text", text: `${opts.periodStartDate}〜${opts.periodEndDate}`, size: "xs", color: "#CCFFDD", margin: "sm" },
+        ],
+      },
+      body: {
+        type: "box", layout: "vertical", spacing: "sm", paddingAll: "14dp",
+        contents: [
+          row("総売上", formatYenAmount(aggregate.totalGrossSalesYen)),
+          row("組数合計", `${aggregate.totalPartyCount.toLocaleString("ja-JP")} 組`),
+          row("客数合計", `${aggregate.totalGuestCount.toLocaleString("ja-JP")} 名`),
+          ...(avgUnit != null ? [row("客単価", formatYenAmount(avgUnit))] : []),
+          row("1日平均売上", aggregate.avgGrossSalesYen == null ? "-" : formatYenAmount(aggregate.avgGrossSalesYen)),
+          row("組数平均", `${formatAverageCount(aggregate.avgPartyCount)} 組/日`),
+          row("レシート", `${aggregate.receiptCount.toLocaleString("ja-JP")} 件`),
+        ],
+      },
+      footer: {
+        type: "box", layout: "vertical", spacing: "sm", paddingAll: "12dp",
+        contents: [{
+          type: "button", style: "secondary", height: "sm",
+          action: { type: "uri", label: "📈 売上推移を見る", uri: dashboardUri },
+        }],
+      },
+    },
+  }]
 }
 
-async function sendLinePushTextMessage(
+async function sendLinePushMessages(
   to: string,
-  text: string,
+  messages: Array<Record<string, unknown>>,
   token: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const response = await fetch("https://api.line.me/v2/bot/message/push", {
@@ -375,10 +414,7 @@ async function sendLinePushTextMessage(
       "Content-Type": "application/json",
       "Authorization": `Bearer ${token}`,
     },
-    body: JSON.stringify({
-      to,
-      messages: [{ type: "text", text: text.slice(0, 4900) }],
-    }),
+    body: JSON.stringify({ to, messages: messages.slice(0, 5) }),
   })
   if (!response.ok) {
     const err = await response.text()
