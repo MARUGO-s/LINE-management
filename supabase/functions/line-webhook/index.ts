@@ -5358,9 +5358,8 @@ function buildLineReceiptImageAnalysisReply(
   const rows: Array<{ label: string; value: string; margin?: 'md' }> = [
     { label: '店名', value: receipt.storeName || '-' },
     { label: '日付', value: receipt.date || '-' },
-    { label: '純売上', value: receipt.netSales || '-' },
     { label: '消費税', value: receipt.taxAmount || '-' },
-    { label: '総売上', value: receipt.grossSales || '-' },
+    { label: '総売上（税込）', value: receipt.grossSales || '-' },
     { label: '会計組数', value: receipt.partyCount || '-' },
     { label: '客数', value: receipt.guestCount || '-' },
     { label: '客単価', value: receipt.unitPrice || '-' },

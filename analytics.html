@@ -302,7 +302,7 @@
     <h2 class="card-title">月間サマリー <span id="kpiPeriodLabel" style="font-size:0.85rem;color:var(--sub);font-weight:400"></span></h2>
     <div class="kpi-grid" id="kpiGrid">
       <div class="kpi-card"><div class="kpi-label">月間総売上</div><div class="kpi-value" id="kpiGross">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeGrossMom"></span><span class="kpi-badge flat" id="kpiBadgeGrossYoy"></span></div></div>
-      <div class="kpi-card"><div class="kpi-label">月間純売上</div><div class="kpi-value" id="kpiNet">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeNetMom"></span><span class="kpi-badge flat" id="kpiBadgeNetYoy"></span></div></div>
+
       <div class="kpi-card"><div class="kpi-label">月間会計組数</div><div class="kpi-value" id="kpiParty">-</div><div class="kpi-sub" id="kpiPartyAvg"></div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgePartyMom"></span><span class="kpi-badge flat" id="kpiBadgePartyYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">月間客数</div><div class="kpi-value" id="kpiGuest">-</div><div class="kpi-sub" id="kpiGuestAvg"></div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeGuestMom"></span><span class="kpi-badge flat" id="kpiBadgeGuestYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">客単価（平均）</div><div class="kpi-value" id="kpiUnit">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeUnitMom"></span><span class="kpi-badge flat" id="kpiBadgeUnitYoy"></span></div></div>
@@ -575,12 +575,11 @@ const dom = {
   storeSelect: $('storeSelect'), reloadBtn: $('reloadBtn'),
   filterMeta: $('filterMeta'), themeBtn: $('themeBtn'),
   kpiPeriodLabel: $('kpiPeriodLabel'),
-  kpiGross: $('kpiGross'), kpiNet: $('kpiNet'),
+  kpiGross: $('kpiGross'),
   kpiParty: $('kpiParty'), kpiPartyAvg: $('kpiPartyAvg'),
   kpiGuest: $('kpiGuest'), kpiGuestAvg: $('kpiGuestAvg'),
   kpiUnit: $('kpiUnit'), kpiDays: $('kpiDays'), kpiReceipts: $('kpiReceipts'),
   kpiBadgeGrossMom: $('kpiBadgeGrossMom'), kpiBadgeGrossYoy: $('kpiBadgeGrossYoy'),
-  kpiBadgeNetMom: $('kpiBadgeNetMom'), kpiBadgeNetYoy: $('kpiBadgeNetYoy'),
   kpiBadgePartyMom: $('kpiBadgePartyMom'), kpiBadgePartyYoy: $('kpiBadgePartyYoy'),
   kpiBadgeGuestMom: $('kpiBadgeGuestMom'), kpiBadgeGuestYoy: $('kpiBadgeGuestYoy'),
   kpiBadgeUnitMom: $('kpiBadgeUnitMom'), kpiBadgeUnitYoy: $('kpiBadgeUnitYoy'),
@@ -611,7 +610,7 @@ function setBadge(el, cur, prev, label) {
 
 function applyKpiBadges(displayMonth, monthlySeries) {
   const clearAll = () => {
-    ['GrossMom','GrossYoy','NetMom','NetYoy','PartyMom','PartyYoy','GuestMom','GuestYoy','UnitMom','UnitYoy']
+    ['GrossMom','GrossYoy','PartyMom','PartyYoy','GuestMom','GuestYoy','UnitMom','UnitYoy']
       .forEach(k => { const el = dom['kpiBadge' + k]; if (el) { el.textContent = ''; el.className = 'kpi-badge flat'; } });
   };
   if (!displayMonth || !Array.isArray(monthlySeries) || monthlySeries.length === 0) { clearAll(); return; }
@@ -625,8 +624,6 @@ function applyKpiBadges(displayMonth, monthlySeries) {
   const yoy = byMonth[yoyMo];
   setBadge(dom.kpiBadgeGrossMom,  cur.gross_sales_yen,   prev?.gross_sales_yen,   '前月比');
   setBadge(dom.kpiBadgeGrossYoy,  cur.gross_sales_yen,   yoy?.gross_sales_yen,    '前年比');
-  setBadge(dom.kpiBadgeNetMom,    cur.net_sales_yen,     prev?.net_sales_yen,     '前月比');
-  setBadge(dom.kpiBadgeNetYoy,    cur.net_sales_yen,     yoy?.net_sales_yen,      '前年比');
   setBadge(dom.kpiBadgePartyMom,  cur.party_count,       prev?.party_count,       '前月比');
   setBadge(dom.kpiBadgePartyYoy,  cur.party_count,       yoy?.party_count,        '前年比');
   setBadge(dom.kpiBadgeGuestMom,  cur.guest_count,       prev?.guest_count,       '前月比');
@@ -849,7 +846,6 @@ async function loadAll() {
     const totals = salesData.totals;
     dom.kpiPeriodLabel.textContent = isSingleMonth ? `（${displayMonth}）` : `（${months[0]}〜${displayMonth}）`;
     dom.kpiGross.textContent = yen(totals?.total_gross_sales_yen);
-    dom.kpiNet.textContent = yen(totals?.total_net_sales_yen);
     dom.kpiParty.textContent = num(totals?.total_party_count) + ' 組';
     dom.kpiPartyAvg.textContent = totals?.avg_party_count ? `1日平均 ${totals.avg_party_count} 組` : '';
     dom.kpiGuest.textContent = num(totals?.total_guest_count) + ' 名';
@@ -940,7 +936,6 @@ function renderDailyChart() {
   const { gridColor, tickColor, legendColor } = chartDefaults();
   const labels = series.map(d => d.date.slice(5)); // MM-DD
   const gross = series.map(d => d.gross_sales_yen);
-  const net = series.map(d => d.net_sales_yen);
   const rain = series.map(d => state.weather[d.date]?.rain ?? null);
   const temp = series.map(d => state.weather[d.date]?.temp ?? null);
 
@@ -954,11 +949,6 @@ function renderDailyChart() {
       type: 'line', label: '総売上', data: gross, yAxisID: 'ySales',
       borderColor: cssVar('--c-gross'), backgroundColor: 'rgba(89,220,255,0.1)',
       tension: 0.3, pointRadius: 3, fill: true, order: 1,
-    },
-    {
-      type: 'line', label: '純売上', data: net, yAxisID: 'ySales',
-      borderColor: cssVar('--c-net'), backgroundColor: 'transparent',
-      tension: 0.3, pointRadius: 2, borderDash: [4, 3], order: 2,
     },
     {
       type: 'line', label: '最高気温(℃)', data: temp, yAxisID: 'yTemp',
