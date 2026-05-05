@@ -149,26 +149,34 @@ Deno.serve(async (req) => {
           headers: { 'Content-Type': 'application/json' },
         })
       }
-      const calendarEnvState = loadCalendarEnv()
-      if (!calendarEnvState.ok) {
-        return new Response(
-          JSON.stringify({
-            ok: false,
-            error: 'Calendar credentials missing for tomorrow reminder.',
-            missing: calendarEnvState.missing,
-          }),
-          { status: 500, headers: { 'Content-Type': 'application/json' } },
-        )
-      }
       try {
-        const accessToken = await fetchGoogleAccessToken(calendarEnvState.env)
         const todayJst = getTodayJstDateString(now)
         const tomorrowJst = addDaysToDateString(todayJst, 1)
-        const events = await fetchCalendarEventsForJstDate(calendarEnvState.env, accessToken, tomorrowJst)
+        let events: GoogleCalendarEvent[]
+        let calendarTimezone: string
+        if (tomorrowTest.mockSample) {
+          calendarTimezone = (Deno.env.get('GOOGLE_CALENDAR_TIMEZONE') ?? 'Asia/Tokyo').trim() || 'Asia/Tokyo'
+          events = buildMockTomorrowReminderSampleEvents(tomorrowJst)
+        } else {
+          const calendarEnvState = loadCalendarEnv()
+          if (!calendarEnvState.ok) {
+            return new Response(
+              JSON.stringify({
+                ok: false,
+                error: 'Calendar credentials missing for tomorrow reminder.',
+                missing: calendarEnvState.missing,
+              }),
+              { status: 500, headers: { 'Content-Type': 'application/json' } },
+            )
+          }
+          const accessToken = await fetchGoogleAccessToken(calendarEnvState.env)
+          events = await fetchCalendarEventsForJstDate(calendarEnvState.env, accessToken, tomorrowJst)
+          calendarTimezone = calendarEnvState.env.timezone
+        }
         const reminderFlexMessages = buildTomorrowReminderFlexMessages(
           events,
           tomorrowJst,
-          calendarEnvState.env.timezone,
+          calendarTimezone,
           tomorrowReminderSettings.maxItems,
         )
         const sendResult = await sendLinePushMessages(tomorrowTest.roomId, reminderFlexMessages, lineAccessToken)
@@ -186,6 +194,7 @@ Deno.serve(async (req) => {
           JSON.stringify({
             ok: true,
             mode: 'test_tomorrow_reminder',
+            mock_sample: tomorrowTest.mockSample,
             target_room_id: tomorrowTest.roomId,
             target_date: tomorrowJst,
             event_count: events.length,
@@ -1663,6 +1672,27 @@ async function fetchCalendarEventsForJstDate(
 
 const TOMORROW_REMINDER_EVENTS_PER_BUBBLE = 6
 
+/** Built-in fake events for GET ?test_tomorrow_reminder=1&test_mock_sample=1 (no Google Calendar access). */
+function buildMockTomorrowReminderSampleEvents(tomorrowJst: string): GoogleCalendarEvent[] {
+  return [
+    {
+      summary: '【仮】顧客訪問・キックオフ打ち合わせ',
+      location: '〒150-0002 東京都渋谷区渋谷1-1-1 仮オフィスビル 5F（受付で「株式会社マルゴ」）',
+      description:
+        '出席予定: 山田 / 佐藤\n議題: 来期ロードマップ・予算レンジのすり合わせ\n持ち物: 名刺10枚、資料はTeams共有済み\n備考: 終了後に近隣カフェで軽食（任意）',
+      start: { dateTime: `${tomorrowJst}T10:00:00+09:00` },
+      end: { dateTime: `${tomorrowJst}T11:30:00+09:00` },
+    },
+    {
+      summary: '社内定例（週次レビュー）',
+      location: '本社 3F 会議室A（仮）／ オンライン併用',
+      description: 'Teams 会議（仮URL）: https://example.invalid/meet/weekly-review · アジェンダはチャネルに投稿済み',
+      start: { dateTime: `${tomorrowJst}T15:00:00+09:00` },
+      end: { dateTime: `${tomorrowJst}T16:00:00+09:00` },
+    },
+  ]
+}
+
 function buildTomorrowReminderFlexMessages(
   events: GoogleCalendarEvent[],
   targetDate: string,
@@ -2145,7 +2175,7 @@ function isForceRun(req: Request): boolean {
 /** Optional: send tomorrow calendar Flex to one room (bypasses hour + dedup). Guarded by SUMMARY_CRON_TEST_KEY. */
 function parseTomorrowReminderTestRequest(
   req: Request,
-): { roomId: string; keyFromQuery: string; keyFromHeader: string } | null {
+): { roomId: string; keyFromQuery: string; keyFromHeader: string; mockSample: boolean } | null {
   const url = new URL(req.url)
   const flag = (url.searchParams.get('test_tomorrow_reminder') ?? url.searchParams.get('test_tomorrow') ?? '')
     .trim()
@@ -2161,9 +2191,13 @@ function parseTomorrowReminderTestRequest(
     keyFromHeader.toLowerCase().startsWith('bearer ')
       ? keyFromHeader.slice(7).trim()
       : keyFromHeader
+  const mockRaw = (url.searchParams.get('test_mock_sample') ?? url.searchParams.get('mock_sample') ?? '')
+    .trim()
+    .toLowerCase()
+  const mockSample = mockRaw === '1' || mockRaw === 'true' || mockRaw === 'yes' || mockRaw === 'on'
   if (!roomId) return null
   if (!keyFromQuery && !bearer) return null
-  return { roomId, keyFromQuery, keyFromHeader: bearer }
+  return { roomId, keyFromQuery, keyFromHeader: bearer, mockSample }
 }
 
 function normalizeMessageCleanupTiming(value: unknown): MessageCleanupTiming {
