@@ -854,7 +854,8 @@ async function fetchWeather(storeKey, fromDate, toDate) {
   const today = new Date(todayStr);
   const y = new Date(today); y.setDate(y.getDate() - 1);
   const yesterdayStr = y.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  const f = new Date(today); f.setDate(f.getDate() + 16);
+  // Open-Meteo daily forecast は「今日を含めて最大16日」想定なので +15 日で上限化
+  const f = new Date(today); f.setDate(f.getDate() + 15);
   const forecastApiCapStr = f.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
   const forecastToStr = displayTo > forecastApiCapStr ? forecastApiCapStr : displayTo;
   const safeFrom = fromDate;
