@@ -451,10 +451,11 @@ const LINE_MEDIA_BUCKET = 'line-media'
 const MEDIA_SIGNED_URL_EXPIRES_SEC = 60 * 30
 /** 「メディアURL [件数]」で返す最大件数（トーク文字数・メッセージ数の上限を考慮） */
 const SAVED_MEDIA_URL_COMMAND_MAX = 3
-const MEDIA_SEARCH_CANDIDATE_MAX = 10
+const MEDIA_SEARCH_CANDIDATE_MAX = 80
 const MEDIA_SEARCH_FETCH_LIMIT = 80
 /** キーワード指定時は解析テキスト一致まで見るため多めに取得 */
 const MEDIA_SEARCH_KEYWORD_FETCH_LIMIT = 240
+const MEDIA_SEARCH_REPLY_PAGE_SIZE = 20
 /** 会話検索に合わせて表示する保存メディアの最大件数 */
 const MESSAGE_SEARCH_MEDIA_APPEND_MAX = 15
 /** 会話検索のメディア一覧で付与する署名付き URL の最大件数 */
@@ -929,7 +930,7 @@ Deno.serve(async (req) => {
                   item_cursor: 0,
                   items: firstItems,
                   expires_at: '',
-                }, firstItems, { keywordQuery: keyword })
+                }, firstItems, { keywordQuery: keyword, itemCursor: 0 })
               } else {
                 await savePendingMediaSearch(supabase, roomId, userId, {
                   stage: 'expand_confirm',
@@ -2758,8 +2759,17 @@ function resolveMediaSearchDisplayName(
   const mt = String(mediaType ?? '').trim().toLowerCase()
   const original = String(originalFileName ?? '').trim()
   const preview = String(previewShort ?? '').trim()
-  if ((mt === 'image' || mt === 'file') && preview) return clipMediaPreview(preview, 60)
+  // 管理画面のファイル名表示と揃える: 画像のみ解析結果を優先し、ファイルは元ファイル名を表示
+  if (mt === 'image' && preview) return clipMediaPreview(preview, 60)
   return original || 'media-file'
+}
+
+function isReceiptLikeMedia(mediaType: string, originalFileName: string, preview: string): boolean {
+  const mt = String(mediaType ?? '').trim().toLowerCase()
+  if (mt !== 'image') return false
+  const merged = `${String(originalFileName ?? '')}\n${String(preview ?? '')}`.toLowerCase()
+  if (!merged.trim()) return false
+  return /(レシート|領収書|receipt|tax\s*invoice|小計|合計|お預り|お釣り|釣銭|card|visa|mastercard)/i.test(merged)
 }
 
 function parseReceiptCorrectionStartCommand(rawText: string): boolean {
@@ -3044,18 +3054,6 @@ function nextMediaSearchPeriod(current: MediaSearchPeriodMonths): MediaSearchPer
   return null
 }
 
-function buildMediaSearchCategoryPrompt(periodMonths: MediaSearchPeriodMonths): string {
-  const periodLabel = periodMonths === 0 ? '全期間' : `${periodMonths}ヶ月`
-  return [
-    `期間は ${periodLabel} です。次に関連カテゴリを選んでください。`,
-    '1) すべて  2) 労務  3) シフト  4) 原価棚卸  5) レシピ',
-    '6) 請求支払  7) 売上予実  8) 発注納品  9) 衛生HACCP  10) マニュアル',
-    '例: 3  または  シフト',
-    '※ 番号でもキーワードでもOKです。',
-    '絞り込みは「キー:語句」または語句だけ（ファイル名・ファイル内の抽出テキスト）。',
-  ].join('\n')
-}
-
 function parseMediaSearchStartCommand(rawText: string): boolean {
   const normalized = normalizeForRuleParsing(String(rawText ?? '')).trim()
   if (!normalized) return false
@@ -3081,11 +3079,24 @@ function parseFileSearchStartDirective(rawText: string): { matched: boolean; key
 function parseMediaSearchPeriodChoice(rawText: string): MediaSearchPeriodMonths | null {
   const compact = normalizeForRuleParsing(String(rawText ?? '')).replace(/\s+/g, '')
   if (!compact) return null
-  if (/^(1|1ヶ月|1か月|一ヶ月)$/.test(compact)) return 1
-  if (/^(2|３ヶ月|3ヶ月|3か月|三ヶ月)$/.test(compact)) return 3
-  if (/^(3|６ヶ月|6ヶ月|6か月|六ヶ月|半年)$/.test(compact)) return 6
-  if (/^(4|1年|一年|12ヶ月|12か月|十二ヶ月)$/.test(compact)) return 12
-  if (/^(5|全期間|すべて|全部|全件)$/.test(compact)) return 0
+  const norm = compact
+    .replace(/ケ月/g, 'ヶ月')
+    .replace(/ヵ月/g, 'ヶ月')
+    .replace(/カ月/g, 'ヶ月')
+    .replace(/ケ月/g, 'ヶ月')
+  // 単独の数字は「月数」として扱う（"3" は3ヶ月）
+  if (/^(1|1ヶ月|1か月|一ヶ月)$/.test(norm)) return 1
+  if (/^(3|３|2|３ヶ月|3ヶ月|3か月|三ヶ月)$/.test(norm)) return 3
+  if (/^(6|６|６ヶ月|6ヶ月|6か月|六ヶ月|半年)$/.test(norm)) return 6
+  if (/^(12|１２|4|1年|一年|12ヶ月|12か月|十二ヶ月)$/.test(norm)) return 12
+  if (/^(5|全期間|すべて|全部|全件)$/.test(norm)) return 0
+
+  // 口語・文章入力（例: 「3ヶ月以内」「6か月で検索」）にも対応
+  if (/(?:^|[^0-9])(1|１)ヶ?か?月(?:以内|分|で|間)?/.test(norm)) return 1
+  if (/(?:^|[^0-9])(3|３)ヶ?か?月(?:以内|分|で|間)?/.test(norm)) return 3
+  if (/(?:^|[^0-9])(6|６)ヶ?か?月(?:以内|分|で|間)?/.test(norm) || /半年/.test(norm)) return 6
+  if (/(?:^|[^0-9])(12|１２)ヶ?か?月(?:以内|分|で|間)?/.test(norm) || /1年|一年/.test(norm)) return 12
+  if (/全期間|すべて|全部|全件/.test(norm)) return 0
   return null
 }
 
@@ -3252,7 +3263,7 @@ async function tryHandleCasualMediaLookupQuestion(
     itemCursor: 0,
     items,
   })
-  return buildMediaSearchCandidateListReply(pendingShell, items, { keywordQuery: kw })
+  return buildMediaSearchCandidateListReply(pendingShell, items, { keywordQuery: kw, itemCursor: 0 })
 }
 
 function resolveMediaSearchConversationKey(roomId: string, userId: string | null): string {
@@ -3903,6 +3914,24 @@ async function buildMediaSearchCandidates(
     return []
   }
   const rows = Array.isArray(data) ? (data as Record<string, unknown>[]) : []
+  const lineMessageIds = rows
+    .map((row) => String(row.line_message_id ?? '').trim())
+    .filter(Boolean)
+  const receiptMessageIdSet = new Set<string>()
+  if (lineMessageIds.length > 0) {
+    const { data: receiptRows, error: receiptError } = await supabase
+      .from('line_receipt_entries')
+      .select('line_message_id')
+      .in('line_message_id', lineMessageIds)
+    if (receiptError) {
+      console.error('Failed to fetch receipt entry ids for media search:', receiptError.message)
+    } else {
+      for (const row of (Array.isArray(receiptRows) ? receiptRows : [])) {
+        const id = String((row as any)?.line_message_id ?? '').trim()
+        if (id) receiptMessageIdSet.add(id)
+      }
+    }
+  }
   const roomLabelMap = await loadRoomLabelsForHits(
     supabase,
     rows.map((row) => ({ room_id: String(row.room_id ?? '') })),
@@ -3917,6 +3946,7 @@ async function buildMediaSearchCandidates(
     const lineMessageId = String(row.line_message_id ?? '').trim()
     const storagePath = String(row.storage_path ?? '').trim()
     if (!lineMessageId || !storagePath) continue
+    if (receiptMessageIdSet.has(lineMessageId)) continue
     const fileName = String(row.original_file_name ?? '').trim() || `media-${lineMessageId}`
     const senderId = String(row.user_id ?? '').trim()
     const senderNameStored = String(row.sender_display_name ?? '').trim()
@@ -3927,6 +3957,7 @@ async function buildMediaSearchCandidates(
     }
     const preview = String(row.content_preview ?? '').trim()
     const mediaType = resolveStoredMediaType(row)
+    if (isReceiptLikeMedia(mediaType, fileName, preview)) continue
     const mimeType = row.mime_type == null ? '' : String(row.mime_type).trim()
     const category = computeMediaCategory(`${fileName}\n${preview}`)
     if (options.categoryKey !== 'all' && category.key !== options.categoryKey) continue
@@ -3956,38 +3987,35 @@ async function buildMediaSearchCandidates(
 function buildMediaSearchCandidateListReply(
   pending: PendingMediaSearch,
   items: MediaSearchCandidate[],
-  opts?: { keywordQuery?: string },
+  opts?: { keywordQuery?: string; itemCursor?: number },
 ): string {
   const periodLabel = pending.period_months === 0 ? '全期間' : `${pending.period_months}ヶ月`
-  const categoryLabel = pending.category_key === 'all'
-    ? 'すべて'
-    : (MEDIA_CATEGORY_DEFINITIONS.find((row) => row.key === pending.category_key)?.label ?? pending.category_key)
-  const senderLabel = (opts?.keywordQuery && pending.sender_query === opts.keywordQuery)
-    ? '指定なし'
-    : (pending.sender_query || '指定なし')
   const kw = String(opts?.keywordQuery ?? '').trim()
-  const headerBits = [`期間:${periodLabel}`, `カテゴリ:${categoryLabel}`, `送信者:${senderLabel}`]
+  const cursorRaw = Number(opts?.itemCursor ?? pending.item_cursor ?? 0)
+  const cursor = Number.isFinite(cursorRaw) && cursorRaw >= 0 ? Math.floor(cursorRaw) : 0
+  const pageItems = items.slice(cursor, cursor + MEDIA_SEARCH_REPLY_PAGE_SIZE)
+  const shownEnd = cursor + pageItems.length
+  const hasMore = shownEnd < items.length
+  const headerBits = [`期間:${periodLabel}`]
   if (kw) headerBits.push(`キー:${kw}`)
+  headerBits.push(`表示:${Math.min(shownEnd, items.length)}/${items.length}`)
   const linesOut = [
     `メディア候補（${headerBits.join(' / ')}）`,
   ]
   if (items.length === 0) {
     linesOut.push('候補が見つかりませんでした。')
-    linesOut.push('条件を変える場合: 送信者:山田 / カテゴリ:シフト / キー:語句 / 期間変更')
+    linesOut.push('条件を変える場合: キー:語句 / 期間変更')
     return linesOut.join('\n')
   }
-  for (const item of items) {
-    const dateLabel = formatSearchDateTime(item.created_at)
-    linesOut.push(`${item.idx}) ${item.display_name} [${dateLabel}]`)
-    linesOut.push(`   ${item.room_label} | ${item.sender_name} | ${item.category_label}`)
-    if (item.preview_short) {
-      linesOut.push(`   解析: ${item.preview_short}`)
-    }
-    linesOut.push('')
+  for (const item of pageItems) {
+    linesOut.push(`${item.idx}) ${item.display_name}`)
   }
   linesOut.push('番号返信でURL送信（例: 2）')
+  if (hasMore) {
+    linesOut.push(`まだ残りのファイルがあります。「続き」で次の${MEDIA_SEARCH_REPLY_PAGE_SIZE}件を表示します（残り${items.length - shownEnd}件）。`)
+  }
   linesOut.push('絞り込み: 語句をそのまま返信（ファイル名・ファイル内の抽出テキスト）または キー:語句')
-  linesOut.push('条件変更: 送信者:名前 / カテゴリ:シフト / 期間変更')
+  linesOut.push('条件変更: 期間変更')
   return linesOut.join('\n')
 }
 
@@ -4017,15 +4045,27 @@ async function tryHandlePendingMediaSearch(
     if (period == null) {
       return buildMediaSearchPeriodPrompt()
     }
-    await savePendingMediaSearch(supabase, roomId, userId, {
-      stage: 'select_category',
+    const items = await buildMediaSearchCandidates(supabase, {
       periodMonths: period,
-      categoryKey: pending.category_key,
+      categoryKey: 'all',
+      senderQuery: '',
+    })
+    await savePendingMediaSearch(supabase, roomId, userId, {
+      stage: 'select_item',
+      periodMonths: period,
+      categoryKey: 'all',
       senderQuery: pending.sender_query,
       itemCursor: 0,
-      items: [],
+      items,
     })
-    return buildMediaSearchCategoryPrompt(period)
+    return buildMediaSearchCandidateListReply({
+      ...pending,
+      stage: 'select_item',
+      period_months: period,
+      category_key: 'all',
+      item_cursor: 0,
+      items,
+    }, items, { itemCursor: 0 })
   }
 
   if (pending.stage === 'input_keyword') {
@@ -4054,8 +4094,9 @@ async function tryHandlePendingMediaSearch(
         period_months: 1,
         category_key: 'all',
         sender_query: keyword,
+        item_cursor: 0,
         items,
-      }, items, { keywordQuery: keyword })
+      }, items, { keywordQuery: keyword, itemCursor: 0 })
     }
     await savePendingMediaSearch(supabase, roomId, userId, {
       stage: 'expand_confirm',
@@ -4112,8 +4153,9 @@ async function tryHandlePendingMediaSearch(
         period_months: next,
         category_key: 'all',
         sender_query: keyword,
+        item_cursor: 0,
         items,
-      }, items, { keywordQuery: keyword })
+      }, items, { keywordQuery: keyword, itemCursor: 0 })
     }
     const nextAfter = nextMediaSearchPeriod(next)
     if (nextAfter) {
@@ -4131,20 +4173,18 @@ async function tryHandlePendingMediaSearch(
     return `「${keyword}」は12ヶ月以内でも見つかりませんでした。`
   }
 
+  // 旧フロー互換: 既存pendingがカテゴリ選択待ちなら、そのまま一覧表示へ移行する
   if (pending.stage === 'select_category') {
-    const categoryKey = parseMediaSearchCategoryChoice(normalizedText)
-    if (!categoryKey) {
-      return buildMediaSearchCategoryPrompt(pending.period_months)
-    }
     const items = await buildMediaSearchCandidates(supabase, {
       periodMonths: pending.period_months,
-      categoryKey,
-      senderQuery: pending.sender_query,
+      categoryKey: 'all',
+      senderQuery: '',
+      ...(pending.sender_query ? { keywordQuery: pending.sender_query } : {}),
     })
     await savePendingMediaSearch(supabase, roomId, userId, {
       stage: 'select_item',
       periodMonths: pending.period_months,
-      categoryKey,
+      categoryKey: 'all',
       senderQuery: pending.sender_query,
       itemCursor: 0,
       items,
@@ -4152,9 +4192,10 @@ async function tryHandlePendingMediaSearch(
     return buildMediaSearchCandidateListReply({
       ...pending,
       stage: 'select_item',
-      category_key: categoryKey,
+      category_key: 'all',
+      item_cursor: 0,
       items,
-    }, items)
+    }, items, pending.sender_query ? { keywordQuery: pending.sender_query, itemCursor: 0 } : { itemCursor: 0 })
   }
 
   if (/^(期間変更|期間を変更|期間)$/i.test(normalizedText)) {
@@ -4171,29 +4212,50 @@ async function tryHandlePendingMediaSearch(
 
   const filter = parseMediaSearchFilterText(normalizedText)
   if (filter) {
-    const nextCategory = filter.categoryKey ?? pending.category_key
-    const nextSender = filter.senderQuery != null ? filter.senderQuery : pending.sender_query
     const filterKw = filter.keywordQuery?.trim() || undefined
+    if (!filterKw) {
+      return '候補番号（例: 1）または「キー:語句」を返信してください。'
+    }
     const items = await buildMediaSearchCandidates(supabase, {
       periodMonths: pending.period_months,
-      categoryKey: nextCategory,
-      senderQuery: nextSender,
+      categoryKey: 'all',
+      senderQuery: '',
       ...(filterKw ? { keywordQuery: filterKw } : {}),
     })
     await savePendingMediaSearch(supabase, roomId, userId, {
       stage: 'select_item',
       periodMonths: pending.period_months,
-      categoryKey: nextCategory,
-      senderQuery: nextSender,
+      categoryKey: 'all',
+      senderQuery: pending.sender_query,
       itemCursor: 0,
       items,
     })
     return buildMediaSearchCandidateListReply({
       ...pending,
-      category_key: nextCategory,
-      sender_query: nextSender,
+      category_key: 'all',
+      item_cursor: 0,
       items,
-    }, items, filterKw ? { keywordQuery: filterKw } : undefined)
+    }, items, filterKw ? { keywordQuery: filterKw, itemCursor: 0 } : { itemCursor: 0 })
+  }
+
+  if (pending.stage === 'select_item' && /^(続き|つづき|次|次へ|もっと|more)$/i.test(normalizedText)) {
+    const nextCursor = pending.item_cursor + MEDIA_SEARCH_REPLY_PAGE_SIZE
+    if (nextCursor >= pending.items.length) {
+      return 'これで最後の候補です。番号を返信してください。'
+    }
+    await savePendingMediaSearch(supabase, roomId, userId, {
+      stage: 'select_item',
+      periodMonths: pending.period_months,
+      categoryKey: pending.category_key,
+      senderQuery: pending.sender_query,
+      itemCursor: nextCursor,
+      items: pending.items,
+    })
+    return buildMediaSearchCandidateListReply(
+      { ...pending, item_cursor: nextCursor },
+      pending.items,
+      { itemCursor: nextCursor },
+    )
   }
 
   const numberMatch = normalizedText.match(/^#?(\d{1,2})$/)
@@ -4261,35 +4323,12 @@ async function tryHandlePendingMediaSearch(
           itemCursor: 0,
           items,
         })
-        return buildMediaSearchCandidateListReply({ ...pending, items }, items, { keywordQuery })
+        return buildMediaSearchCandidateListReply({ ...pending, item_cursor: 0, items }, items, { keywordQuery, itemCursor: 0 })
       }
     }
   }
 
-  const quickCategory = parseMediaSearchCategoryChoice(normalizedText)
-  if (quickCategory) {
-    const items = await buildMediaSearchCandidates(supabase, {
-      periodMonths: pending.period_months,
-      categoryKey: quickCategory,
-      senderQuery: '',
-      ...(pending.sender_query ? { keywordQuery: pending.sender_query } : {}),
-    })
-    await savePendingMediaSearch(supabase, roomId, userId, {
-      stage: 'select_item',
-      periodMonths: pending.period_months,
-      categoryKey: quickCategory,
-      senderQuery: pending.sender_query,
-      itemCursor: 0,
-      items,
-    })
-    return buildMediaSearchCandidateListReply({
-      ...pending,
-      category_key: quickCategory,
-      items,
-    }, items)
-  }
-
-  return '候補番号（例: 1）を返信してください。絞り込みは語句・「キー:語句」、または「〜の画像あった？」のような口語でも構いません。条件変更は「送信者:山田」「カテゴリ:シフト」「期間変更」です。'
+  return '候補番号（例: 1）を返信してください。続きは「続き」、絞り込みは語句または「キー:語句」、条件変更は「期間変更」です。'
 }
 
 async function loadLineMediaUsageTotals(

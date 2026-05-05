@@ -295,6 +295,10 @@ Deno.serve(async (req) => {
       const result = await fetchAnalyticsMonthly(supabase, url)
       return json(result, 200)
     }
+    if (req.method === "GET" && path === "/usage/push-monthly") {
+      const result = await fetchMonthlyPushUsageSummary(supabase)
+      return json(result, 200)
+    }
 
     if (req.method === "POST" && path === "/documents") {
       const created = await uploadDocumentFile(req, supabase)
@@ -787,7 +791,7 @@ async function fetchState(
   const logsFetchLimit = logsLimit * 8
 
   const globalSettings = await fetchGlobalSettings(supabase)
-  const [roomSettingsRes, roomOverviewRes, logsRes, webhookLogsRes, storageUsageState, userPermissionsRes] =
+  const [roomSettingsRes, roomOverviewRes, logsRes, webhookLogsRes, storageUsageState, userPermissionsRes, pushUsageSummary] =
     await Promise.all([
       supabase
         .from("room_summary_settings")
@@ -809,6 +813,7 @@ async function fetchState(
         .from("line_user_permissions")
         .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_calendar_view, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
         .limit(USER_PERMISSION_SORT_FETCH_CAP),
+      fetchMonthlyPushUsageSummary(supabase),
     ])
 
   if (roomSettingsRes.error) {
@@ -843,9 +848,91 @@ async function fetchState(
     room_overview: roomOverviewRes.data ?? [],
     delivery_logs: filteredLogs,
     webhook_delivery_logs: (webhookLogsRes.data ?? []).slice(0, logsLimit),
+    push_usage_monthly: pushUsageSummary,
     storage_usage: storageUsageState.stats,
     storage_usage_error: storageUsageState.error,
     generated_at: new Date().toISOString(),
+  }
+}
+
+function getCurrentJstMonthUtcBounds(): { monthLabel: string; startUtcIso: string; endUtcIso: string } {
+  const now = new Date()
+  const nowJstMs = now.getTime() + 9 * 60 * 60 * 1000
+  const nowJst = new Date(nowJstMs)
+  const y = nowJst.getUTCFullYear()
+  const m = nowJst.getUTCMonth()
+  const startUtc = new Date(Date.UTC(y, m, 1, 0, 0, 0) - (9 * 60 * 60 * 1000))
+  const endUtc = new Date(Date.UTC(y, m + 1, 1, 0, 0, 0) - (9 * 60 * 60 * 1000))
+  return {
+    monthLabel: `${String(y).padStart(4, "0")}-${String(m + 1).padStart(2, "0")}`,
+    startUtcIso: startUtc.toISOString(),
+    endUtcIso: endUtc.toISOString(),
+  }
+}
+
+type PushUsageItem = { source: string; context: string; count: number }
+
+async function fetchMonthlyPushUsageSummary(
+  supabase: ReturnType<typeof createClient>,
+): Promise<{
+  month_jst: string
+  total_push_rows: number
+  webhook_push_rows: number
+  summary_push_rows: number
+  by_source_context: PushUsageItem[]
+}> {
+  const bounds = getCurrentJstMonthUtcBounds()
+  const [webhookRes, summaryRes] = await Promise.all([
+    supabase
+      .from("line_webhook_delivery_logs")
+      .select("context")
+      .eq("method", "push")
+      .eq("line_send_success", true)
+      .gte("created_at", bounds.startUtcIso)
+      .lt("created_at", bounds.endUtcIso),
+    supabase
+      .from("summary_delivery_logs")
+      .select("reason, details")
+      .eq("line_send_attempted", true)
+      .eq("line_send_success", true)
+      .gte("run_at", bounds.startUtcIso)
+      .lt("run_at", bounds.endUtcIso),
+  ])
+  if (webhookRes.error) {
+    throw { status: 500, message: `Failed to fetch webhook push usage: ${webhookRes.error.message}` } satisfies AppError
+  }
+  if (summaryRes.error) {
+    throw { status: 500, message: `Failed to fetch summary push usage: ${summaryRes.error.message}` } satisfies AppError
+  }
+  const counter = new Map<string, number>()
+  const webhookRows = Array.isArray(webhookRes.data) ? webhookRes.data : []
+  const summaryRows = Array.isArray(summaryRes.data) ? summaryRes.data : []
+  for (const row of webhookRows) {
+    const context = String((row as any)?.context ?? "").trim() || "unknown"
+    const key = `line-webhook\t${context}`
+    counter.set(key, (counter.get(key) ?? 0) + 1)
+  }
+  for (const row of summaryRows) {
+    const details = ((row as any)?.details && typeof (row as any).details === "object") ? (row as any).details as Record<string, unknown> : {}
+    const source = String(details.source ?? "summary_delivery_logs").trim() || "summary_delivery_logs"
+    const contextRaw = String(details.context ?? "").trim() || String((row as any)?.reason ?? "").trim()
+    const context = contextRaw || "unknown"
+    const key = `${source}\t${context}`
+    counter.set(key, (counter.get(key) ?? 0) + 1)
+  }
+  const bySourceContext: PushUsageItem[] = Array.from(counter.entries())
+    .map(([k, count]) => {
+      const [source, context] = k.split("\t")
+      return { source: source || "unknown", context: context || "unknown", count }
+    })
+    .sort((a, b) => (b.count - a.count) || a.source.localeCompare(b.source) || a.context.localeCompare(b.context))
+
+  return {
+    month_jst: bounds.monthLabel,
+    total_push_rows: webhookRows.length + summaryRows.length,
+    webhook_push_rows: webhookRows.length,
+    summary_push_rows: summaryRows.length,
+    by_source_context: bySourceContext,
   }
 }
 

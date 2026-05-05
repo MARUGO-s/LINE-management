@@ -1967,6 +1967,8 @@
         <div id="globalMeta" class="meta preline"></div>
         <div id="storageUsageSummary" class="meta usage-summary"></div>
         <div id="storageUsageDetails" class="meta usage-details"></div>
+        <div id="pushUsageSummary" class="meta usage-summary"></div>
+        <div id="pushUsageDetails" class="meta usage-details"></div>
         <div class="storage-chart">
           <div id="storageUsagePie" class="storage-pie" aria-label="テーブル容量内訳円グラフ">
             <div id="storageUsagePieCenter" class="storage-pie-center">
@@ -2253,6 +2255,8 @@
       globalMeta: document.getElementById('globalMeta'),
       storageUsageSummary: document.getElementById('storageUsageSummary'),
       storageUsageDetails: document.getElementById('storageUsageDetails'),
+      pushUsageSummary: document.getElementById('pushUsageSummary'),
+      pushUsageDetails: document.getElementById('pushUsageDetails'),
       storageUsagePie: document.getElementById('storageUsagePie'),
       storageUsagePieCenterValue: document.getElementById('storageUsagePieCenterValue'),
       storageUsageLegend: document.getElementById('storageUsageLegend'),
@@ -3434,6 +3438,33 @@
       dom.storageUsageDetails.textContent = '';
     }
 
+    function renderPushUsage(pushUsageMonthly) {
+      const usage = pushUsageMonthly && typeof pushUsageMonthly === 'object' ? pushUsageMonthly : null;
+      if (!usage) {
+        dom.pushUsageSummary.textContent = 'LINE push概算（当月）: 取得待ち';
+        dom.pushUsageDetails.textContent = '';
+        return;
+      }
+      const month = String(usage.month_jst || '').trim() || '-';
+      const total = Number(usage.total_push_rows || 0);
+      const webhookRows = Number(usage.webhook_push_rows || 0);
+      const summaryRows = Number(usage.summary_push_rows || 0);
+      dom.pushUsageSummary.textContent =
+        'LINE push概算（' + month + ' JST）: '
+        + total + '件（Webhook: ' + webhookRows + ' / 定期・ジョブ: ' + summaryRows + '）';
+      const topItems = Array.isArray(usage.by_source_context) ? usage.by_source_context.slice(0, 5) : [];
+      if (topItems.length === 0) {
+        dom.pushUsageDetails.textContent = '内訳: 送信ログなし';
+        return;
+      }
+      dom.pushUsageDetails.textContent = '内訳上位: ' + topItems.map(function(row) {
+        const source = String(row && row.source || 'unknown');
+        const context = String(row && row.context || 'unknown');
+        const count = Number(row && row.count || 0);
+        return source + ' / ' + context + ' (' + count + ')';
+      }).join(' | ');
+    }
+
     /** 会話検索除外ルームIDのうち、現在のルーム一覧に存在するものだけを残す（削除済みルームIDは件数に含めない） */
     function getKnownRoomIdSetForExclusions() {
       const rooms = currentState && Array.isArray(currentState.room_overview) ? currentState.room_overview : [];
@@ -4395,6 +4426,7 @@
       renderRooms(state.room_overview || [], state.room_settings || []);
       renderUserPermissions(state.user_permissions || []);
       renderStorageUsage(state.storage_usage, state.storage_usage_error, state.generated_at);
+      renderPushUsage(state.push_usage_monthly);
       dom.lastRefresh.textContent = '最終更新: ' + formatDate(state.generated_at);
     }
 
@@ -4846,6 +4878,8 @@
       dom.globalMeta.textContent = '';
       dom.storageUsageSummary.textContent = '';
       dom.storageUsageDetails.textContent = '';
+      dom.pushUsageSummary.textContent = '';
+      dom.pushUsageDetails.textContent = '';
       dom.lastRefresh.textContent = '最終更新: なし';
       renderGmailAccountState(null);
       closeUserPermissionEditModal();
