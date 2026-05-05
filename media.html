@@ -264,11 +264,72 @@
       margin-top: 12px;
     }
 
+    .view-switch {
+      display: inline-flex;
+      gap: 6px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(8, 21, 35, 0.45);
+    }
+
+    .view-tab {
+      min-height: 32px;
+      padding: 0 10px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--sub);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .view-tab.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(87, 216, 255, 0.12);
+    }
+
     .item {
       border: 1px solid rgba(155, 220, 255, 0.22);
       border-radius: 12px;
       background: rgba(5, 17, 28, 0.65);
       overflow: hidden;
+    }
+
+    .media-name-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .media-name-row {
+      border: 1px solid rgba(155, 220, 255, 0.22);
+      border-radius: 10px;
+      background: rgba(5, 17, 28, 0.55);
+      padding: 10px 12px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .media-name-title {
+      font-size: 0.92rem;
+      color: var(--txt);
+      font-weight: 700;
+      word-break: break-word;
+    }
+
+    .media-name-meta {
+      font-size: 0.79rem;
+      color: var(--sub);
+      word-break: break-word;
+    }
+
+    .media-name-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 4px;
     }
 
     .preview {
@@ -838,6 +899,10 @@
         <button id="applyFilterBtn" class="button primary">表示</button>
         <button id="reloadBtn" class="button">再読み込み</button>
         <button id="toggleMediaBulkDeleteBtn" class="button danger">一括削除</button>
+        <div class="view-switch" role="tablist" aria-label="メディア表示切替">
+          <button id="mediaViewCardBtn" class="view-tab active" type="button" role="tab" aria-selected="true">写真付き</button>
+          <button id="mediaViewNameBtn" class="view-tab" type="button" role="tab" aria-selected="false">ファイル名一覧</button>
+        </div>
       </div>
       <div class="controls" style="margin-top:8px;">
         <span class="meta" style="margin:0;">アップロード上限（MB未満）</span>
@@ -962,6 +1027,8 @@
       permissionSelectedUserIds: new Set(),
       mediaBulkDeleteMode: false,
       mediaSelectedIds: new Set(),
+      mediaItems: [],
+      mediaView: 'card',
       theme: 'dark',
     };
 
@@ -978,6 +1045,8 @@
       applyFilterBtn: document.getElementById('applyFilterBtn'),
       reloadBtn: document.getElementById('reloadBtn'),
       toggleMediaBulkDeleteBtn: document.getElementById('toggleMediaBulkDeleteBtn'),
+      mediaViewCardBtn: document.getElementById('mediaViewCardBtn'),
+      mediaViewNameBtn: document.getElementById('mediaViewNameBtn'),
       mediaUploadMaxMbInput: document.getElementById('mediaUploadMaxMbInput'),
       saveMediaUploadLimitBtn: document.getElementById('saveMediaUploadLimitBtn'),
       mediaUploadLimitMeta: document.getElementById('mediaUploadLimitMeta'),
@@ -1687,6 +1756,60 @@
       ].join('');
     }
 
+    function renderMediaNameItem(item) {
+      const type = String(item.media_type || 'file');
+      const signedUrl = String(item.signed_url || '');
+      const downloadUrl = String(item.download_url || signedUrl || '');
+      const name = item.original_file_name ? String(item.original_file_name) : '(名称なし)';
+      const downloadName = safeDownloadName(name === '(名称なし)' ? '' : name, String(item.line_message_id || 'line-media'));
+      const mediaId = Number(item && item.id || 0);
+      const mediaSelected = Number.isInteger(mediaId) && state.mediaSelectedIds.has(mediaId);
+      const selectBlock = state.mediaBulkDeleteMode
+        ? [
+          '<label class="media-select-row">',
+          '<input class="media-select-check" type="checkbox" data-media-id="' + escapeHtml(String(mediaId)) + '" ' + (mediaSelected ? 'checked' : '') + '>',
+          '<span>削除対象</span>',
+          '</label>',
+        ].join('')
+        : '';
+      const downloadAction = downloadUrl
+        ? '<a class="button" href="' + escapeHtml(downloadUrl) + '" target="_blank" rel="noopener noreferrer" download="' + escapeHtml(downloadName) + '">ダウンロード</a>'
+        : '';
+      return [
+        '<article class="media-name-row">',
+        '<div class="media-name-title">' + escapeHtml(name) + '</div>',
+        '<div class="media-name-meta">種別: ' + escapeHtml(type) + ' / ルーム: ' + escapeHtml(item.room_name || '（未設定）') + '</div>',
+        '<div class="media-name-meta">投稿者: ' + escapeHtml(String(item.sender_display_name || '').trim() || '（記録なし）') + ' / 日時: ' + escapeHtml(formatDate(item.created_at)) + '</div>',
+        '<div class="media-name-meta">サイズ: ' + escapeHtml(formatBytes(item.file_size_bytes)) + '</div>',
+        selectBlock,
+        '<div class="media-name-actions">' + downloadAction + '<button class="button danger media-delete-btn" type="button" data-media-id="' + escapeHtml(String(item.id || '')) + '">削除</button></div>',
+        '</article>',
+      ].join('');
+    }
+
+    function updateMediaViewTabs() {
+      const isCard = state.mediaView === 'card';
+      dom.mediaViewCardBtn.classList.toggle('active', isCard);
+      dom.mediaViewNameBtn.classList.toggle('active', !isCard);
+      dom.mediaViewCardBtn.setAttribute('aria-selected', isCard ? 'true' : 'false');
+      dom.mediaViewNameBtn.setAttribute('aria-selected', !isCard ? 'true' : 'false');
+    }
+
+    function renderMediaList(items) {
+      if (!Array.isArray(items) || items.length === 0) {
+        dom.mediaList.className = 'list';
+        dom.mediaList.innerHTML = '<div class="item"><div class="preview"><div class="empty">該当データなし</div></div></div>';
+        return;
+      }
+      if (state.mediaView === 'names') {
+        dom.mediaList.className = 'media-name-list';
+        dom.mediaList.innerHTML = items.map(renderMediaNameItem).join('');
+        return;
+      }
+      dom.mediaList.className = 'list';
+      dom.mediaList.innerHTML = items.map(renderMediaItem).join('');
+    }
+
     function updatePager() {
       dom.prevBtn.disabled = state.offset <= 0;
       dom.nextBtn.disabled = !state.hasMore;
@@ -1722,14 +1845,11 @@
     async function loadMedia() {
       const result = await api(buildQuery());
       const items = Array.isArray(result.items) ? result.items : [];
+      state.mediaItems = items;
       state.total = Number(result.total || 0);
       state.hasMore = !!result.has_more;
 
-      if (items.length === 0) {
-        dom.mediaList.innerHTML = '<div class="item"><div class="preview"><div class="empty">該当データなし</div></div></div>';
-      } else {
-        dom.mediaList.innerHTML = items.map(renderMediaItem).join('');
-      }
+      renderMediaList(items);
       if (state.mediaBulkDeleteMode) {
         const visibleIds = new Set(items
           .map(function(item) { return Number(item && item.id || 0); })
@@ -2322,6 +2442,18 @@
       updateMediaBulkDeleteButtonLabel();
     });
 
+    dom.mediaViewCardBtn.addEventListener('click', function() {
+      state.mediaView = 'card';
+      updateMediaViewTabs();
+      renderMediaList(state.mediaItems);
+    });
+
+    dom.mediaViewNameBtn.addEventListener('click', function() {
+      state.mediaView = 'names';
+      updateMediaViewTabs();
+      renderMediaList(state.mediaItems);
+    });
+
     dom.documentList.addEventListener('click', async function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
@@ -2394,6 +2526,7 @@
       applyTheme(getTheme());
       updateAuthState();
       updateMediaBulkDeleteButtonLabel();
+      updateMediaViewTabs();
       updatePager();
       updateDocumentPager();
       setRoomFilterOptions([]);
