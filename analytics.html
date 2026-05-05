@@ -1072,7 +1072,6 @@ function renderDailyChart() {
   const salesMap = {};
   series.forEach((d) => { salesMap[d.date] = d; });
   const chartDates = buildDailyChartDates(series, state.weather);
-  const forecastStartIndex = chartDates.findIndex((d) => d >= todayStr);
   const labels = chartDates.map(d => d.slice(5)); // MM-DD
   const gross = chartDates.map(d => salesMap[d]?.gross_sales_yen ?? null);
   const rain = chartDates.map(d => state.weather[d]?.rain ?? null);
@@ -1160,32 +1159,14 @@ function renderDailyChart() {
         const y = chart.scales.x.bottom + 1;
         ctx.textBaseline = 'top';
         ctx.fillText(icon, x, y);
+        if (dateStr >= todayStr) {
+          ctx.font = '9px sans-serif';
+          ctx.fillStyle = 'rgba(255, 209, 126, 0.95)';
+          ctx.fillText('予', x, y + 12);
+          ctx.font = '13px serif';
+          ctx.fillStyle = legendColor;
+        }
       });
-      ctx.restore();
-    },
-  };
-
-  // 今日以降（=予報領域）を薄く帯表示して、実績と予報を視覚的に区別する
-  const forecastBandPlugin = {
-    id: 'forecastBand',
-    afterDraw(chart) {
-      if (forecastStartIndex < 0) return;
-      const { ctx, chartArea, scales } = chart;
-      const xScale = scales?.x;
-      if (!chartArea || !xScale) return;
-      const xStart = xScale.getPixelForValue(forecastStartIndex);
-      const dayWidth = chartArea.width / Math.max(chartDates.length, 1);
-      const left = Math.max(chartArea.left, xStart - dayWidth / 2);
-      if (!Number.isFinite(left) || left >= chartArea.right) return;
-
-      ctx.save();
-      ctx.fillStyle = 'rgba(255, 209, 126, 0.08)';
-      ctx.fillRect(left, chartArea.top, chartArea.right - left, chartArea.bottom - chartArea.top);
-      ctx.font = 'bold 10px sans-serif';
-      ctx.fillStyle = 'rgba(255, 209, 126, 0.92)';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText('予報', Math.min(left + 6, chartArea.right - 30), chartArea.top + 4);
       ctx.restore();
     },
   };
@@ -1234,7 +1215,7 @@ function renderDailyChart() {
         },
       },
     },
-    plugins: [holidayPlugin, weatherIconPlugin, forecastBandPlugin],
+    plugins: [holidayPlugin, weatherIconPlugin],
   });
 }
 
