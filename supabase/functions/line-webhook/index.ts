@@ -16,6 +16,7 @@ type CalendarListScope =
   | 'date'
   | 'month'
   | 'next_month'
+  | 'prev_month'
   | 'year_month'
   | 'year'
   | 'upcoming_30d'
@@ -7669,7 +7670,7 @@ function looksLikeCalendarListQuestion(text: string): boolean {
   if (!hasQuestionIntent) return false
 
   const hasCalendarHint =
-    /(\d{4}[\/.\-]\d{1,2}|\d{4}年\d{1,2}月|\d{1,2}月|今日|明日|今週|来週|今月|来月|今後|これから|予定|会議|打ち合わせ|打合せ|ミーティング|mtg|meeting|予約|アポ|面談|イベント)/.test(compact)
+    /(\d{4}[\/.\-]\d{1,2}|\d{4}年\d{1,2}月|\d{1,2}月|今日|明日|今週|来週|今月|来月|先月|前月|今後|これから|予定|会議|打ち合わせ|打合せ|ミーティング|mtg|meeting|予約|アポ|面談|イベント)/.test(compact)
   return hasCalendarHint
 }
 
@@ -7707,7 +7708,7 @@ async function extractCalendarListIntentWithGroq(
               `現在時刻は ${nowText} (${timezone})。`,
               '予定登録ではなく、予定照会（検索）として解釈できるときだけ高い confidence を返してください。',
               'JSONのみ返してください。説明文やコードブロックは禁止です。',
-              'scope は次のいずれか: today, tomorrow, week, next_week, date, month, next_month, year_month, year, upcoming_30d',
+              'scope は次のいずれか: today, tomorrow, week, next_week, date, month, next_month, prev_month, year_month, year, upcoming_30d',
               'date は YYYY-MM-DD、month は 1-12、year は西暦4桁。',
               'keyword は任意。名詞句のみ（例: ミーティング）。不要なら空文字。',
               '範囲指定が曖昧な照会は upcoming_30d を使ってください。',
@@ -7779,6 +7780,7 @@ function normalizeAiListScope(raw: string): CalendarListScope | null {
   if (value === 'date') return 'date'
   if (value === 'month' || value === 'this_month') return 'month'
   if (value === 'next_month') return 'next_month'
+  if (value === 'prev_month' || value === 'last_month') return 'prev_month'
   if (value === 'year_month' || value === 'ym') return 'year_month'
   if (value === 'year') return 'year'
   if (value === 'upcoming_30d' || value === 'upcoming' || value === 'next_30_days') return 'upcoming_30d'
@@ -11013,6 +11015,9 @@ function parseCalendarListScope(bodyRaw: string): Omit<Extract<CalendarCommand, 
   if (canonical === '来月' || canonical === '来月中') {
     return { scope: 'next_month' }
   }
+  if (canonical === '先月' || canonical === '前月' || canonical === '先月中' || canonical === '前月中') {
+    return { scope: 'prev_month' }
+  }
   if (/^(今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月)$/.test(canonical)) {
     return { scope: 'upcoming_30d' }
   }
@@ -11095,7 +11100,7 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
   const hasRuleCreateCandidate = extractCalendarCommandsFromText(rawText).length > 0
   if (hasRuleCreateCandidate && !looksLikeExplicitCalendarQuestion(compactNoPunct)) return null
 
-  const hasQuestionIntent = /(いつ|何件|ありますか|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compactNoPunct)
+  const hasQuestionIntent = /(いつ|何件|ありますか|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい|だっけ|でしたっけ|っけ|覚えてる|覚えてます)/.test(compactNoPunct)
   const hasShortListIntent = /(?:今日|明日|今週|来週|今月|来月|当月|今月中|来月中|今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月|\d{1,2}月|\d{4}年\d{1,2}月|\d{4}[\/.-]\d{1,2}|\d{4}年)(?:の)?予定(?:一覧|確認|報告)?(?:だけ)?(?:は|って)?$/.test(compactNoPunct)
   if (!hasQuestionIntent && !hasShortListIntent) return null
 
@@ -11110,7 +11115,7 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
   residue = residue
     .replace(/(?:の)?予定(?:一覧|確認|報告)?/g, ' ')
     // Remove sentence endings first; otherwise "で" stripping can leave trailing "す".
-    .replace(/(?:いつ|ありますか|あります|ある|教えて|見せて|みせて|知りたい|確認|一覧|表示|表示して|出して|だして|見たい|確認したい|でしたか|でしょうか|ですか|ますか|すか|です|ます|かな|か)/g, ' ')
+    .replace(/(?:いつ|ありますか|あります|ある|教えて|見せて|みせて|知りたい|確認|一覧|表示|表示して|出して|だして|見たい|確認したい|でしたか|でしょうか|ですか|ますか|すか|です|ます|かな|か|だっけ|でしたっけ|っけ|覚えてる|覚えてます)/g, ' ')
     .replace(/(?:は|を|に|で|が|って|とは)/g, ' ')
     .replace(/(?:今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月)/g, ' ')
     .replace(/[?？!！。．、,]/g, ' ')
@@ -11121,7 +11126,7 @@ function parseNaturalLanguageListQuery(rawText: string): Omit<Extract<CalendarCo
       .replace(/(?:\d{4}[\/.-]\d{1,2}[\/.-]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月(?:の)?\d{1,2}日|\d{1,2}日|\d{1,2}月)/g, ' ')
   }
 
-  const keyword = normalizeKeywordForFilter(residue)
+  const keyword = normalizeSpokenCalendarKeyword(normalizeKeywordForFilter(residue))
   if (!keyword || isCalendarListStopKeyword(keyword)) {
     return scope
   }
@@ -11144,7 +11149,7 @@ function looksLikeExplicitCalendarQuestion(compactText: string): boolean {
   const hasQuestionIntent = /(いつ|何件|ありますか|ある\?|ある？|ある$|教えて|見せて|みせて|知りたい|一覧|どれ|どこ|空き|空いて|表示|表示して|出して|だして|見たい|確認したい)/.test(compactText)
   if (!hasQuestionIntent) return false
 
-  const hasCalendarHint = /(\d{4}[\/.\-]\d{1,2}|\d{4}年\d{1,2}月|\d{1,2}月|今日|明日|今週|来週|今月|来月|今後|これから|予定|会議|打ち合わせ|打合せ|ミーティング|mtg|meeting|予約|アポ|面談|イベント)/.test(compactText)
+  const hasCalendarHint = /(\d{4}[\/.\-]\d{1,2}|\d{4}年\d{1,2}月|\d{1,2}月|今日|明日|今週|来週|今月|来月|先月|前月|今後|これから|予定|会議|打ち合わせ|打合せ|ミーティング|mtg|meeting|予約|アポ|面談|イベント)/.test(compactText)
   return hasCalendarHint
 }
 
@@ -11157,6 +11162,7 @@ function detectRangeToken(compactText: string): string | null {
     /(\d{4}[\/.-]\d{1,2})/,
     /(\d{4}年)/,
     /(今後|これから|直近|近日|近々|向こう30日|30日以内|1ヶ月|1か月|1ヵ月|一ヶ月)/,
+    /(先月中|前月中|先月|前月)/,
     /(今月中|来月中|今月|来月|今週|来週|今日|明日|当月)/,
     /(\d{1,2}日)/,
     /(\d{1,2}月)/,
@@ -11188,8 +11194,22 @@ function relaxCalendarListKeywordForFilter(keyword: string): string {
   if (!trimmed) return ''
   const relaxed = trimmed
     .replace(/^(次の|次は|次|直近の|近い|もうすぐの|この先の|これからの)\s*/u, '')
+    .replace(/(?:って?(?:いつ|何時|なんじ)|(?:いつ|何時|なんじ)(?:だっけ|でしたっけ|っけ|だよね|ですよね)?|(?:覚えてる|覚えてます)\??)$/u, '')
+    .replace(/(?:だった(?:っけ|かな)?|でした(?:っけ|か)?|したっけ|だっけ|っけ)$/u, '')
     .trim()
   return relaxed.length > 0 ? relaxed : trimmed
+}
+
+/** 話し言葉の語尾（〜でしたっけ/〜だよね など）を落として予定キーワードを安定化させる。 */
+function normalizeSpokenCalendarKeyword(keyword: string): string {
+  const trimmed = String(keyword ?? '').trim()
+  if (!trimmed) return ''
+  const normalized = trimmed
+    .replace(/(?:って?(?:いつ|何時|なんじ)|(?:いつ|何時|なんじ)(?:だっけ|でしたっけ|っけ|だよね|ですよね)?|(?:覚えてる|覚えてます)\??)$/u, '')
+    .replace(/(?:だった(?:っけ|かな)?|でした(?:っけ|か)?|したっけ|だっけ|っけ|だよね|ですよね|だよな|ですよね)$/u, '')
+    .replace(/(?:かな|かも|かね)$/u, '')
+    .trim()
+  return normalized.length > 0 ? normalized : trimmed
 }
 
 function canonicalizeListScopeText(raw: string): string {
@@ -11537,8 +11557,78 @@ async function listCalendarEventsReply(
   roomId: string,
   userId: string | null,
 ): Promise<string> {
-  const range = resolveListRange(command)
   const accessToken = await fetchGoogleAccessToken(env)
+  const range = resolveListRange(command)
+  const keywordForFilter = command.keyword ? relaxCalendarListKeywordForFilter(String(command.keyword)) : ''
+  const shouldExpandUpcomingRange = command.scope === 'upcoming_30d' && !!keywordForFilter
+  const rangesToTry = shouldExpandUpcomingRange
+    ? [30, 60, 120].map((days) => buildUpcomingDaysRange(days))
+    : [range]
+  let selectedRange = range
+  let items: GoogleCalendarEvent[] = []
+
+  for (const candidateRange of rangesToTry) {
+    const fetchedItems = await fetchCalendarEventsForListRange(
+      env,
+      accessToken,
+      command,
+      candidateRange,
+      keywordForFilter,
+    )
+    if (fetchedItems.length > 0) {
+      selectedRange = candidateRange
+      items = fetchedItems
+      break
+    }
+    selectedRange = candidateRange
+  }
+
+  if (items.length === 0) {
+    if (command.keyword) {
+      return `「${keywordForFilter || command.keyword}」に一致する予定はありません（${selectedRange.label}）`
+    }
+    return `予定はありません（${selectedRange.label}）`
+  }
+
+  await savePendingCalendarUpdateContext(supabase, roomId, userId, items, env.timezone)
+
+  const expandedNote = shouldExpandUpcomingRange && selectedRange.label !== '今後30日'
+    ? ` / 検索範囲を自動拡張: ${selectedRange.label}`
+    : ''
+  const heading = command.keyword
+    ? `予定一覧（${selectedRange.label}${expandedNote} / キーワード: ${keywordForFilter || command.keyword}）`
+    : `予定一覧（${selectedRange.label}）`
+
+  const lines: string[] = [heading]
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i]
+    const detail = formatEventDetailBlock(item, env.timezone)
+    lines.push(`${i + 1}.`)
+    lines.push(`  日付: ${detail.date}`)
+    lines.push(`  時間: ${detail.time}`)
+    lines.push(`  予定: ${detail.title}`)
+    lines.push(`  内容: ${detail.content}`)
+    if (i < items.length - 1) {
+      lines.push('')
+    }
+  }
+  lines.push('')
+  if (items.length === 1) {
+    lines.push('この予定を変更する場合は、このメッセージに返信して「時間を19:00に変更」のように送ってください。')
+  } else {
+    lines.push('表示した予定を変更する場合は、このメッセージに返信して送ってください。')
+    lines.push('例: 「2件目の時間を19:00に変更」「会議を店長会議に変更」')
+  }
+  return lines.join('\n')
+}
+
+async function fetchCalendarEventsForListRange(
+  env: CalendarEnv,
+  accessToken: string,
+  command: Extract<CalendarCommand, { kind: 'list' }>,
+  range: { start: Date; end: Date; label: string },
+  keywordForFilter: string,
+): Promise<GoogleCalendarEvent[]> {
   const maxResults = suggestMaxResultsForListScope(command.scope, !!command.keyword)
 
   const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`)
@@ -11564,45 +11654,17 @@ async function listCalendarEventsReply(
 
   const data = await response.json()
   const allItems: GoogleCalendarEvent[] = Array.isArray(data?.items) ? data.items : []
-  const keywordForFilter = command.keyword ? relaxCalendarListKeywordForFilter(String(command.keyword)) : ''
   const items = keywordForFilter
     ? allItems.filter((item) => eventMatchesKeyword(item, keywordForFilter))
     : allItems
+  return items
+}
 
-  if (items.length === 0) {
-    if (command.keyword) {
-      return `「${keywordForFilter || command.keyword}」に一致する予定はありません（${range.label}）`
-    }
-    return `予定はありません（${range.label}）`
-  }
-
-  await savePendingCalendarUpdateContext(supabase, roomId, userId, items, env.timezone)
-
-  const heading = command.keyword
-    ? `予定一覧（${range.label} / キーワード: ${keywordForFilter || command.keyword}）`
-    : `予定一覧（${range.label}）`
-
-  const lines: string[] = [heading]
-  for (let i = 0; i < items.length; i += 1) {
-    const item = items[i]
-    const detail = formatEventDetailBlock(item, env.timezone)
-    lines.push(`${i + 1}.`)
-    lines.push(`  日付: ${detail.date}`)
-    lines.push(`  時間: ${detail.time}`)
-    lines.push(`  予定: ${detail.title}`)
-    lines.push(`  内容: ${detail.content}`)
-    if (i < items.length - 1) {
-      lines.push('')
-    }
-  }
-  lines.push('')
-  if (items.length === 1) {
-    lines.push('この予定を変更する場合は、このメッセージに返信して「時間を19:00に変更」のように送ってください。')
-  } else {
-    lines.push('表示した予定を変更する場合は、このメッセージに返信して送ってください。')
-    lines.push('例: 「2件目の時間を19:00に変更」「会議を店長会議に変更」')
-  }
-  return lines.join('\n')
+function buildUpcomingDaysRange(days: number): { start: Date; end: Date; label: string } {
+  const safeDays = Math.max(1, Math.min(365, Math.floor(days)))
+  const start = new Date()
+  const end = new Date(start.getTime() + safeDays * 24 * 60 * 60 * 1000)
+  return { start, end, label: `今後${safeDays}日` }
 }
 
 function resolveListRange(command: Extract<CalendarCommand, { kind: 'list' }>): {
@@ -11645,6 +11707,11 @@ function resolveListRange(command: Extract<CalendarCommand, { kind: 'list' }>): 
     const range = monthRangeFromJstYearMonth(shifted.year, shifted.month)
     return { ...range, label: `${shifted.year}年${shifted.month}月` }
   }
+  if (command.scope === 'prev_month') {
+    const shifted = shiftJstYearMonth(currentYear, currentMonth, -1)
+    const range = monthRangeFromJstYearMonth(shifted.year, shifted.month)
+    return { ...range, label: `${shifted.year}年${shifted.month}月（先月）` }
+  }
   if (command.scope === 'year_month') {
     const year = command.year ?? currentYear
     const month = command.month ?? currentMonth
@@ -11667,7 +11734,9 @@ function suggestMaxResultsForListScope(
   if (scope === 'today' || scope === 'tomorrow' || scope === 'date') return hasKeyword ? 40 : 20
   if (scope === 'week' || scope === 'next_week') return hasKeyword ? 100 : 50
   if (scope === 'upcoming_30d') return hasKeyword ? 250 : 120
-  if (scope === 'month' || scope === 'next_month' || scope === 'year_month') return hasKeyword ? 250 : 120
+  if (scope === 'month' || scope === 'next_month' || scope === 'prev_month' || scope === 'year_month') {
+    return hasKeyword ? 250 : 120
+  }
   if (scope === 'year') return hasKeyword ? 500 : 300
   return hasKeyword ? 100 : 50
 }
