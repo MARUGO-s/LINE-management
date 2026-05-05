@@ -741,6 +741,30 @@ function shiftDateString(dateStr, days) {
   return dt.toISOString().slice(0, 10);
 }
 
+function diffDateDaysInclusive(from, to) {
+  const a = new Date(`${from}T00:00:00Z`).getTime();
+  const b = new Date(`${to}T00:00:00Z`).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b < a) return 0;
+  return Math.floor((b - a) / 86400000) + 1;
+}
+
+function buildForecastRetryRanges(from, to) {
+  if (!from || !to || from > to) return [];
+  const maxDays = diffDateDaysInclusive(from, to);
+  const candidates = [maxDays, 14, 10, 7, 5, 3, 1]
+    .filter((n, i, arr) => n >= 1 && arr.indexOf(n) === i)
+    .sort((a, b) => b - a);
+  const ranges = [];
+  for (const days of candidates) {
+    const end = shiftDateString(from, days - 1);
+    const clamped = end > to ? to : end;
+    if (clamped < from) continue;
+    ranges.push({ from, to: clamped });
+    if (clamped === to) break;
+  }
+  return ranges;
+}
+
 function dayOfWeek(dateStr) {
   // 0=Sun ... 6=Sat
   const [y, m, d] = dateStr.split('-').map(Number);
@@ -927,17 +951,20 @@ async function fetchWeather(storeKey, fromDate, toDate) {
   // 3) 将来分: 今日〜表示末日（ただしAPI上限まで）の予報
   const forecastFutureFrom = todayStr > safeFrom ? todayStr : safeFrom;
   if (forecastFutureFrom <= forecastToStr) {
-    const paramsForecastFuture = new URLSearchParams({
-      latitude: coords.lat,
-      longitude: coords.lon,
-      start_date: forecastFutureFrom,
-      end_date: forecastToStr,
-      daily: 'temperature_2m_max,precipitation_sum',
-      timezone: 'Asia/Tokyo',
-    });
-    try {
-      const res = await fetch(`https://api.open-meteo.com/v1/forecast?${paramsForecastFuture}`);
-      if (res.ok) {
+    // end_date が長いと環境によって失敗するため、失敗時は短い期間で段階リトライ
+    const futureRanges = buildForecastRetryRanges(forecastFutureFrom, forecastToStr);
+    for (const range of futureRanges) {
+      const paramsForecastFuture = new URLSearchParams({
+        latitude: coords.lat,
+        longitude: coords.lon,
+        start_date: range.from,
+        end_date: range.to,
+        daily: 'temperature_2m_max,precipitation_sum',
+        timezone: 'Asia/Tokyo',
+      });
+      try {
+        const res = await fetch(`https://api.open-meteo.com/v1/forecast?${paramsForecastFuture}`);
+        if (!res.ok) continue;
         const data = await res.json();
         const dates = data?.daily?.time ?? [];
         const temps = data?.daily?.temperature_2m_max ?? [];
@@ -945,9 +972,10 @@ async function fetchWeather(storeKey, fromDate, toDate) {
         dates.forEach((dStr, i) => {
           result[dStr] = { temp: temps[i], rain: rains[i] };
         });
+        if (dates.length > 0) break;
+      } catch {
+        // try shorter range
       }
-    } catch {
-      // ignore forecast failure
     }
   }
 
