@@ -289,6 +289,59 @@
       background: rgba(0, 0, 0, 0.18);
     }
 
+    .preview img.media-preview-img {
+      cursor: zoom-in;
+    }
+
+    .image-lightbox-dialog {
+      position: relative;
+      max-width: min(96vw, 1400px);
+      max-height: 92vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .image-lightbox-img {
+      max-width: 100%;
+      max-height: 88vh;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      display: block;
+      border-radius: 10px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+    }
+
+    .image-lightbox-close {
+      position: absolute;
+      top: -12px;
+      right: -12px;
+      z-index: 2;
+      width: 40px;
+      height: 40px;
+      border-radius: 999px;
+      border: 1px solid rgba(155, 220, 255, 0.35);
+      background: rgba(8, 21, 35, 0.92);
+      color: var(--txt);
+      font-size: 1.35rem;
+      line-height: 1;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+    }
+
+    .image-lightbox-close:hover {
+      border-color: rgba(87, 216, 255, 0.55);
+      background: rgba(14, 43, 63, 0.95);
+    }
+
+    body[data-theme='light'] .image-lightbox-close {
+      background: rgba(255, 255, 255, 0.95);
+      border-color: rgba(45, 106, 151, 0.35);
+      color: var(--txt);
+    }
+
     .preview audio {
       width: calc(100% - 18px);
       margin: 10px;
@@ -864,6 +917,28 @@
     </div>
   </div>
 
+  <div id="mediaDeleteConfirmModal" class="modal-backdrop" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="mediaDeleteConfirmTitle">
+      <h3 id="mediaDeleteConfirmTitle" class="modal-title">削除の確認</h3>
+      <div id="mediaDeleteConfirmModalMeta" class="modal-meta"></div>
+      <div class="modal-tools" style="flex-direction:column;align-items:stretch;gap:10px;">
+        <label for="deleteConfirmInput" class="modal-meta" style="margin:0;">確認のため「delete」と入力してください。</label>
+        <input id="deleteConfirmInput" class="input" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="削除確認の入力">
+      </div>
+      <div class="modal-actions">
+        <button id="deleteConfirmCancelBtn" class="button" type="button">キャンセル</button>
+        <button id="deleteConfirmOkBtn" class="button danger" type="button">削除を実行</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="imageLightboxModal" class="modal-backdrop image-lightbox-wrap" aria-hidden="true">
+    <div class="image-lightbox-dialog" role="dialog" aria-modal="true" aria-label="画像の拡大表示">
+      <button type="button" id="imageLightboxCloseBtn" class="image-lightbox-close" aria-label="閉じる">×</button>
+      <img id="imageLightboxImg" class="image-lightbox-img" alt="">
+    </div>
+  </div>
+
   <script>
     const STORE_TOKEN_KEY = 'line_summary_admin_token';
     const STORE_THEME_KEY = 'line_reservation_calendar_theme';
@@ -934,6 +1009,14 @@
       cancelDocumentPermissionBtn: document.getElementById('cancelDocumentPermissionBtn'),
       saveDocumentPermissionBtn: document.getElementById('saveDocumentPermissionBtn'),
       themeToggleBtn: document.getElementById('themeToggleBtn'),
+      mediaDeleteConfirmModal: document.getElementById('mediaDeleteConfirmModal'),
+      mediaDeleteConfirmModalMeta: document.getElementById('mediaDeleteConfirmModalMeta'),
+      deleteConfirmInput: document.getElementById('deleteConfirmInput'),
+      deleteConfirmCancelBtn: document.getElementById('deleteConfirmCancelBtn'),
+      deleteConfirmOkBtn: document.getElementById('deleteConfirmOkBtn'),
+      imageLightboxModal: document.getElementById('imageLightboxModal'),
+      imageLightboxImg: document.getElementById('imageLightboxImg'),
+      imageLightboxCloseBtn: document.getElementById('imageLightboxCloseBtn'),
     };
     const MEDIA_CAP_DEFAULT_BYTES = 500 * 1024 * 1024;
     const DOCUMENT_UPLOAD_ALLOWED_EXTENSIONS = new Set(['txt', 'pdf', 'docx', 'xlsx']);
@@ -1267,6 +1350,27 @@
       dom.documentPermissionUserList.innerHTML = '';
     }
 
+    function openImageLightbox(url) {
+      const normalized = String(url || '').trim();
+      if (!normalized || !dom.imageLightboxModal || !dom.imageLightboxImg) return;
+      dom.imageLightboxImg.alt = '拡大画像';
+      dom.imageLightboxImg.src = normalized;
+      dom.imageLightboxModal.classList.add('open');
+      dom.imageLightboxModal.setAttribute('aria-hidden', 'false');
+      try {
+        dom.imageLightboxCloseBtn.focus();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    function closeImageLightbox() {
+      if (!dom.imageLightboxModal || !dom.imageLightboxImg) return;
+      dom.imageLightboxModal.classList.remove('open');
+      dom.imageLightboxModal.setAttribute('aria-hidden', 'true');
+      dom.imageLightboxImg.removeAttribute('src');
+    }
+
     function getSelectedUserIdsFromPermissionModal() {
       const checks = Array.from(dom.documentPermissionUserList.querySelectorAll('.document-permission-check'));
       const selected = [];
@@ -1507,7 +1611,10 @@
       if (!signedUrl) {
         preview = '<div class="empty">URL生成失敗（再読み込みしてください）</div>';
       } else if (type === 'image') {
-        preview = '<a href="' + escapeHtml(signedUrl) + '" target="_blank" rel="noopener noreferrer"><img loading="lazy" src="' + escapeHtml(signedUrl) + '" alt="image"></a>';
+        // 外部URLへのページ遷移（<a href>）は Cursor Simple Browser 等でブロックされるため使わない。
+        // クリックは同一ページ内のライトボックスで拡大表示する。
+        preview =
+          '<img loading="lazy" src="' + escapeHtml(signedUrl) + '" alt="保存画像のプレビュー" class="media-preview-img" tabindex="0" role="button" aria-label="クリックで拡大表示" data-full-url="' + escapeHtml(signedUrl) + '">';
       } else if (type === 'video') {
         preview = '<video controls preload="metadata" src="' + escapeHtml(signedUrl) + '"></video>';
       } else if (type === 'audio') {
@@ -1749,7 +1856,7 @@
     async function deleteDocumentItem(documentId) {
       const id = Number(documentId);
       if (!Number.isInteger(id) || id <= 0) throw new Error('削除対象の資料IDが不正です。');
-      const confirmed = confirmDeletionByTyping('この資料');
+      const confirmed = await confirmDeletionByTyping('この資料');
       if (!confirmed) return;
       await api('/documents/' + encodeURIComponent(String(id)), { method: 'DELETE' });
       await loadDocuments();
@@ -1829,7 +1936,7 @@
     async function deleteMediaItem(mediaId) {
       const id = Number(mediaId);
       if (!Number.isInteger(id) || id <= 0) throw new Error('削除対象のIDが不正です。');
-      const confirmed = confirmDeletionByTyping('このメディア');
+      const confirmed = await confirmDeletionByTyping('このメディア');
       if (!confirmed) return;
       await api('/media/' + encodeURIComponent(String(id)), { method: 'DELETE' });
       await loadMedia();
@@ -1847,7 +1954,7 @@
         throw new Error('削除対象を1件以上チェックしてください。');
       }
 
-      const confirmed = confirmDeletionByTyping('選択した ' + selectedIds.length + ' 件');
+      const confirmed = await confirmDeletionByTyping('選択した ' + selectedIds.length + ' 件');
       if (!confirmed) return;
 
       const failedIds = [];
@@ -1873,17 +1980,85 @@
       }
     }
 
+    /**
+     * LINE アプリ内ブラウザ等では window.prompt が使えないため、モーダルで確認する。
+     */
     function confirmDeletionByTyping(targetLabel) {
-      const input = window.prompt(
-        String(targetLabel || '対象') + 'を削除するには「デリート」と入力して OK を押してください。',
-        '',
-      );
-      if (input === null) return false;
-      if (String(input).trim() !== 'デリート') {
-        alert('入力が一致しないため削除を中止しました。');
-        return false;
+      const label = String(targetLabel || '対象').trim() || '対象';
+      if (!dom.mediaDeleteConfirmModal || !dom.mediaDeleteConfirmModalMeta || !dom.deleteConfirmInput) {
+        return Promise.resolve(false);
       }
-      return true;
+
+      dom.mediaDeleteConfirmModalMeta.textContent =
+        label + 'を削除するには、下に delete と入力して削除を実行してください。';
+
+      dom.mediaDeleteConfirmModal.classList.add('open');
+      dom.mediaDeleteConfirmModal.setAttribute('aria-hidden', 'false');
+
+      return new Promise(function(resolve) {
+        dom.deleteConfirmInput.value = '';
+
+        function closeModal() {
+          dom.mediaDeleteConfirmModal.classList.remove('open');
+          dom.mediaDeleteConfirmModal.setAttribute('aria-hidden', 'true');
+        }
+
+        function cleanup() {
+          dom.deleteConfirmOkBtn.removeEventListener('click', onOk);
+          dom.deleteConfirmCancelBtn.removeEventListener('click', onCancel);
+          dom.mediaDeleteConfirmModal.removeEventListener('click', onBackdrop);
+          document.removeEventListener('keydown', onDocumentKeydown);
+          dom.deleteConfirmInput.removeEventListener('keydown', onInputKeydown);
+        }
+
+        function finish(result) {
+          cleanup();
+          closeModal();
+          resolve(result);
+        }
+
+        function onOk() {
+          if (String(dom.deleteConfirmInput.value).trim().toLowerCase() !== 'delete') {
+            alert('入力が一致しないため削除を中止しました。');
+            finish(false);
+            return;
+          }
+          finish(true);
+        }
+
+        function onCancel() {
+          finish(false);
+        }
+
+        function onBackdrop(ev) {
+          if (ev.target === dom.mediaDeleteConfirmModal) finish(false);
+        }
+
+        function onDocumentKeydown(ev) {
+          if (ev.key === 'Escape') finish(false);
+        }
+
+        function onInputKeydown(ev) {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            onOk();
+          }
+        }
+
+        dom.deleteConfirmOkBtn.addEventListener('click', onOk);
+        dom.deleteConfirmCancelBtn.addEventListener('click', onCancel);
+        dom.mediaDeleteConfirmModal.addEventListener('click', onBackdrop);
+        document.addEventListener('keydown', onDocumentKeydown);
+        dom.deleteConfirmInput.addEventListener('keydown', onInputKeydown);
+
+        requestAnimationFrame(function() {
+          try {
+            dom.deleteConfirmInput.focus();
+          } catch (_) {
+            /* ignore */
+          }
+        });
+      });
     }
 
     async function saveMediaUploadLimit() {
@@ -2108,6 +2283,15 @@
     dom.mediaList.addEventListener('click', async function(event) {
       const target = event.target;
       if (!(target instanceof HTMLElement)) return;
+      const thumb = target.closest('img.media-preview-img');
+      if (thumb) {
+        const url = thumb.getAttribute('data-full-url');
+        if (url) {
+          event.preventDefault();
+          openImageLightbox(url);
+        }
+        return;
+      }
       if (!target.classList.contains('media-delete-btn')) return;
       const mediaId = target.getAttribute('data-media-id') || '';
       try {
@@ -2115,6 +2299,16 @@
       } catch (error) {
         alert(error.message || String(error));
       }
+    });
+
+    dom.mediaList.addEventListener('keydown', function(event) {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (!target.classList.contains('media-preview-img')) return;
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      const url = target.getAttribute('data-full-url');
+      if (url) openImageLightbox(url);
     });
 
     dom.mediaList.addEventListener('change', function(event) {
@@ -2176,10 +2370,24 @@
     });
 
     window.addEventListener('keydown', function(event) {
-      if (event.key === 'Escape' && dom.documentPermissionModal.classList.contains('open')) {
+      if (event.key !== 'Escape') return;
+      if (dom.documentPermissionModal.classList.contains('open')) {
         closeDocumentPermissionModal();
+        return;
+      }
+      if (dom.imageLightboxModal && dom.imageLightboxModal.classList.contains('open')) {
+        closeImageLightbox();
       }
     });
+
+    if (dom.imageLightboxModal && dom.imageLightboxCloseBtn) {
+      dom.imageLightboxModal.addEventListener('click', function(event) {
+        if (event.target === dom.imageLightboxModal) closeImageLightbox();
+      });
+      dom.imageLightboxCloseBtn.addEventListener('click', function() {
+        closeImageLightbox();
+      });
+    }
 
     (function init() {
       dom.projectUrlInput.value = FIXED_PROJECT_URL;

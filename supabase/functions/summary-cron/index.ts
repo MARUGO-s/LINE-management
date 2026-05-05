@@ -123,6 +123,85 @@ Deno.serve(async (req) => {
     const lastDeliverySummaryMode = normalizeLastDeliverySummaryMode(globalSettings?.last_delivery_summary_mode)
     const messageRetentionDays = normalizeMessageRetentionDays(globalSettings?.message_retention_days)
     const tomorrowReminderSettings = normalizeTomorrowReminderSettings(globalSettings)
+
+    const tomorrowTest = parseTomorrowReminderTestRequest(req)
+    if (tomorrowTest !== null) {
+      const testKey = (Deno.env.get('SUMMARY_CRON_TEST_KEY') ?? '').trim()
+      if (!testKey) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: 'Test send is disabled. Set Edge secret SUMMARY_CRON_TEST_KEY.',
+          }),
+          { status: 503, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      const providedKey = tomorrowTest.keyFromQuery || tomorrowTest.keyFromHeader
+      if (!providedKey || providedKey !== testKey) {
+        return new Response(JSON.stringify({ ok: false, error: 'Forbidden' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (!lineAccessToken) {
+        return new Response(JSON.stringify({ ok: false, error: 'LINE_CHANNEL_ACCESS_TOKEN is missing.' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      const calendarEnvState = loadCalendarEnv()
+      if (!calendarEnvState.ok) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: 'Calendar credentials missing for tomorrow reminder.',
+            missing: calendarEnvState.missing,
+          }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      try {
+        const accessToken = await fetchGoogleAccessToken(calendarEnvState.env)
+        const todayJst = getTodayJstDateString(now)
+        const tomorrowJst = addDaysToDateString(todayJst, 1)
+        const events = await fetchCalendarEventsForJstDate(calendarEnvState.env, accessToken, tomorrowJst)
+        const reminderFlexMessages = buildTomorrowReminderFlexMessages(
+          events,
+          tomorrowJst,
+          calendarEnvState.env.timezone,
+          tomorrowReminderSettings.maxItems,
+        )
+        const sendResult = await sendLinePushMessages(tomorrowTest.roomId, reminderFlexMessages, lineAccessToken)
+        if (!sendResult.ok) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: sendResult.error ?? 'LINE push failed',
+              line_http_status: sendResult.status ?? null,
+            }),
+            { status: 502, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            mode: 'test_tomorrow_reminder',
+            target_room_id: tomorrowTest.roomId,
+            target_date: tomorrowJst,
+            event_count: events.length,
+            flex_message_count: reminderFlexMessages.length,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        )
+      } catch (testErr) {
+        const message = testErr instanceof Error ? testErr.message : String(testErr)
+        return new Response(JSON.stringify({ ok: false, error: message }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
     const shouldSendOverall = globalEnabled && (forceRun || globalHours.includes(jstHour))
     const lastGlobalHour = getLastScheduledHour(globalHours)
     const isLastGlobalDeliverySlot = lastGlobalHour != null && jstHour === lastGlobalHour
@@ -519,11 +598,11 @@ Deno.serve(async (req) => {
 
       const overallSummary = overallResponse.choices[0].message?.content || "全体要約を生成できませんでした。"
       const overallTitle = shouldUseOverallDailyRollup ? '【全体 1日まとめレポート】' : '【全体 定期要約レポート】'
-      const overallBody = `${overallTitle}\n\n${overallSummary}`
+      const overallFlexMessages = buildFlexSummaryMessages(overallTitle, overallSummary)
       let anyOverallDeliveryOk = false
       const overallDeliveryErrors: string[] = []
       for (const destRoomId of overallRecipientRoomIds) {
-        const overallSendResult = await sendLineMessage(destRoomId, overallBody, lineAccessToken)
+        const overallSendResult = await sendLinePushMessages(destRoomId, overallFlexMessages, lineAccessToken)
         lineSendAttempted = true
         if (overallSendResult.status != null) lineHttpStatus = overallSendResult.status
         if (overallSendResult.ok) {
@@ -574,11 +653,8 @@ Deno.serve(async (req) => {
     for (const roomId of roomDeliveryTargets) {
       const summary = roomSummaries[roomId]
       if (!summary) continue
-      const roomSendResult = await sendLineMessage(
-        roomId,
-        `【このルーム 定期要約レポート】\n\n${summary}`,
-        lineAccessToken,
-      )
+      const roomFlexMessages = buildFlexSummaryMessages('【このルーム 定期要約レポート】', summary)
+      const roomSendResult = await sendLinePushMessages(roomId, roomFlexMessages, lineAccessToken)
       lineSendAttempted = true
       if (roomSendResult.status != null) lineHttpStatus = roomSendResult.status
 
@@ -835,7 +911,7 @@ async function maybeSendTomorrowCalendarReminder(params: {
     return
   }
 
-  const message = buildTomorrowReminderMessage(
+  const reminderFlexMessages = buildTomorrowReminderFlexMessages(
     events,
     tomorrowJst,
     calendarEnvState.env.timezone,
@@ -843,7 +919,7 @@ async function maybeSendTomorrowCalendarReminder(params: {
   )
 
   for (const targetRoomId of pendingTargets) {
-    const sendResult = await sendLineMessage(targetRoomId, message, lineAccessToken)
+    const sendResult = await sendLinePushMessages(targetRoomId, reminderFlexMessages, lineAccessToken)
     if (!sendResult.ok) {
       await writeDeliveryLog(supabase, {
         jst_hour: jstHour,
@@ -1012,10 +1088,10 @@ async function maybeSendGmailReservationAlerts(params: {
     return
   }
 
-  const lineText = buildGmailReservationAlertMessage(alerts)
+  const gmailFlexMessages = buildGmailReservationFlexMessages(alerts)
   const successfulTargetRoomIds: string[] = []
   for (const targetRoomId of targetRoomIds) {
-    const sendResult = await sendLineMessage(targetRoomId, lineText, lineAccessToken)
+    const sendResult = await sendLinePushMessages(targetRoomId, gmailFlexMessages, lineAccessToken)
     if (!sendResult.ok) {
       await writeDeliveryLog(supabase, {
         jst_hour: jstHour,
@@ -1304,20 +1380,188 @@ function extractGmailHeader(
   return ''
 }
 
-function buildGmailReservationAlertMessage(alerts: GmailMessageAlert[]): string {
-  const lines: string[] = [`【予約メール通知】新着${alerts.length}件`]
-  for (let i = 0; i < alerts.length; i += 1) {
-    const alert = alerts[i]
-    lines.push(`${i + 1}.`)
-    lines.push(`  受信: ${formatGmailAlertReceivedAt(alert.internalDateIso)}`)
-    lines.push(`  件名: ${alert.subject || '(件名なし)'}`)
-    lines.push(`  送信元: ${alert.from || '(送信元不明)'}`)
-    lines.push(`  内容: ${formatGmailAlertSnippet(alert.snippet)}`)
-    if (i < alerts.length - 1) {
-      lines.push('')
+const FLEX_SUMMARY_PAGE_CHARS = 3800
+const FLEX_TEXT_COMPONENT_MAX = 1900
+
+function truncateFlexText(s: string, max = 2000): string {
+  const t = String(s ?? '')
+  if (t.length <= max) return t
+  return `${t.slice(0, Math.max(0, max - 1))}…`
+}
+
+function paginateSummaryBody(text: string, maxChars: number): string[] {
+  const t = text.trim() || '（内容がありません）'
+  const pages: string[] = []
+  let rest = t
+  while (rest.length > 0) {
+    if (rest.length <= maxChars) {
+      pages.push(rest)
+      break
     }
+    let cut = rest.lastIndexOf('\n\n', maxChars)
+    if (cut < maxChars * 0.45) cut = rest.lastIndexOf('\n', maxChars)
+    if (cut < maxChars * 0.45) cut = maxChars
+    pages.push(rest.slice(0, cut).trimEnd())
+    rest = rest.slice(cut).trimStart()
   }
-  return lines.join('\n').slice(0, 4900)
+  return pages.length > 0 ? pages : ['']
+}
+
+function chunkPageIntoFlexTextNodes(page: string, maxChunk: number): string[] {
+  if (page.length <= maxChunk) return [page]
+  const parts: string[] = []
+  let rest = page
+  while (rest.length > 0) {
+    parts.push(rest.slice(0, maxChunk))
+    rest = rest.slice(maxChunk)
+  }
+  return parts
+}
+
+function buildFlexSummaryMessages(mainTitle: string, bodyText: string): Array<Record<string, unknown>> {
+  const pages = paginateSummaryBody(bodyText, FLEX_SUMMARY_PAGE_CHARS)
+  const total = pages.length
+  return pages.map((page, idx) => {
+    const titleLine = total > 1 ? `${mainTitle}（${idx + 1}/${total}）` : mainTitle
+    const chunkTexts = chunkPageIntoFlexTextNodes(page, FLEX_TEXT_COMPONENT_MAX)
+    const bodyContents: Record<string, unknown>[] = chunkTexts.map((chunk) => ({
+      type: 'text',
+      text: chunk,
+      size: 'sm',
+      color: '#1F1F1F',
+      wrap: true,
+    }))
+    const altPreview = truncateFlexText(`${mainTitle} ${page.replace(/\s+/g, ' ').slice(0, 120)}`, 400)
+    return {
+      type: 'flex',
+      altText: altPreview,
+      contents: {
+        type: 'bubble',
+        header: {
+          type: 'box',
+          layout: 'vertical',
+          paddingTop: 'md',
+          paddingBottom: 'md',
+          paddingStart: 'md',
+          paddingEnd: 'md',
+          backgroundColor: '#006c3a',
+          contents: [
+            {
+              type: 'text',
+              text: truncateFlexText(titleLine, 120),
+              size: 'lg',
+              weight: 'bold',
+              color: '#FFFFFF',
+              wrap: true,
+            },
+          ],
+        },
+        body: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          paddingTop: 'md',
+          paddingBottom: 'md',
+          paddingStart: 'md',
+          paddingEnd: 'md',
+          contents: bodyContents,
+        },
+      },
+    }
+  })
+}
+
+function buildGmailReservationFlexMessages(alerts: GmailMessageAlert[]): Array<Record<string, unknown>> {
+  const altBase = `【予約メール通知】新着${alerts.length}件`
+  const MAX_PER_BUBBLE = 4
+  const partTotal = Math.max(1, Math.ceil(alerts.length / MAX_PER_BUBBLE))
+  const result: Array<Record<string, unknown>> = []
+  for (let start = 0; start < alerts.length; start += MAX_PER_BUBBLE) {
+    const slice = alerts.slice(start, start + MAX_PER_BUBBLE)
+    const partNum = Math.floor(start / MAX_PER_BUBBLE) + 1
+    const headerTitle =
+      partTotal > 1 ? `📧 予約メール（${partNum}/${partTotal}）` : '📧 予約メール通知'
+    const bodyContents: Record<string, unknown>[] = []
+    for (let i = 0; i < slice.length; i += 1) {
+      const alert = slice[i]
+      const globalIdx = start + i + 1
+      if (i > 0) {
+        bodyContents.push({ type: 'separator', margin: 'md' })
+      }
+      bodyContents.push({
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'xs',
+        contents: [
+          {
+            type: 'text',
+            text: truncateFlexText(`${globalIdx}. ${alert.subject || '(件名なし)'}`, 500),
+            weight: 'bold',
+            size: 'sm',
+            wrap: true,
+          },
+          {
+            type: 'text',
+            text: `受信: ${formatGmailAlertReceivedAt(alert.internalDateIso)}`,
+            size: 'xs',
+            color: '#555555',
+            wrap: true,
+          },
+          {
+            type: 'text',
+            text: truncateFlexText(`送信元: ${alert.from || '(送信元不明)'}`, 200),
+            size: 'xs',
+            color: '#555555',
+            wrap: true,
+          },
+          {
+            type: 'text',
+            text: truncateFlexText(`内容: ${formatGmailAlertSnippet(alert.snippet)}`, 500),
+            size: 'xs',
+            color: '#333333',
+            wrap: true,
+          },
+        ],
+      })
+    }
+    result.push({
+      type: 'flex',
+      altText: truncateFlexText(altBase, 400),
+      contents: {
+        type: 'bubble',
+        header: {
+          type: 'box',
+          layout: 'vertical',
+          paddingTop: 'md',
+          paddingBottom: 'md',
+          paddingStart: 'md',
+          paddingEnd: 'md',
+          backgroundColor: '#006c3a',
+          contents: [
+            { type: 'text', text: headerTitle, size: 'lg', weight: 'bold', color: '#FFFFFF', wrap: true },
+            {
+              type: 'text',
+              text: `新着 ${alerts.length} 件`,
+              size: 'xs',
+              color: '#CCFFDD',
+              margin: 'sm',
+            },
+          ],
+        },
+        body: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          paddingTop: 'md',
+          paddingBottom: 'md',
+          paddingStart: 'md',
+          paddingEnd: 'md',
+          contents: bodyContents,
+        },
+      },
+    })
+  }
+  return result
 }
 
 function formatGmailAlertReceivedAt(iso: string | null): string {
@@ -1417,40 +1661,170 @@ async function fetchCalendarEventsForJstDate(
   return items
 }
 
-function buildTomorrowReminderMessage(
+const TOMORROW_REMINDER_EVENTS_PER_BUBBLE = 6
+
+function buildTomorrowReminderFlexMessages(
   events: GoogleCalendarEvent[],
   targetDate: string,
   timezone: string,
   maxItems: number,
-): string {
+): Array<Record<string, unknown>> {
   const targetDateLabel = targetDate.replace(/-/g, '/')
-  const heading = `【明日の予定】\n${targetDateLabel}`
-  if (events.length === 0) {
-    return `${heading}\n（予定なし）`
-  }
-
   const safeMaxItems =
     Number.isInteger(maxItems) && maxItems >= 1 && maxItems <= 50
       ? maxItems
       : DEFAULT_TOMORROW_REMINDER_MAX_ITEMS
   const shown = events.slice(0, safeMaxItems)
-  const lines: string[] = [`${heading}（${events.length}件）`]
-  for (let i = 0; i < shown.length; i += 1) {
-    const detail = formatCalendarEventDetail(shown[i], timezone)
-    lines.push(`${i + 1}.`)
-    lines.push(`  日付: ${detail.date}`)
-    lines.push(`  時間: ${detail.time}`)
-    lines.push(`  予定: ${detail.title}`)
-    lines.push(`  内容: ${detail.content}`)
-    if (i < shown.length - 1) {
-      lines.push('')
+  const altText =
+    events.length === 0
+      ? `【明日の予定】${targetDateLabel}（予定なし）`
+      : `【明日の予定】${targetDateLabel}（${events.length}件）`
+
+  if (shown.length === 0) {
+    return [{
+      type: 'flex',
+      altText: truncateFlexText(altText, 400),
+      contents: {
+        type: 'bubble',
+        header: {
+          type: 'box',
+          layout: 'vertical',
+          paddingTop: 'md',
+          paddingBottom: 'md',
+          paddingStart: 'md',
+          paddingEnd: 'md',
+          backgroundColor: '#006c3a',
+          contents: [
+            { type: 'text', text: '📅 明日の予定', size: 'lg', weight: 'bold', color: '#FFFFFF' },
+            {
+              type: 'text',
+              text: targetDateLabel,
+              size: 'xs',
+              color: '#CCFFDD',
+              margin: 'sm',
+            },
+          ],
+        },
+        body: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          paddingTop: 'md',
+          paddingBottom: 'md',
+          paddingStart: 'md',
+          paddingEnd: 'md',
+          contents: [
+            { type: 'text', text: '（予定なし）', size: 'md', color: '#666666', wrap: true },
+          ],
+        },
+      },
+    }]
+  }
+
+  const bubbles: Array<Record<string, unknown>> = []
+  const bubbleCount = Math.ceil(shown.length / TOMORROW_REMINDER_EVENTS_PER_BUBBLE)
+  for (let b = 0; b < bubbleCount; b += 1) {
+    const from = b * TOMORROW_REMINDER_EVENTS_PER_BUBBLE
+    const slice = shown.slice(from, from + TOMORROW_REMINDER_EVENTS_PER_BUBBLE)
+    const headerMain =
+      bubbleCount > 1
+        ? (b === 0 ? '📅 明日の予定' : '📅 明日の予定（続き）')
+        : '📅 明日の予定'
+    const subParts: string[] = [targetDateLabel]
+    if (bubbleCount > 1) {
+      subParts.push(`（${b + 1}/${bubbleCount}）`)
     }
+    subParts.push(`全 ${events.length} 件`)
+    if (events.length > safeMaxItems) {
+      subParts.push(`・表示 ${safeMaxItems} 件まで`)
+    }
+
+    const bodyContents: Record<string, unknown>[] = []
+    for (let i = 0; i < slice.length; i += 1) {
+      const detail = formatCalendarEventDetail(slice[i], timezone)
+      const index = from + i + 1
+      if (i > 0) {
+        bodyContents.push({ type: 'separator', margin: 'md' })
+      }
+      bodyContents.push({
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'xs',
+        contents: [
+          {
+            type: 'text',
+            text: truncateFlexText(`${index}. ${detail.title}`, 2000),
+            weight: 'bold',
+            size: 'sm',
+            wrap: true,
+          },
+          {
+            type: 'text',
+            text: `🕐 ${detail.time}　📆 ${detail.date}`,
+            size: 'xs',
+            color: '#555555',
+            wrap: true,
+          },
+          {
+            type: 'text',
+            text: truncateFlexText(`内容: ${detail.content}`, 1200),
+            size: 'xs',
+            color: '#333333',
+            wrap: true,
+          },
+        ],
+      })
+    }
+    if (b === bubbleCount - 1 && events.length > safeMaxItems) {
+      bodyContents.push({ type: 'separator', margin: 'md' })
+      bodyContents.push({
+        type: 'text',
+        text: `他 ${events.length - safeMaxItems} 件は省略しました`,
+        size: 'xs',
+        color: '#888888',
+        wrap: true,
+      })
+    }
+
+    bubbles.push({
+      type: 'flex',
+      altText: truncateFlexText(altText, 400),
+      contents: {
+        type: 'bubble',
+        header: {
+          type: 'box',
+          layout: 'vertical',
+          paddingTop: 'md',
+          paddingBottom: 'md',
+          paddingStart: 'md',
+          paddingEnd: 'md',
+          backgroundColor: '#006c3a',
+          contents: [
+            { type: 'text', text: headerMain, size: 'lg', weight: 'bold', color: '#FFFFFF', wrap: true },
+            {
+              type: 'text',
+              text: subParts.join(' '),
+              size: 'xs',
+              color: '#CCFFDD',
+              margin: 'sm',
+              wrap: true,
+            },
+          ],
+        },
+        body: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          paddingTop: 'md',
+          paddingBottom: 'md',
+          paddingStart: 'md',
+          paddingEnd: 'md',
+          contents: bodyContents,
+        },
+      },
+    })
   }
-  if (events.length > safeMaxItems) {
-    lines.push('')
-    lines.push(`他 ${events.length - safeMaxItems} 件`)
-  }
-  return lines.join('\n').slice(0, 4900)
+  return bubbles
 }
 
 function formatCalendarEventDetail(
@@ -1727,28 +2101,35 @@ async function pruneDeliveryLogs(
   }
 }
 
-async function sendLineMessage(to: string, text: string, token: string) {
+async function sendLinePushMessages(
+  to: string,
+  messages: Array<Record<string, unknown>>,
+  token: string,
+): Promise<{ ok: boolean; status?: number; error?: string }> {
+  if (messages.length === 0) {
+    return { ok: false, error: 'No LINE messages to send.' }
+  }
   try {
-    const response = await fetch('https://api.line.me/v2/bot/message/push', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        to: to,
-        messages: [{ type: 'text', text: text }]
+    let lastStatus = 200
+    for (let offset = 0; offset < messages.length; offset += 5) {
+      const batch = messages.slice(offset, offset + 5)
+      const response = await fetch('https://api.line.me/v2/bot/message/push', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ to, messages: batch }),
       })
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error(`Failed to send LINE message to ${to}. Status: ${response.status} Error: ${errorText}`)
-      return { ok: false, status: response.status, error: errorText || `HTTP ${response.status}` }
-    } else {
-      console.log(`Successfully sent message to ${to}`)
-      return { ok: true, status: response.status as number }
+      lastStatus = response.status
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error(`Failed to send LINE push to ${to}. Status: ${response.status} Error: ${errorText}`)
+        return { ok: false, status: response.status, error: errorText || `HTTP ${response.status}` }
+      }
     }
+    console.log(`Successfully sent ${messages.length} LINE message(s) to ${to}`)
+    return { ok: true, status: lastStatus }
   } catch (error) {
     console.error(`Network or fetch error while sending to ${to}:`, error)
     return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -1759,6 +2140,30 @@ function isForceRun(req: Request): boolean {
   const url = new URL(req.url)
   const raw = (url.searchParams.get('force') ?? '').trim().toLowerCase()
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on'
+}
+
+/** Optional: send tomorrow calendar Flex to one room (bypasses hour + dedup). Guarded by SUMMARY_CRON_TEST_KEY. */
+function parseTomorrowReminderTestRequest(
+  req: Request,
+): { roomId: string; keyFromQuery: string; keyFromHeader: string } | null {
+  const url = new URL(req.url)
+  const flag = (url.searchParams.get('test_tomorrow_reminder') ?? url.searchParams.get('test_tomorrow') ?? '')
+    .trim()
+    .toLowerCase()
+  if (flag !== '1' && flag !== 'true' && flag !== 'yes' && flag !== 'on') {
+    return null
+  }
+  const roomId = (url.searchParams.get('room_id') ?? '').trim()
+  const keyFromQuery = (url.searchParams.get('key') ?? '').trim()
+  const keyFromHeader =
+    (req.headers.get('x-summary-cron-test-key') ?? req.headers.get('authorization') ?? '').trim()
+  const bearer =
+    keyFromHeader.toLowerCase().startsWith('bearer ')
+      ? keyFromHeader.slice(7).trim()
+      : keyFromHeader
+  if (!roomId) return null
+  if (!keyFromQuery && !bearer) return null
+  return { roomId, keyFromQuery, keyFromHeader: bearer }
 }
 
 function normalizeMessageCleanupTiming(value: unknown): MessageCleanupTiming {

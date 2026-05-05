@@ -1617,6 +1617,7 @@ Deno.serve(async (req) => {
               mediaUploadMaxBytes,
               calendarEnvForFileMedia,
               roomReplyPolicy.imageAnalysisReplyEnabled,
+              roomReplyPolicy.receiptMidreportEnabled,
               calendarSourceMeta,
             )
             // 無返信自動登録ONでは roomCanReply が false になるが、ファイル（HACCP Excel 等）の
@@ -1734,6 +1735,7 @@ async function trySaveLineMediaContent(
   mediaUploadMaxBytes: number,
   calendarEnv: CalendarEnv | null,
   imageAnalysisReplyEnabled: boolean,
+  receiptMidreportEnabled: boolean,
   sourceMeta: CalendarSourceMeta,
 ): Promise<LineReplyPayload | null> {
   const mediaType = normalizeStorableLineMediaType(message?.type)
@@ -1930,7 +1932,7 @@ async function trySaveLineMediaContent(
       roomId,
       lineMessageId,
       now,
-      roomReplyPolicy.receiptMidreportEnabled,
+      receiptMidreportEnabled,
     )
   }
 

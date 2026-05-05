@@ -1625,70 +1625,116 @@ const html = String.raw`<!doctype html>
 
     function buildRoomConfigEffectPreviewHtml(config) {
       const enabledFeatures = [];
-      const replyEffects = [];
+      const webhookReplies = [];
+      const scheduledAndAlerts = [];
       const cautions = [];
 
-      if (config.bot_reply_enabled) enabledFeatures.push('AI会話返信');
-      if (config.bot_reply_hard_mute_enabled) enabledFeatures.push('AI返信完全無し（このルームは返信しない）');
+      const hm = !!config.bot_reply_hard_mute_enabled;
+      const bot = !!config.bot_reply_enabled;
+      const media = !!config.media_file_access_enabled;
+      const imgReply = !!config.image_analysis_reply_enabled;
+      const cal = !!(config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled);
+      const calRegReply = !!config.calendar_registration_reply_enabled;
+      const calLowConf = !!config.calendar_low_confidence_confirm_reply_enabled;
+
+      if (bot) enabledFeatures.push('AI会話返信');
+      if (hm) enabledFeatures.push('AI返信完全無し（このルームは返信しない）');
       if (config.message_search_enabled) enabledFeatures.push('会話検索（ルーム）');
       if (config.message_search_library_enabled) enabledFeatures.push('資料検索（2段階目）');
       if (config.send_room_summary) enabledFeatures.push('ルーム要約配信（このルーム単体）');
       if (config.receive_overall_summary_enabled) enabledFeatures.push('全体要約レポートをこのルームに配信');
       if (config.calendar_tomorrow_reminder_enabled) enabledFeatures.push('明日予定配信');
-      if (config.media_file_access_enabled) enabledFeatures.push('LINE添付保存（ルーム）');
-      if (config.gmail_reservation_alert_enabled) enabledFeatures.push('Gmail予約通知');
-      if (config.receipt_midreport_enabled) enabledFeatures.push('売上中間報告（15日）');
-      if (config.receipt_monthend_report_enabled) enabledFeatures.push('売上月末レポート（月末）');
-      if (config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) {
+      if (media) enabledFeatures.push('LINE添付保存（ルーム）');
+      if (media && imgReply) enabledFeatures.push('画像解析結果をLINE返信');
+      if (cal) {
         enabledFeatures.push('会話から予定検知 → Googleカレンダーへ無返信で自動登録');
+        if (calRegReply) enabledFeatures.push('予定の登録内容をLINEで返信する（高確度でも）');
+        if (calLowConf) enabledFeatures.push('低確度のとき確認返信（はい／いいえ）');
+      }
+      if (config.gmail_reservation_alert_enabled) enabledFeatures.push('Gmail予約通知');
+      if (config.receipt_midreport_enabled) enabledFeatures.push('売上中間報告をこのルームに送信（15日）');
+      if (config.receipt_monthend_report_enabled) enabledFeatures.push('売上月末レポートをこのルームに送信（月末）');
+
+      if (hm) {
+        webhookReplies.push(
+          '「AI返信完全無し」がONのとき、メッセージ受信に対する Bot の返信（操作コマンド・通常の会話返信・画像／ファイル解析結果・予定まわりの対話型返信など）は送信されません。',
+        );
       }
 
-      if (config.bot_reply_hard_mute_enabled) {
-        replyEffects.push('AI返信完全無しがONのため、操作コマンドを含む会話起点の返信はすべて停止します。');
-      }
-
-      if (!config.bot_reply_hard_mute_enabled && config.media_file_access_enabled && config.image_analysis_reply_enabled) {
-        replyEffects.push('画像添付時に解析結果をLINEへ返信します。');
-      } else {
-        replyEffects.push('画像解析結果はLINEへ返信しません。');
-      }
-
-      if (config.calendar_ai_auto_create_enabled && config.calendar_silent_auto_register_enabled) {
-        if (!config.bot_reply_enabled) {
-          cautions.push('AI会話返信がOFFのため、会話起点の予定自動登録は実装上動作しません。');
-        } else if (config.bot_reply_hard_mute_enabled) {
-          replyEffects.push('会話からの予定登録は行っても、確認や登録結果のLINE返信は行いません。');
+      if (!hm) {
+        if (!media) {
+          webhookReplies.push('LINE添付保存がOFFのため、画像・ファイルは保存されず、解析結果のLINE返信もありません。');
+        } else if (imgReply) {
+          webhookReplies.push('メディア保存後、解析結果（レシート集計など）をこのルームのLINEに返信します。');
         } else {
-          if (config.calendar_registration_reply_enabled) {
-            replyEffects.push('高確度で予定登録した内容をLINEへ返信します。');
+          webhookReplies.push('メディアは保存しますが、「画像解析結果をLINE返信」がOFFのため、解析内容をLINEには返しません。');
+        }
+      }
+
+      if (cal) {
+        if (!bot) {
+          cautions.push('「AI会話返信」がOFFのとき、会話起点の予定自動登録フローは動かないことがあります。');
+        }
+        if (hm) {
+          webhookReplies.push('カレンダー自動登録が動いても、このルームへの確認メッセージや登録内容のLINE返信は行いません。');
+        } else if (bot) {
+          if (calRegReply) {
+            webhookReplies.push('高確度でカレンダーに登録した内容を、このトークへ返信します（「AI会話返信」がONであることが前提）。');
           } else {
-            replyEffects.push('高確度で予定登録してもLINE返信は行いません。');
+            webhookReplies.push('高確度でカレンダーに登録しても、その内容をこのトークへは返信しません。');
           }
-          if (config.calendar_low_confidence_confirm_reply_enabled) {
-            replyEffects.push('低確度の予定は「はい/いいえ」の確認返信を送ります。');
+          if (calLowConf) {
+            webhookReplies.push('低確度の予定候補には「はい／いいえ」の確認メッセージを送ります。');
           } else {
-            replyEffects.push('低確度の予定は無返信で仮登録します。');
+            webhookReplies.push('低確度の予定候補は、確認メッセージなしで仮登録に近い扱いになります。');
           }
         }
       } else {
-        replyEffects.push('会話からの予定自動登録は無効です。');
+        webhookReplies.push('会話からのGoogleカレンダー自動登録は無効です。');
       }
 
       if (config.gmail_reservation_alert_enabled) {
-        replyEffects.push('Gmail予約通知メールを検知したとき、このルームへ通知します。');
+        scheduledAndAlerts.push('Gmail の予約っぽいメールを検知したとき、このルームへ通知する設定です（システムの Gmail 連携・ジョブが有効な場合）。');
       } else {
-        replyEffects.push('Gmail予約通知は送信しません。');
+        scheduledAndAlerts.push('Gmail予約通知はこのルーム向けに送らない設定です。');
+      }
+
+      if (config.send_room_summary) {
+        scheduledAndAlerts.push('このルーム単体の定期要約を、このトークへ配信する設定です（全体のスケジュール・対象時間に依存）。');
+      }
+      if (config.receive_overall_summary_enabled) {
+        scheduledAndAlerts.push('全体向け定期要約レポートを、このトークにも配信する設定です。');
+      }
+      if (config.calendar_tomorrow_reminder_enabled) {
+        scheduledAndAlerts.push('翌日予定の事前通知を、このトークへ送る設定です（翌日通知ジョブが有効な場合）。');
+      }
+      if (config.receipt_midreport_enabled) {
+        scheduledAndAlerts.push('月途中の売上レポートを、このルームへ送る設定です（通常は15日前後・バッチ処理）。');
+      }
+      if (config.receipt_monthend_report_enabled) {
+        scheduledAndAlerts.push('月末の売上レポートを、このルームへ送る設定です（バッチ処理）。');
+      }
+
+      if (config.send_room_summary && config.receive_overall_summary_enabled) {
+        cautions.push('ルーム単体要約と全体要約の同時ONは通常できません。チェック状態を確認してください。');
+      }
+
+      if (enabledFeatures.length === 0) {
+        enabledFeatures.push('（すべてOFFに近い状態です）');
       }
 
       return [
         '<section class="effect-block"><h4 class="effect-title">有効になる機能</h4>',
         renderEffectList(enabledFeatures),
         '</section>',
-        '<section class="effect-block"><h4 class="effect-title">LINEへの通知・返信挙動</h4>',
-        renderEffectList(replyEffects),
+        '<section class="effect-block"><h4 class="effect-title">メッセージ受信時の返信（Webhook）</h4>',
+        renderEffectList(webhookReplies),
+        '</section>',
+        '<section class="effect-block"><h4 class="effect-title">定期配信・バッチ通知</h4>',
+        renderEffectList(scheduledAndAlerts.length ? scheduledAndAlerts : ['（該当する定期項目にチェックなし）']),
         '</section>',
         '<section class="effect-block"><h4 class="effect-title">注意点</h4>',
-        (cautions.length > 0 ? renderEffectList(cautions) : '<p class="effect-note">この設定では追加の注意点はありません。</p>'),
+        (cautions.length > 0 ? renderEffectList(cautions) : '<p class="effect-note">この組み合わせで特記すべき矛盾はありません。</p>'),
         '</section>',
       ].join('');
     }
@@ -2776,10 +2822,6 @@ const html = String.raw`<!doctype html>
     async function saveRoomConfigModal() {
       if (!activeRoomConfigRow) return;
       const nextConfig = buildRoomConfigDraftFromModal();
-      const signature = buildRoomConfigDraftSignature(nextConfig);
-      if (!roomConfigReviewSignature || roomConfigReviewSignature !== signature) {
-        throw new Error('先に「効果確認」を実行してから保存してください。');
-      }
       applyRoomConfigStateToRow(activeRoomConfigRow, nextConfig);
       const saved = await saveRoomFromRow(activeRoomConfigRow, { overrideConfig: nextConfig });
       const savedConfig = saved && saved.room_settings ? {
