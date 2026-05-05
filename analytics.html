@@ -820,15 +820,15 @@ async function apiFetch(path) {
 async function fetchWeather(storeKey, fromDate, toDate) {
   const coords = STORE_COORDS[storeKey];
   if (!coords) return {};
-  // 「前日まで」の天気を表示したいので、JSTの昨日を上限とする
+  // 実績は「前日まで」、加えて今日〜10日先は予報を表示
   const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
   const today = new Date(todayStr);
   const y = new Date(today); y.setDate(y.getDate() - 1);
   const yesterdayStr = y.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  if (fromDate > yesterdayStr) return {};
-
+  const f = new Date(today); f.setDate(f.getDate() + 10);
+  const forecastToStr = f.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
   const safeFrom = fromDate;
-  const safeTo = toDate > yesterdayStr ? yesterdayStr : toDate;
+  const safeToHistory = toDate > yesterdayStr ? yesterdayStr : toDate;
 
   // アーカイブAPIは直近3日分を持たないため、
   // それより前は archive、直近数日は forecast を併用して埋める
@@ -837,9 +837,9 @@ async function fetchWeather(storeKey, fromDate, toDate) {
 
   const result = {};
 
-  // 1) 過去分: archive API （from〜min(safeTo, archiveCap)）
-  if (safeFrom <= archiveCap) {
-    const archiveTo = safeTo > archiveCap ? archiveCap : safeTo;
+  // 1) 過去分: archive API （from〜min(safeToHistory, archiveCap)）
+  if (safeFrom <= archiveCap && safeToHistory >= safeFrom) {
+    const archiveTo = safeToHistory > archiveCap ? archiveCap : safeToHistory;
     const paramsArchive = new URLSearchParams({
       latitude: coords.lat,
       longitude: coords.lon,
@@ -867,18 +867,45 @@ async function fetchWeather(storeKey, fromDate, toDate) {
   // 2) 直近分: forecast API （max(archiveCap+1, safeFrom)〜safeTo）
   const dArchiveNext = new Date(dArchiveEnd); dArchiveNext.setDate(dArchiveNext.getDate() + 1);
   const archiveNextStr = dArchiveNext.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  const forecastFrom = safeFrom > archiveNextStr ? safeFrom : archiveNextStr;
-  if (forecastFrom <= safeTo) {
+  const forecastHistoryFrom = safeFrom > archiveNextStr ? safeFrom : archiveNextStr;
+  if (forecastHistoryFrom <= safeToHistory) {
     const paramsForecast = new URLSearchParams({
       latitude: coords.lat,
       longitude: coords.lon,
-      start_date: forecastFrom,
-      end_date: safeTo,
+      start_date: forecastHistoryFrom,
+      end_date: safeToHistory,
       daily: 'temperature_2m_max,precipitation_sum',
       timezone: 'Asia/Tokyo',
     });
     try {
       const res = await fetch(`https://api.open-meteo.com/v1/forecast?${paramsForecast}`);
+      if (res.ok) {
+        const data = await res.json();
+        const dates = data?.daily?.time ?? [];
+        const temps = data?.daily?.temperature_2m_max ?? [];
+        const rains = data?.daily?.precipitation_sum ?? [];
+        dates.forEach((dStr, i) => {
+          result[dStr] = { temp: temps[i], rain: rains[i] };
+        });
+      }
+    } catch {
+      // ignore forecast failure
+    }
+  }
+
+  // 3) 将来分: 今日〜10日先の予報
+  const forecastFutureFrom = todayStr > safeFrom ? todayStr : safeFrom;
+  if (forecastFutureFrom <= forecastToStr) {
+    const paramsForecastFuture = new URLSearchParams({
+      latitude: coords.lat,
+      longitude: coords.lon,
+      start_date: forecastFutureFrom,
+      end_date: forecastToStr,
+      daily: 'temperature_2m_max,precipitation_sum',
+      timezone: 'Asia/Tokyo',
+    });
+    try {
+      const res = await fetch(`https://api.open-meteo.com/v1/forecast?${paramsForecastFuture}`);
       if (res.ok) {
         const data = await res.json();
         const dates = data?.daily?.time ?? [];
@@ -945,7 +972,7 @@ async function loadAll() {
     state.monthlySeries = monthlyData?.series ?? [];
     state.weather = weatherMap;
     const weatherCount = Object.keys(state.weather).length;
-    dom.weatherStatus.textContent = weatherCount > 0 ? `天候データ ${weatherCount}日分` : '天候データなし';
+    dom.weatherStatus.textContent = weatherCount > 0 ? `天候データ ${weatherCount}日分（実績+予報10日）` : '天候データなし';
     const addr = STORE_ADDRESS[state.storeKey];
     dom.weatherAddress.textContent = addr ? `📍 ${addr}` : '';
 
@@ -1041,10 +1068,13 @@ function renderDailyChart() {
   const series = state.dailySeries;
   if (!series.length) return;
   const { gridColor, tickColor, legendColor } = chartDefaults();
-  const labels = series.map(d => d.date.slice(5)); // MM-DD
-  const gross = series.map(d => d.gross_sales_yen);
-  const rain = series.map(d => state.weather[d.date]?.rain ?? null);
-  const temp = series.map(d => state.weather[d.date]?.temp ?? null);
+  const salesMap = {};
+  series.forEach((d) => { salesMap[d.date] = d; });
+  const chartDates = buildDailyChartDates(series, state.weather);
+  const labels = chartDates.map(d => d.slice(5)); // MM-DD
+  const gross = chartDates.map(d => salesMap[d]?.gross_sales_yen ?? null);
+  const rain = chartDates.map(d => state.weather[d]?.rain ?? null);
+  const temp = chartDates.map(d => state.weather[d]?.temp ?? null);
 
   const datasets = [
     {
@@ -1074,12 +1104,12 @@ function renderDailyChart() {
       const meta = chart.getDatasetMeta(1);
       if (!meta?.data?.length) return;
       ctx.save();
-      const barW = chartArea.width / Math.max(series.length, 1);
-      series.forEach((d, i) => {
+      const barW = chartArea.width / Math.max(chartDates.length, 1);
+      chartDates.forEach((dateStr, i) => {
         const x = meta.data[i]?.x;
         if (x == null) return;
-        const dow = new Date(d.date).getDay(); // 0=日, 6=土
-        const isHoliday = JAPANESE_HOLIDAYS.has(d.date);
+        const dow = new Date(dateStr).getDay(); // 0=日, 6=土
+        const isHoliday = JAPANESE_HOLIDAYS.has(dateStr);
         const isSat = dow === 6;
         const isSun = dow === 0;
         if (!isHoliday && !isSat && !isSun) return;
@@ -1119,8 +1149,8 @@ function renderDailyChart() {
       ctx.font = '13px serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      series.forEach((d, i) => {
-        const w = state.weather[d.date];
+      chartDates.forEach((dateStr, i) => {
+        const w = state.weather[dateStr];
         const icon = weatherIcon(w?.rain ?? null, w?.temp ?? null);
         if (!icon) return;
         const x = meta.data[i]?.x;
@@ -1145,7 +1175,7 @@ function renderDailyChart() {
           callbacks: {
             title: (items) => {
               const idx = items[0]?.dataIndex;
-              const dateStr = series[idx]?.date;
+              const dateStr = chartDates[idx];
               const holidayName = dateStr ? JAPANESE_HOLIDAYS.get(dateStr) : null;
               const label = items[0]?.label ?? '';
               return holidayName ? `${label}（${holidayName}）` : label;
@@ -1179,6 +1209,26 @@ function renderDailyChart() {
     },
     plugins: [holidayPlugin, weatherIconPlugin],
   });
+}
+
+function buildDailyChartDates(series, weatherMap) {
+  const dates = [];
+  const seen = new Set();
+  const salesDates = series.map(d => d.date).sort();
+  for (const d of salesDates) {
+    if (!seen.has(d)) { seen.add(d); dates.push(d); }
+  }
+
+  const keys = Object.keys(weatherMap || {});
+  if (salesDates.length === 0) return keys.sort();
+  const lastSalesDate = salesDates[salesDates.length - 1];
+  for (const d of keys.sort()) {
+    if (d > lastSalesDate && !seen.has(d)) {
+      seen.add(d);
+      dates.push(d);
+    }
+  }
+  return dates;
 }
 
 /* ── Chart 2: weekday avg ── */
