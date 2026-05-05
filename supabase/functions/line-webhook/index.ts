@@ -691,6 +691,15 @@ Deno.serve(async (req) => {
         userName: senderDisplayName,
       }
 
+      // 画像/ファイル投稿時も投稿者名を保存できるよう、メディア保存前に送信者表示名を補完する。
+      if (shouldStoreMediaFile && lineAccessToken && !senderDisplayName) {
+        senderDisplayName = await fetchLineMessageSenderDisplayName(source, lineAccessToken)
+        calendarSourceMeta = {
+          roomName: roomReplyPolicy.roomName,
+          userName: senderDisplayName,
+        }
+      }
+
       if (event.message?.type === 'text') {
         if (lineAccessToken && !senderDisplayName) {
           senderDisplayName = await fetchLineMessageSenderDisplayName(source, lineAccessToken)
