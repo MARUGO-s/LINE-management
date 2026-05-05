@@ -2758,7 +2758,7 @@ function resolveMediaSearchDisplayName(
   const mt = String(mediaType ?? '').trim().toLowerCase()
   const original = String(originalFileName ?? '').trim()
   const preview = String(previewShort ?? '').trim()
-  if (mt === 'image' && preview) return clipMediaPreview(preview, 60)
+  if ((mt === 'image' || mt === 'file') && preview) return clipMediaPreview(preview, 60)
   return original || 'media-file'
 }
 
