@@ -313,7 +313,6 @@
     <div class="status">
       <span id="authState" class="pill">未接続</span>
       <span id="lastRefresh" class="pill">最終更新: なし</span>
-      <a href="./analytics.html" class="pill link">月次グラフ</a>
       <a href="./index.html" class="pill link" id="adminLink">管理画面</a>
       <button id="themeBtn" type="button" class="pill">ライトモード</button>
     </div>
@@ -821,32 +820,80 @@ async function apiFetch(path) {
 async function fetchWeather(storeKey, fromDate, toDate) {
   const coords = STORE_COORDS[storeKey];
   if (!coords) return {};
-  // アーカイブAPIは直近3日分のデータをまだ持っていないので3日前でキャップ
+  // 「前日まで」の天気を表示したいので、JSTの昨日を上限とする
   const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  const d = new Date(todayStr); d.setDate(d.getDate() - 3);
-  const archiveCap = d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  const clampedTo = toDate > archiveCap ? archiveCap : toDate;
-  const params = new URLSearchParams({
-    latitude: coords.lat,
-    longitude: coords.lon,
-    start_date: fromDate,
-    end_date: clampedTo,
-    daily: 'temperature_2m_max,precipitation_sum',
-    timezone: 'Asia/Tokyo',
-  });
-  try {
-    const res = await fetch(`https://archive-api.open-meteo.com/v1/archive?${params}`);
-    if (!res.ok) return {};
-    const data = await res.json();
-    const dates = data?.daily?.time ?? [];
-    const temps = data?.daily?.temperature_2m_max ?? [];
-    const rains = data?.daily?.precipitation_sum ?? [];
-    const map = {};
-    dates.forEach((d, i) => { map[d] = { temp: temps[i], rain: rains[i] }; });
-    return map;
-  } catch {
-    return {};
+  const today = new Date(todayStr);
+  const y = new Date(today); y.setDate(y.getDate() - 1);
+  const yesterdayStr = y.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  if (fromDate > yesterdayStr) return {};
+
+  const safeFrom = fromDate;
+  const safeTo = toDate > yesterdayStr ? yesterdayStr : toDate;
+
+  // アーカイブAPIは直近3日分を持たないため、
+  // それより前は archive、直近数日は forecast を併用して埋める
+  const dArchiveEnd = new Date(today); dArchiveEnd.setDate(dArchiveEnd.getDate() - 3);
+  const archiveCap = dArchiveEnd.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+
+  const result = {};
+
+  // 1) 過去分: archive API （from〜min(safeTo, archiveCap)）
+  if (safeFrom <= archiveCap) {
+    const archiveTo = safeTo > archiveCap ? archiveCap : safeTo;
+    const paramsArchive = new URLSearchParams({
+      latitude: coords.lat,
+      longitude: coords.lon,
+      start_date: safeFrom,
+      end_date: archiveTo,
+      daily: 'temperature_2m_max,precipitation_sum',
+      timezone: 'Asia/Tokyo',
+    });
+    try {
+      const res = await fetch(`https://archive-api.open-meteo.com/v1/archive?${paramsArchive}`);
+      if (res.ok) {
+        const data = await res.json();
+        const dates = data?.daily?.time ?? [];
+        const temps = data?.daily?.temperature_2m_max ?? [];
+        const rains = data?.daily?.precipitation_sum ?? [];
+        dates.forEach((dStr, i) => {
+          result[dStr] = { temp: temps[i], rain: rains[i] };
+        });
+      }
+    } catch {
+      // ignore archive failure
+    }
   }
+
+  // 2) 直近分: forecast API （max(archiveCap+1, safeFrom)〜safeTo）
+  const dArchiveNext = new Date(dArchiveEnd); dArchiveNext.setDate(dArchiveNext.getDate() + 1);
+  const archiveNextStr = dArchiveNext.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const forecastFrom = safeFrom > archiveNextStr ? safeFrom : archiveNextStr;
+  if (forecastFrom <= safeTo) {
+    const paramsForecast = new URLSearchParams({
+      latitude: coords.lat,
+      longitude: coords.lon,
+      start_date: forecastFrom,
+      end_date: safeTo,
+      daily: 'temperature_2m_max,precipitation_sum',
+      timezone: 'Asia/Tokyo',
+    });
+    try {
+      const res = await fetch(`https://api.open-meteo.com/v1/forecast?${paramsForecast}`);
+      if (res.ok) {
+        const data = await res.json();
+        const dates = data?.daily?.time ?? [];
+        const temps = data?.daily?.temperature_2m_max ?? [];
+        const rains = data?.daily?.precipitation_sum ?? [];
+        dates.forEach((dStr, i) => {
+          result[dStr] = { temp: temps[i], rain: rains[i] };
+        });
+      }
+    } catch {
+      // ignore forecast failure
+    }
+  }
+
+  return result;
 }
 
 /* ── main load ── */

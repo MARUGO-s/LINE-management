@@ -148,6 +148,33 @@ const html = String.raw`<!doctype html>
       grid-column: span 12;
     }
 
+    .log-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 12px 0;
+    }
+
+    .log-tabs .log-tab {
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: rgba(7, 20, 34, 0.5);
+      color: var(--txt);
+      font: inherit;
+      font-weight: 600;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+
+    .log-tabs .log-tab:hover {
+      border-color: var(--accent);
+    }
+
+    .log-tabs .log-tab.active {
+      border-color: var(--accent);
+      background: rgba(25, 189, 255, 0.18);
+    }
+
     .card.rooms {
       grid-column: span 12;
     }
@@ -566,27 +593,57 @@ const html = String.raw`<!doctype html>
       opacity: 0.82;
     }
 
-    .log-table th:nth-child(1),
-    .log-table td:nth-child(1) { width: 164px; }
-    .log-table th:nth-child(2),
-    .log-table td:nth-child(2) { width: 210px; }
-    .log-table th:nth-child(3),
-    .log-table td:nth-child(3) {
+    .log-table--summary th:nth-child(1),
+    .log-table--summary td:nth-child(1) { width: 164px; }
+    .log-table--summary th:nth-child(2),
+    .log-table--summary td:nth-child(2) { width: 210px; }
+    .log-table--summary th:nth-child(3),
+    .log-table--summary td:nth-child(3) {
       width: 220px;
       white-space: normal;
       word-break: break-word;
       overflow-wrap: anywhere;
     }
-    .log-table th:nth-child(4),
-    .log-table td:nth-child(4) {
+    .log-table--summary th:nth-child(4),
+    .log-table--summary td:nth-child(4) {
       width: 95px;
       white-space: nowrap;
     }
-    .log-table th:nth-child(5),
-    .log-table td:nth-child(5) {
+    .log-table--summary th:nth-child(5),
+    .log-table--summary td:nth-child(5) {
       width: 62px;
       white-space: nowrap;
     }
+
+    .log-table--webhook th:nth-child(1),
+    .log-table--webhook td:nth-child(1) { width: 148px; }
+    .log-table--webhook th:nth-child(2),
+    .log-table--webhook td:nth-child(2) { width: 72px; white-space: nowrap; }
+    .log-table--webhook th:nth-child(3),
+    .log-table--webhook td:nth-child(3) {
+      width: 160px;
+      white-space: normal;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      font-size: 0.85rem;
+    }
+    .log-table--webhook th:nth-child(4),
+    .log-table--webhook td:nth-child(4) { width: 180px; }
+    .log-table--webhook th:nth-child(5),
+    .log-table--webhook td:nth-child(5) {
+      min-width: 120px;
+      white-space: normal;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+    }
+    .log-table--webhook th:nth-child(6),
+    .log-table--webhook td:nth-child(6) {
+      width: 110px;
+      font-size: 0.78rem;
+      word-break: break-all;
+    }
+    .log-table--webhook th:nth-child(7),
+    .log-table--webhook td:nth-child(7) { width: 56px; white-space: nowrap; }
 
     .log-table .tag {
       white-space: nowrap;
@@ -1134,9 +1191,13 @@ const html = String.raw`<!doctype html>
 
       <section class="card logs">
         <h2>配信ログ（最新）</h2>
+        <div class="log-tabs" role="tablist" aria-label="配信ログの種類">
+          <button type="button" class="log-tab active" id="logTabSummary" data-log-tab="summary" role="tab" aria-selected="true">定期・ジョブ配信</button>
+          <button type="button" class="log-tab" id="logTabWebhook" data-log-tab="webhook" role="tab" aria-selected="false">Webhook（LINE返信）</button>
+        </div>
         <div class="table-wrap log-table-wrap">
-          <table class="log-table">
-            <thead>
+          <table class="log-table log-table--summary" id="deliveryLogTable">
+            <thead id="logTableHead">
               <tr>
                 <th>実行時刻</th>
                 <th>状態</th>
@@ -1345,7 +1406,11 @@ const html = String.raw`<!doctype html>
       storageUsagePieCenterValue: document.getElementById('storageUsagePieCenterValue'),
       storageUsageLegend: document.getElementById('storageUsageLegend'),
       roomTableBody: document.getElementById('roomTableBody'),
+      deliveryLogTable: document.getElementById('deliveryLogTable'),
+      logTableHead: document.getElementById('logTableHead'),
       logTableBody: document.getElementById('logTableBody'),
+      logTabSummary: document.getElementById('logTabSummary'),
+      logTabWebhook: document.getElementById('logTabWebhook'),
       userPermissionTableBody: document.getElementById('userPermissionTableBody'),
       reloadUserPermissionsBtn: document.getElementById('reloadUserPermissionsBtn'),
       backfillUserPermissionsBtn: document.getElementById('backfillUserPermissionsBtn'),
@@ -1416,6 +1481,8 @@ const html = String.raw`<!doctype html>
     let autoRefreshTimer = null;
     let isStateLoading = false;
     let currentState = null;
+    /** @type {'summary' | 'webhook'} */
+    let deliveryLogTab = 'summary';
     let isGlobalDirty = false;
     let isRoomDirty = false;
     let isUserPermissionDirty = false;
@@ -1928,6 +1995,10 @@ const html = String.raw`<!doctype html>
         delivered_no_messages_to_mark: '配信は成功しましたが、更新対象のメッセージはありませんでした。',
         delivered_with_room_failures: '配信は一部成功しましたが、ルーム別配信に失敗したものがあります。',
         runtime_error: '実行中に予期しないエラーが発生しました。',
+        webhook_line_delivered: 'Webhook経由でLINEへ送信しました。',
+        webhook_line_send_failed: lineDetail
+          ? ('Webhook経由のLINE送信に失敗しました。' + lineDetail)
+          : 'Webhook経由のLINE送信に失敗しました。',
       };
       if (map[status]) return map[status];
       if (hasJa && raw) return raw;
@@ -1941,7 +2012,8 @@ const html = String.raw`<!doctype html>
       if (
         status !== 'line_send_failed' &&
         status !== 'gmail_alert_send_failed' &&
-        status !== 'calendar_tomorrow_send_failed'
+        status !== 'calendar_tomorrow_send_failed' &&
+        status !== 'webhook_line_send_failed'
       ) return '';
       const messages = extractLineErrorMessages(raw);
       if (!messages.length) return '';
@@ -2192,7 +2264,13 @@ const html = String.raw`<!doctype html>
         + dom.tomorrowReminderMaxItems.value + '件';
     }
 
-    function renderLogs(logs) {
+    function webhookMethodJa(method) {
+      const m = String(method || '').toLowerCase();
+      if (m === 'push') return 'Push';
+      return '返信';
+    }
+
+    function renderSummaryLogRows(logs) {
       dom.logTableBody.innerHTML = '';
       const rows = Array.isArray(logs) ? logs.slice(0, 30) : [];
       if (rows.length === 0) {
@@ -2209,6 +2287,62 @@ const html = String.raw`<!doctype html>
           '<td>' + (row.rooms_targeted ?? 0) + ' rooms</td>' +
           '<td>' + (row.line_send_success ? '成功' : (row.line_send_attempted ? '失敗' : '未実行')) + '</td>';
         dom.logTableBody.appendChild(tr);
+      }
+    }
+
+    function renderWebhookLogRows(logs) {
+      dom.logTableBody.innerHTML = '';
+      const rows = Array.isArray(logs) ? logs.slice(0, 30) : [];
+      if (rows.length === 0) {
+        dom.logTableBody.innerHTML = '<tr><td class="empty" colspan="7">ログはありません。</td></tr>';
+        return;
+      }
+      for (const row of rows) {
+        const tr = document.createElement('tr');
+        const tag = statusTag(row.status);
+        const at = row.created_at || row.run_at;
+        tr.innerHTML =
+          '<td>' + formatDate(at) + '</td>' +
+          '<td>' + escapeHtml(webhookMethodJa(row.method)) + '</td>' +
+          '<td><code style="font-size:0.82em;">' + escapeHtml(String(row.context || '-')) + '</code></td>' +
+          '<td><span class="tag ' + tag + '">' + escapeHtml(row.status || '-') + '</span></td>' +
+          '<td>' + escapeHtml(logReasonJa(row)) + '</td>' +
+          '<td>' + escapeHtml(String(row.target_room_id || '-')) + '</td>' +
+          '<td>' + (row.line_send_success ? '成功' : (row.line_send_attempted ? '失敗' : '未実行')) + '</td>';
+        dom.logTableBody.appendChild(tr);
+      }
+    }
+
+    function renderDeliverySection(state) {
+      const st = state || {};
+      const summaryLogs = Array.isArray(st.delivery_logs) ? st.delivery_logs : [];
+      const webhookLogs = Array.isArray(st.webhook_delivery_logs) ? st.webhook_delivery_logs : [];
+      if (dom.logTabSummary && dom.logTabWebhook) {
+        dom.logTabSummary.classList.toggle('active', deliveryLogTab === 'summary');
+        dom.logTabWebhook.classList.toggle('active', deliveryLogTab === 'webhook');
+        dom.logTabSummary.setAttribute('aria-selected', deliveryLogTab === 'summary' ? 'true' : 'false');
+        dom.logTabWebhook.setAttribute('aria-selected', deliveryLogTab === 'webhook' ? 'true' : 'false');
+      }
+      if (dom.deliveryLogTable) {
+        dom.deliveryLogTable.className =
+          'log-table ' + (deliveryLogTab === 'webhook' ? 'log-table--webhook' : 'log-table--summary');
+      }
+      if (deliveryLogTab === 'webhook') {
+        if (dom.logTableHead) {
+          dom.logTableHead.innerHTML =
+            '<tr>' +
+            '<th>実行時刻</th><th>方式</th><th>コンテキスト</th><th>状態</th><th>理由</th><th>ルーム</th><th>送信</th>' +
+            '</tr>';
+        }
+        renderWebhookLogRows(webhookLogs);
+      } else {
+        if (dom.logTableHead) {
+          dom.logTableHead.innerHTML =
+            '<tr>' +
+            '<th>実行時刻</th><th>状態</th><th>理由</th><th>対象</th><th>送信</th>' +
+            '</tr>';
+        }
+        renderSummaryLogRows(summaryLogs);
       }
     }
 
@@ -2919,7 +3053,7 @@ const html = String.raw`<!doctype html>
       const state = await api('/state?logs_limit=30');
       currentState = state;
       renderGlobal(state.global_settings || {});
-      renderLogs(state.delivery_logs || []);
+      renderDeliverySection(state);
       renderRooms(state.room_overview || [], state.room_settings || []);
       renderUserPermissions(state.user_permissions || []);
       renderStorageUsage(state.storage_usage, state.storage_usage_error, state.generated_at);
@@ -3351,6 +3485,18 @@ const html = String.raw`<!doctype html>
     dom.clearTokenBtn.addEventListener('click', function() {
       setToken('');
       stopAutoRefresh();
+      deliveryLogTab = 'summary';
+      if (dom.logTableHead) {
+        dom.logTableHead.innerHTML =
+          '<tr><th>実行時刻</th><th>状態</th><th>理由</th><th>対象</th><th>送信</th></tr>';
+      }
+      if (dom.deliveryLogTable) {
+        dom.deliveryLogTable.className = 'log-table log-table--summary';
+      }
+      if (dom.logTabSummary && dom.logTabWebhook) {
+        dom.logTabSummary.classList.add('active');
+        dom.logTabWebhook.classList.remove('active');
+      }
       dom.logTableBody.innerHTML = '';
       dom.roomTableBody.innerHTML = '';
       dom.userPermissionTableBody.innerHTML = '';
@@ -3361,6 +3507,19 @@ const html = String.raw`<!doctype html>
       renderGmailAccountState(null);
       isUserPermissionDirty = false;
     });
+
+    if (dom.logTabSummary) {
+      dom.logTabSummary.addEventListener('click', function() {
+        deliveryLogTab = 'summary';
+        renderDeliverySection(currentState || {});
+      });
+    }
+    if (dom.logTabWebhook) {
+      dom.logTabWebhook.addEventListener('click', function() {
+        deliveryLogTab = 'webhook';
+        renderDeliverySection(currentState || {});
+      });
+    }
 
     dom.reloadBtn.addEventListener('click', async function() {
       try {

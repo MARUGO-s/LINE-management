@@ -787,23 +787,29 @@ async function fetchState(
   const logsFetchLimit = logsLimit * 8
 
   const globalSettings = await fetchGlobalSettings(supabase)
-  const [roomSettingsRes, roomOverviewRes, logsRes, storageUsageState, userPermissionsRes] = await Promise.all([
-    supabase
-      .from("room_summary_settings")
-      .select("*")
-      .order("updated_at", { ascending: false }),
-    supabase.rpc("get_room_overview"),
-    supabase
-      .from("summary_delivery_logs")
-      .select("id, run_at, jst_hour, status, reason, should_send_overall, rooms_targeted, messages_in_queue, messages_marked_processed, line_send_attempted, line_send_success, line_http_status, target_room_id, details")
-      .order("id", { ascending: false })
-      .limit(logsFetchLimit),
-    fetchStorageUsageState(supabase),
-    supabase
-      .from("line_user_permissions")
-      .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_calendar_view, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
-      .limit(USER_PERMISSION_SORT_FETCH_CAP),
-  ])
+  const [roomSettingsRes, roomOverviewRes, logsRes, webhookLogsRes, storageUsageState, userPermissionsRes] =
+    await Promise.all([
+      supabase
+        .from("room_summary_settings")
+        .select("*")
+        .order("updated_at", { ascending: false }),
+      supabase.rpc("get_room_overview"),
+      supabase
+        .from("summary_delivery_logs")
+        .select("id, run_at, jst_hour, status, reason, should_send_overall, rooms_targeted, messages_in_queue, messages_marked_processed, line_send_attempted, line_send_success, line_http_status, target_room_id, details")
+        .order("id", { ascending: false })
+        .limit(logsFetchLimit),
+      supabase
+        .from("line_webhook_delivery_logs")
+        .select("id, created_at, jst_hour, status, reason, method, context, line_send_attempted, line_send_success, line_http_status, target_room_id, details")
+        .order("id", { ascending: false })
+        .limit(logsFetchLimit),
+      fetchStorageUsageState(supabase),
+      supabase
+        .from("line_user_permissions")
+        .select("line_user_id, display_name, is_active, can_message_search, can_library_search, can_calendar_create, can_calendar_update, can_calendar_view, can_media_access, excluded_message_search_room_ids, assigned_store, assigned_job_title, updated_at")
+        .limit(USER_PERMISSION_SORT_FETCH_CAP),
+    ])
 
   if (roomSettingsRes.error) {
     throw { status: 500, message: `Failed to fetch room settings: ${roomSettingsRes.error.message}` } satisfies AppError
@@ -813,6 +819,9 @@ async function fetchState(
   }
   if (logsRes.error) {
     throw { status: 500, message: `Failed to fetch delivery logs: ${logsRes.error.message}` } satisfies AppError
+  }
+  if (webhookLogsRes.error) {
+    throw { status: 500, message: `Failed to fetch webhook delivery logs: ${webhookLogsRes.error.message}` } satisfies AppError
   }
   if (userPermissionsRes.error) {
     throw { status: 500, message: `Failed to fetch user permissions: ${userPermissionsRes.error.message}` } satisfies AppError
@@ -833,6 +842,7 @@ async function fetchState(
     job_title_options: [...JOB_TITLE_OPTIONS],
     room_overview: roomOverviewRes.data ?? [],
     delivery_logs: filteredLogs,
+    webhook_delivery_logs: (webhookLogsRes.data ?? []).slice(0, logsLimit),
     storage_usage: storageUsageState.stats,
     storage_usage_error: storageUsageState.error,
     generated_at: new Date().toISOString(),
