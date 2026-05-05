@@ -338,6 +338,7 @@
       <select id="storeSelect" class="select" aria-label="店舗選択">
         <option value="">（店舗を選択）</option>
       </select>
+      <input id="monthPicker" class="input" type="month" aria-label="対象月">
       <div class="chart-tab-group" id="periodTabs">
         <button class="chart-tab active" data-period="month">今月</button>
         <button class="chart-tab" data-period="prev">先月</button>
@@ -610,6 +611,7 @@ const JAPANESE_HOLIDAYS = new Map([
 const state = {
   theme: localStorage.getItem(THEME_KEY) || 'dark',
   period: 'month',    // month | prev | 3m | 6m | 12m
+  customMonth: '',
   storeKey: '',
   storeOptions: [],
   dailySeries: [],    // [{date, gross_sales_yen, net_sales_yen, party_count, guest_count, receipt_count}]
@@ -625,7 +627,7 @@ const dom = {
   authState: $('authState'), lastRefresh: $('lastRefresh'),
   projectUrl: $('projectUrlInput'), tokenInput: $('tokenInput'),
   saveToken: $('saveTokenBtn'), clearToken: $('clearTokenBtn'),
-  storeSelect: $('storeSelect'), reloadBtn: $('reloadBtn'),
+  storeSelect: $('storeSelect'), monthPicker: $('monthPicker'), reloadBtn: $('reloadBtn'),
   filterMeta: $('filterMeta'), themeBtn: $('themeBtn'),
   kpiPeriodLabel: $('kpiPeriodLabel'),
   kpiGross: $('kpiGross'),
@@ -699,10 +701,13 @@ function prevMonth(m) {
 }
 
 function periodToMonths(period) {
-  if (period === 'month') return [currentJstMonth()];
-  if (period === 'prev') return [prevMonth(currentJstMonth())];
+  const baseMonth = isValidMonthString(state.customMonth) ? state.customMonth : currentJstMonth();
+  if (period === 'month') {
+    return [baseMonth];
+  }
+  if (period === 'prev') return [prevMonth(baseMonth)];
   const n = parseInt(period);
-  const cur = currentJstMonth();
+  const cur = baseMonth;
   const result = [];
   for (let i = n - 1; i >= 0; i--) {
     let [y, mo] = cur.split('-').map(Number);
@@ -710,6 +715,10 @@ function periodToMonths(period) {
     result.push(`${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, '0')}`);
   }
   return result;
+}
+
+function isValidMonthString(value) {
+  return /^\d{4}-\d{2}$/.test(String(value ?? ''));
 }
 
 function dateRange(months) {
@@ -781,6 +790,17 @@ document.getElementById('periodTabs').addEventListener('click', (e) => {
   document.querySelectorAll('#periodTabs .chart-tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   state.period = btn.dataset.period;
+  loadAll();
+});
+
+dom.monthPicker.addEventListener('change', () => {
+  const picked = String(dom.monthPicker.value || '').trim();
+  if (!isValidMonthString(picked)) return;
+  state.customMonth = picked;
+  state.period = 'month';
+  document.querySelectorAll('#periodTabs .chart-tab').forEach(b => b.classList.remove('active'));
+  const monthTab = document.querySelector('#periodTabs .chart-tab[data-period="month"]');
+  if (monthTab) monthTab.classList.add('active');
   loadAll();
 });
 
@@ -1159,13 +1179,6 @@ function renderDailyChart() {
         const y = chart.scales.x.bottom + 2;
         ctx.textBaseline = 'top';
         ctx.fillText(icon, x, y);
-        if (dateStr >= todayStr) {
-          ctx.font = '9px sans-serif';
-          ctx.fillStyle = 'rgba(255, 209, 126, 0.95)';
-          ctx.fillText('仮', x, y + 13);
-          ctx.font = '13px serif';
-          ctx.fillStyle = legendColor;
-        }
       });
       ctx.restore();
     },
@@ -1563,6 +1576,8 @@ function refreshAllCharts() {
 
 /* ── init ── */
 applyTheme(state.theme);
+state.customMonth = currentJstMonth();
+dom.monthPicker.value = state.customMonth;
 
 // URL引数 ?t= からトークンを自動設定（LINEボタン経由アクセス用）
 (function () {
