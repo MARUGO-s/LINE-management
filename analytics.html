@@ -1156,13 +1156,13 @@ function renderDailyChart() {
         if (!icon) return;
         const x = meta.data[i]?.x;
         if (x == null) return;
-        const y = chart.scales.x.bottom + 1;
+        const y = chart.scales.x.bottom + 2;
         ctx.textBaseline = 'top';
         ctx.fillText(icon, x, y);
         if (dateStr >= todayStr) {
           ctx.font = '9px sans-serif';
           ctx.fillStyle = 'rgba(255, 209, 126, 0.95)';
-          ctx.fillText('予', x, y + 12);
+          ctx.fillText('予', x, y + 13);
           ctx.font = '13px serif';
           ctx.fillStyle = legendColor;
         }
@@ -1176,7 +1176,7 @@ function renderDailyChart() {
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
-      layout: { padding: { bottom: 18 } },
+      layout: { padding: { bottom: 26 } },
       plugins: {
         legend: { labels: { color: legendColor, font: { size: 11 } } },
         tooltip: {
