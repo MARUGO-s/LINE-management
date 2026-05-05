@@ -873,15 +873,14 @@ async function fetchWeather(storeKey, fromDate, toDate) {
   if (!coords) return { map: {}, forecastLimited: false };
   // toDate は表示範囲の翌日（排他）なので末日に補正
   const displayTo = shiftDateString(toDate, -1);
-  // 実績は「前日まで」、加えて表示範囲の先まで予報を表示
+  // 実績は「前日まで」、加えて今日〜10日先の予報を表示
   const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
   const today = new Date(todayStr);
   const y = new Date(today); y.setDate(y.getDate() - 1);
   const yesterdayStr = y.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  // Open-Meteo daily forecast は「今日を含めて最大16日」想定なので +15 日で上限化
-  const f = new Date(today); f.setDate(f.getDate() + 15);
-  const forecastApiCapStr = f.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  const forecastToStr = displayTo > forecastApiCapStr ? forecastApiCapStr : displayTo;
+  const f = new Date(today); f.setDate(f.getDate() + 10);
+  const forecastCapStr = f.toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const forecastToStr = displayTo > forecastCapStr ? forecastCapStr : displayTo;
   const safeFrom = fromDate;
   const safeToHistory = displayTo > yesterdayStr ? yesterdayStr : displayTo;
 
@@ -948,7 +947,7 @@ async function fetchWeather(storeKey, fromDate, toDate) {
     }
   }
 
-  // 3) 将来分: 今日〜表示末日（ただしAPI上限まで）の予報
+  // 3) 将来分: 今日〜10日先（表示範囲内）の予報
   const forecastFutureFrom = todayStr > safeFrom ? todayStr : safeFrom;
   if (forecastFutureFrom <= forecastToStr) {
     // end_date が長いと環境によって失敗するため、失敗時は短い期間で段階リトライ
@@ -979,7 +978,7 @@ async function fetchWeather(storeKey, fromDate, toDate) {
     }
   }
 
-  return { map: result, forecastLimited: displayTo > forecastApiCapStr };
+  return { map: result, forecastLimited: displayTo > forecastCapStr };
 }
 
 /* ── main load ── */
@@ -1032,9 +1031,7 @@ async function loadAll() {
     state.weather = weatherResult?.map ?? {};
     const weatherCount = Object.keys(state.weather).length;
     if (weatherCount > 0) {
-      dom.weatherStatus.textContent = weatherResult?.forecastLimited
-        ? `天候データ ${weatherCount}日分（実績+予報・先はAPI上限まで）`
-        : `天候データ ${weatherCount}日分（実績+予報）`;
+      dom.weatherStatus.textContent = `天候データ ${weatherCount}日分（実績+予報10日）`;
     } else {
       dom.weatherStatus.textContent = '天候データなし';
     }
