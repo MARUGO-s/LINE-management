@@ -396,6 +396,14 @@ type HaccpScheduleEntry = {
   date: string
 }
 
+/** Pass into replyLineMessage / pushLineMessage to persist summary_delivery_logs rows. */
+type WebhookLineDeliveryLogCtx = {
+  supabase: ReturnType<typeof createClient>
+  roomId: string
+  context: string
+  details?: Record<string, unknown>
+}
+
 const JST_OFFSET_MS = 9 * 60 * 60 * 1000
 const DEFAULT_DURATION_MIN = 60
 const MAX_DURATION_MIN = 720
@@ -637,6 +645,15 @@ Deno.serve(async (req) => {
         continue
       }
       const replyToken = String(event.replyToken ?? '')
+      const webhookDeliveryLog = (
+        context: string,
+        details?: Record<string, unknown>,
+      ): WebhookLineDeliveryLogCtx => ({
+        supabase,
+        roomId,
+        context,
+        details,
+      })
       let aiAutoCreateReply: LineReplyPayload | null = null
       let senderDisplayName: string | null = null
 
@@ -700,6 +717,7 @@ Deno.serve(async (req) => {
               replyToken,
               'このアカウントは現在Bot利用権限がないため、実行できません。',
               lineAccessToken,
+              webhookDeliveryLog('inactive_user_denied'),
             )
           }
           continue
@@ -717,6 +735,7 @@ Deno.serve(async (req) => {
             replyToken,
             buildRoomRegistrationRequiredReply(roomReplyPolicy.roomName),
             lineAccessToken,
+            webhookDeliveryLog('room_registration_guidance'),
           )
           if (!replyResult.ok) {
             console.error('Failed to reply room registration guidance:', replyResult.error)
@@ -748,7 +767,12 @@ Deno.serve(async (req) => {
             console.error('Missing replyToken for room capability status.')
             continue
           }
-          const replyResult = await replyLineMessage(replyToken, capabilityStatusReply, lineAccessToken)
+          const replyResult = await replyLineMessage(
+            replyToken,
+            capabilityStatusReply,
+            lineAccessToken,
+            webhookDeliveryLog('capability_status_denied'),
+          )
           if (!replyResult.ok) {
             console.error('Failed to reply room capability status:', replyResult.error)
           }
@@ -774,6 +798,7 @@ Deno.serve(async (req) => {
               replyToken,
               '保存メディアのURLを出すには、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
               lineAccessToken,
+              webhookDeliveryLog('saved_media_url_permission_denied'),
             )
             if (!replyResult.ok) {
               console.error('Failed to reply saved media URL permission:', replyResult.error)
@@ -781,7 +806,12 @@ Deno.serve(async (req) => {
             continue
           }
           const urlReplyEarly = await buildSavedMediaUrlReply(supabase, savedMediaUrlCmdEarly.count)
-          const replyResultEarly = await replyLineMessage(replyToken, urlReplyEarly, lineAccessToken)
+          const replyResultEarly = await replyLineMessage(
+            replyToken,
+            urlReplyEarly,
+            lineAccessToken,
+            webhookDeliveryLog('saved_media_url_command'),
+          )
           if (!replyResultEarly.ok) {
             console.error('Failed to reply saved media URL command:', replyResultEarly.error)
           }
@@ -808,6 +838,7 @@ Deno.serve(async (req) => {
               replyToken,
               'レシート修正を使うには、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
               lineAccessToken,
+              webhookDeliveryLog('receipt_correction_media_denied'),
             )
             if (!denyReply.ok) {
               console.error('Failed to reply receipt correction permission status:', denyReply.error)
@@ -817,7 +848,12 @@ Deno.serve(async (req) => {
           const startText = await startReceiptCorrectionSession(supabase, roomId, userId, {
             targetLineMessageId: receiptCorrectionStart.targetLineMessageId,
           })
-          const startReply = await replyLineMessage(replyToken, startText, lineAccessToken)
+          const startReply = await replyLineMessage(
+            replyToken,
+            startText,
+            lineAccessToken,
+            webhookDeliveryLog('receipt_correction_start'),
+          )
           if (!startReply.ok) {
             console.error('Failed to reply receipt correction start prompt:', startReply.error)
           }
@@ -843,6 +879,7 @@ Deno.serve(async (req) => {
               replyToken,
               'メディア検索を使うには、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
               lineAccessToken,
+              webhookDeliveryLog('media_search_media_denied'),
             )
             if (!denyReply.ok) {
               console.error('Failed to reply media search permission status:', denyReply.error)
@@ -858,7 +895,12 @@ Deno.serve(async (req) => {
             itemCursor: 0,
             items: [],
           })
-          const startReply = await replyLineMessage(replyToken, buildMediaSearchPeriodPrompt(), lineAccessToken)
+          const startReply = await replyLineMessage(
+            replyToken,
+            buildMediaSearchPeriodPrompt(),
+            lineAccessToken,
+            webhookDeliveryLog('media_search_period_prompt'),
+          )
           if (!startReply.ok) {
             console.error('Failed to reply media search period prompt:', startReply.error)
           }
@@ -884,7 +926,12 @@ Deno.serve(async (req) => {
             }
             continue
           }
-          const pendingReply = await replyLineMessage(replyToken, receiptCorrectionPendingReply, lineAccessToken)
+          const pendingReply = await replyLineMessage(
+            replyToken,
+            receiptCorrectionPendingReply,
+            lineAccessToken,
+            webhookDeliveryLog('receipt_correction_pending'),
+          )
           if (!pendingReply.ok) {
             console.error('Failed to reply receipt correction pending:', pendingReply.error)
           }
@@ -907,7 +954,12 @@ Deno.serve(async (req) => {
             if (!replyToken) console.error('Missing replyToken for media search pending.')
             continue
           }
-          const pendingReply = await replyLineMessage(replyToken, mediaSearchPendingReply, lineAccessToken)
+          const pendingReply = await replyLineMessage(
+            replyToken,
+            mediaSearchPendingReply,
+            lineAccessToken,
+            webhookDeliveryLog('media_search_pending'),
+          )
           if (!pendingReply.ok) {
             console.error('Failed to reply media search pending:', pendingReply.error)
           }
@@ -930,7 +982,12 @@ Deno.serve(async (req) => {
             if (!replyToken) console.error('Missing replyToken for casual media lookup.')
             continue
           }
-          const casualReplyResult = await replyLineMessage(replyToken, casualMediaLookupReply, lineAccessToken)
+          const casualReplyResult = await replyLineMessage(
+            replyToken,
+            casualMediaLookupReply,
+            lineAccessToken,
+            webhookDeliveryLog('casual_media_lookup'),
+          )
           if (!casualReplyResult.ok) {
             console.error('Failed to reply casual media lookup:', casualReplyResult.error)
           }
@@ -963,7 +1020,12 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for HACCP bulk confirmation.')
                 continue
               }
-              const replyResult = await replyLineMessage(replyToken, haccpBulkReply, lineAccessToken)
+              const replyResult = await replyLineMessage(
+                replyToken,
+                haccpBulkReply,
+                lineAccessToken,
+                webhookDeliveryLog('haccp_bulk_confirmation'),
+              )
               if (!replyResult.ok) {
                 console.error('Failed to reply HACCP bulk confirmation:', replyResult.error)
               }
@@ -990,7 +1052,12 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for pending confirmation.')
                 continue
               }
-              const replyResult = await replyLineMessage(replyToken, confirmationReply, lineAccessToken)
+              const replyResult = await replyLineMessage(
+                replyToken,
+                confirmationReply,
+                lineAccessToken,
+                webhookDeliveryLog('calendar_pending_confirmation'),
+              )
               if (!replyResult.ok) {
                 console.error('Failed to reply pending confirmation:', replyResult.error)
               } else if (
@@ -1031,7 +1098,12 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for calendar update conversation.')
                 continue
               }
-              const replyResult = await replyLineMessage(replyToken, updateConversationReply, lineAccessToken)
+              const replyResult = await replyLineMessage(
+                replyToken,
+                updateConversationReply,
+                lineAccessToken,
+                webhookDeliveryLog('calendar_update_conversation'),
+              )
               if (!replyResult.ok) {
                 console.error('Failed to reply calendar update conversation:', replyResult.error)
               }
@@ -1071,7 +1143,12 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for message search expand confirmation.')
                 continue
               }
-              const expandReplyResult = await replyLineMessage(replyToken, expandSearchReply, lineAccessToken)
+              const expandReplyResult = await replyLineMessage(
+                replyToken,
+                expandSearchReply,
+                lineAccessToken,
+                webhookDeliveryLog('message_search_expand'),
+              )
               if (!expandReplyResult.ok) {
                 console.error('Failed to reply message search expand confirmation:', expandReplyResult.error)
               }
@@ -1098,7 +1175,12 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for library search confirmation.')
                 continue
               }
-              const replyResult = await replyLineMessage(replyToken, librarySearchReply, lineAccessToken)
+              const replyResult = await replyLineMessage(
+                replyToken,
+                librarySearchReply,
+                lineAccessToken,
+                webhookDeliveryLog('library_search_confirmation'),
+              )
               if (!replyResult.ok) {
                 console.error('Failed to reply library search confirmation:', replyResult.error)
               }
@@ -1144,7 +1226,12 @@ Deno.serve(async (req) => {
                         console.error('Missing replyToken for AI primary-intent confirmation.')
                         continue
                       }
-                      const replyResult = await replyLineMessage(replyToken, confirmPrompt, lineAccessToken)
+                      const replyResult = await replyLineMessage(
+                        replyToken,
+                        confirmPrompt,
+                        lineAccessToken,
+                        webhookDeliveryLog('primary_intent_confirmation'),
+                      )
                       if (!replyResult.ok) {
                         console.error('Failed to reply AI primary-intent confirmation:', replyResult.error)
                       }
@@ -1235,7 +1322,12 @@ Deno.serve(async (req) => {
                     'この質問は、現在このルームで権限が付与されていないため実行できません。',
                     ...(permissionReasons.length > 0 ? [`判定理由: ${permissionReasons.join(' / ')}`] : []),
                   ].join('\n'))
-                const permissionReplyResult = await replyLineMessage(replyToken, permissionReply, lineAccessToken)
+                const permissionReplyResult = await replyLineMessage(
+                  replyToken,
+                  permissionReply,
+                  lineAccessToken,
+                  webhookDeliveryLog('message_search_permission_denied'),
+                )
                 if (!permissionReplyResult.ok) {
                   console.error('Failed to reply message search permission status:', permissionReplyResult.error)
                 }
@@ -1264,7 +1356,12 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for message search.')
                 continue
               }
-              const replyResult = await replyLineMessage(replyToken, replyMessages, lineAccessToken)
+              const replyResult = await replyLineMessage(
+                replyToken,
+                replyMessages,
+                lineAccessToken,
+                webhookDeliveryLog('message_search_reply'),
+              )
               if (!replyResult.ok) {
                 console.error('Failed to reply message search:', replyResult.error)
               }
@@ -1296,6 +1393,7 @@ Deno.serve(async (req) => {
                 replyToken,
                 deniedReply,
                 lineAccessToken,
+                webhookDeliveryLog('calendar_permission_denied'),
               )
               if (!deniedReplyResult.ok) {
                 console.error('Failed to reply calendar permission status:', deniedReplyResult.error)
@@ -1323,7 +1421,12 @@ Deno.serve(async (req) => {
               continue
             }
 
-            const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
+            const replyResult = await replyLineMessage(
+              replyToken,
+              replyMessage,
+              lineAccessToken,
+              webhookDeliveryLog('calendar_command_reply'),
+            )
             if (!replyResult.ok) {
               console.error('Failed to reply calendar command:', replyResult.error)
             } else if (commandParse.command?.kind === 'list' && replyResult.sentMessageIds.length > 0) {
@@ -1371,7 +1474,12 @@ Deno.serve(async (req) => {
                 console.error('Missing replyToken for AI list intent.')
                 continue
               }
-              const replyResult = await replyLineMessage(replyToken, replyMessage, lineAccessToken)
+              const replyResult = await replyLineMessage(
+                replyToken,
+                replyMessage,
+                lineAccessToken,
+                webhookDeliveryLog('ai_calendar_list'),
+              )
               if (!replyResult.ok) {
                 console.error('Failed to reply AI list intent:', replyResult.error)
               } else if (replyResult.sentMessageIds.length > 0) {
@@ -1647,11 +1755,25 @@ Deno.serve(async (req) => {
           console.error('Missing replyToken for AI auto-create result.')
           continue
         }
-        const replyResult = await replyLineMessage(replyToken, aiAutoCreateReply, lineAccessToken)
+        const replyResult = await replyLineMessage(
+          replyToken,
+          aiAutoCreateReply,
+          lineAccessToken,
+          webhookDeliveryLog('ai_auto_create_reply', {
+            message_types: Array.isArray(aiAutoCreateReply) ? 'multi' : 'single',
+          }),
+        )
         if (!replyResult.ok) {
           console.error('Failed to reply AI auto-create result (reply):', replyResult.error)
           // replyトークン失効（画像解析等の処理に30秒以上かかった場合）のためpush APIにフォールバック
-          const pushResult = await pushLineMessage(roomId, aiAutoCreateReply, lineAccessToken)
+          const pushResult = await pushLineMessage(
+            roomId,
+            aiAutoCreateReply,
+            lineAccessToken,
+            webhookDeliveryLog('ai_auto_create_push_fallback', {
+              after_reply_error: true,
+            }),
+          )
           if (!pushResult.ok) {
             console.error('Failed to push AI auto-create result (push):', pushResult.error)
           }
@@ -10725,6 +10847,11 @@ function parseCalendarCommand(rawText: string): CalendarCommandParseResult {
     }
   }
 
+  const naturalList = parseNaturalLanguageListQuery(text)
+  if (naturalList) {
+    return { matched: true, command: { kind: 'list', ...naturalList }, error: null }
+  }
+
   return { matched: false, command: null, error: null }
 }
 
@@ -11053,6 +11180,16 @@ function isCalendarListStopKeyword(keyword: string): boolean {
   const normalized = normalizeForRuleParsing(keyword).replace(/\s+/g, '')
   if (!normalized) return true
   return /^(何|なに|何が|何を|何か|どれ|どこ|いつ|何がありますか|何があります|なにがありますか|なにがあります)$/.test(normalized)
+}
+
+/** 「次の会議」→「会議」のように、自然文の聞き方用接頭辞を外してタイトル照合しやすくする。 */
+function relaxCalendarListKeywordForFilter(keyword: string): string {
+  const trimmed = String(keyword ?? '').trim()
+  if (!trimmed) return ''
+  const relaxed = trimmed
+    .replace(/^(次の|次は|次|直近の|近い|もうすぐの|この先の|これからの)\s*/u, '')
+    .trim()
+  return relaxed.length > 0 ? relaxed : trimmed
 }
 
 function canonicalizeListScopeText(raw: string): string {
@@ -11427,13 +11564,14 @@ async function listCalendarEventsReply(
 
   const data = await response.json()
   const allItems: GoogleCalendarEvent[] = Array.isArray(data?.items) ? data.items : []
-  const items = command.keyword
-    ? allItems.filter((item) => eventMatchesKeyword(item, command.keyword as string))
+  const keywordForFilter = command.keyword ? relaxCalendarListKeywordForFilter(String(command.keyword)) : ''
+  const items = keywordForFilter
+    ? allItems.filter((item) => eventMatchesKeyword(item, keywordForFilter))
     : allItems
 
   if (items.length === 0) {
     if (command.keyword) {
-      return `「${command.keyword}」に一致する予定はありません（${range.label}）`
+      return `「${keywordForFilter || command.keyword}」に一致する予定はありません（${range.label}）`
     }
     return `予定はありません（${range.label}）`
   }
@@ -11441,7 +11579,7 @@ async function listCalendarEventsReply(
   await savePendingCalendarUpdateContext(supabase, roomId, userId, items, env.timezone)
 
   const heading = command.keyword
-    ? `予定一覧（${range.label} / キーワード: ${command.keyword}）`
+    ? `予定一覧（${range.label} / キーワード: ${keywordForFilter || command.keyword}）`
     : `予定一覧（${range.label}）`
 
   const lines: string[] = [heading]
@@ -12303,10 +12441,49 @@ function applyLineReplyMessageLimit(messages: LineReplyMessage[], maxReplyMessag
   return limited
 }
 
+function currentJstHourForDeliveryLog(now = new Date()): number {
+  return (now.getUTCHours() + 9) % 24
+}
+
+async function writeWebhookLineDeliveryLog(
+  supabase: ReturnType<typeof createClient>,
+  params: {
+    roomId: string
+    success: boolean
+    method: 'reply' | 'push'
+    lineHttpStatus: number | null
+    reason: string
+    context: string
+    details?: Record<string, unknown>
+  },
+): Promise<void> {
+  const status = params.success ? 'webhook_line_delivered' : 'webhook_line_send_failed'
+  try {
+    const { error } = await supabase.from('line_webhook_delivery_logs').insert({
+      jst_hour: currentJstHourForDeliveryLog(),
+      status,
+      reason: params.reason.slice(0, 2000),
+      method: params.method,
+      context: params.context.slice(0, 500),
+      line_send_attempted: true,
+      line_send_success: params.success,
+      line_http_status: params.lineHttpStatus,
+      target_room_id: params.roomId,
+      details: params.details ?? {},
+    })
+    if (error) {
+      console.error('writeWebhookLineDeliveryLog:', error.message)
+    }
+  } catch (e) {
+    console.error('writeWebhookLineDeliveryLog unexpected:', e)
+  }
+}
+
 async function replyLineMessage(
   replyToken: string,
   payload: LineReplyPayload,
   channelAccessToken: string,
+  logCtx?: WebhookLineDeliveryLogCtx | null,
 ): Promise<{ ok: true; sentMessageIds: string[] } | { ok: false; error: string }> {
   const maxReplyMessages = 5
   const preparedMessages = normalizeLineReplyMessages(payload)
@@ -12336,17 +12513,44 @@ async function replyLineMessage(
     }),
   })
 
+  const httpStatus = response.status
   if (!response.ok) {
     const errText = await response.text()
-    return { ok: false, error: `LINE reply API error (${response.status}): ${errText}` }
+    const fullError = `LINE reply API error (${httpStatus}): ${errText}`
+    if (logCtx) {
+      await writeWebhookLineDeliveryLog(logCtx.supabase, {
+        roomId: logCtx.roomId,
+        success: false,
+        method: 'reply',
+        lineHttpStatus: httpStatus,
+        reason: `reply · ${logCtx.context} · ${fullError.slice(0, 1500)}`,
+        context: logCtx.context,
+        details: logCtx.details,
+      })
+    }
+    return { ok: false, error: fullError }
   }
   let sentMessageIds: string[] = []
   try {
-    const payload = await response.json() as Record<string, unknown>
-    const sentMessages = Array.isArray(payload?.sentMessages) ? payload.sentMessages : []
+    const payloadJson = await response.json() as Record<string, unknown>
+    const sentMessages = Array.isArray(payloadJson?.sentMessages) ? payloadJson.sentMessages : []
     sentMessageIds = normalizeLineMessageIds(sentMessages.map((item) => String((item as any)?.id ?? '')))
   } catch {
     sentMessageIds = []
+  }
+  if (logCtx) {
+    await writeWebhookLineDeliveryLog(logCtx.supabase, {
+      roomId: logCtx.roomId,
+      success: true,
+      method: 'reply',
+      lineHttpStatus: httpStatus,
+      reason: `reply · ${logCtx.context}`,
+      context: logCtx.context,
+      details: {
+        ...logCtx.details,
+        sent_message_ids: sentMessageIds,
+      },
+    })
   }
   return { ok: true, sentMessageIds }
 }
@@ -12355,6 +12559,7 @@ async function pushLineMessage(
   to: string,
   payload: LineReplyPayload,
   channelAccessToken: string,
+  logCtx?: WebhookLineDeliveryLogCtx | null,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const maxMessages = 5
   const preparedMessages = normalizeLineReplyMessages(payload)
@@ -12384,9 +12589,33 @@ async function pushLineMessage(
     }),
   })
 
+  const httpStatus = response.status
   if (!response.ok) {
     const errText = await response.text()
-    return { ok: false, error: `LINE push API error (${response.status}): ${errText}` }
+    const fullError = `LINE push API error (${httpStatus}): ${errText}`
+    if (logCtx) {
+      await writeWebhookLineDeliveryLog(logCtx.supabase, {
+        roomId: logCtx.roomId,
+        success: false,
+        method: 'push',
+        lineHttpStatus: httpStatus,
+        reason: `push · ${logCtx.context} · ${fullError.slice(0, 1500)}`,
+        context: logCtx.context,
+        details: logCtx.details,
+      })
+    }
+    return { ok: false, error: fullError }
+  }
+  if (logCtx) {
+    await writeWebhookLineDeliveryLog(logCtx.supabase, {
+      roomId: logCtx.roomId,
+      success: true,
+      method: 'push',
+      lineHttpStatus: httpStatus,
+      reason: `push · ${logCtx.context}`,
+      context: logCtx.context,
+      details: logCtx.details,
+    })
   }
   return { ok: true }
 }
