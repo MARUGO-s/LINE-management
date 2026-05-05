@@ -1163,6 +1163,16 @@
       return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
     }
 
+    function resolveMediaDisplayName(item) {
+      const type = String(item && item.media_type || 'file');
+      const originalName = item && item.original_file_name ? String(item.original_file_name) : '(名称なし)';
+      if (type !== 'image') return originalName;
+      const preview = String(item && item.content_preview || '').replace(/\s+/g, ' ').trim();
+      if (!preview) return originalName;
+      if (preview.length <= 80) return preview;
+      return preview.slice(0, 79).trimEnd() + '…';
+    }
+
     function getFileExtension(fileName) {
       const name = String(fileName || '').trim();
       const idx = name.lastIndexOf('.');
@@ -1659,7 +1669,8 @@
       const type = String(item.media_type || 'file');
       const signedUrl = String(item.signed_url || '');
       const downloadUrl = String(item.download_url || signedUrl || '');
-      const name = item.original_file_name ? String(item.original_file_name) : '(名称なし)';
+      const name = resolveMediaDisplayName(item);
+      const originalName = item.original_file_name ? String(item.original_file_name) : '(名称なし)';
       const downloadName = safeDownloadName(name === '(名称なし)' ? '' : name, String(item.line_message_id || 'line-media'));
       const mime = item.mime_type ? String(item.mime_type) : '-';
       const beforeContext = buildContextRowHtml('直前', item.context_before_at, item.context_before_text);
@@ -1734,7 +1745,7 @@
                 ].join('');
               }
               if (cp) {
-                const analysis = inferFilePurpose(name, mime, cp);
+                const analysis = inferFilePurpose(originalName, mime, cp);
                 return [
                   '<div class="extract-block">',
                   '<div class="extract-label">抽出テキストあり（サーバーがファイルを解析して取得・先頭付近）</div>',
@@ -1760,7 +1771,7 @@
       const type = String(item.media_type || 'file');
       const signedUrl = String(item.signed_url || '');
       const downloadUrl = String(item.download_url || signedUrl || '');
-      const name = item.original_file_name ? String(item.original_file_name) : '(名称なし)';
+      const name = resolveMediaDisplayName(item);
       const downloadName = safeDownloadName(name === '(名称なし)' ? '' : name, String(item.line_message_id || 'line-media'));
       const mediaId = Number(item && item.id || 0);
       const mediaSelected = Number.isInteger(mediaId) && state.mediaSelectedIds.has(mediaId);
