@@ -3151,7 +3151,7 @@ function parseMediaSearchFilterText(rawText: string): {
 } | null {
   const text = String(rawText ?? '').trim()
   if (!text) return null
-  const senderMatch = text.match(/^(?:送信者|sender)\s*[:：]\s*(.+)$/i)
+  const senderMatch = text.match(/^(?:送信者|投稿者|送った人|sender)\s*[:：]\s*(.+)$/i)
   if (senderMatch) {
     const senderQuery = String(senderMatch[1] ?? '').trim()
     return senderQuery ? { senderQuery } : null
@@ -4000,12 +4000,14 @@ function buildMediaSearchCandidateListReply(
 ): string {
   const periodLabel = pending.period_months === 0 ? '全期間' : `${pending.period_months}ヶ月`
   const kw = String(opts?.keywordQuery ?? '').trim()
+  const senderQ = String(pending.sender_query ?? '').trim()
   const cursorRaw = Number(opts?.itemCursor ?? pending.item_cursor ?? 0)
   const cursor = Number.isFinite(cursorRaw) && cursorRaw >= 0 ? Math.floor(cursorRaw) : 0
   const pageItems = items.slice(cursor, cursor + MEDIA_SEARCH_REPLY_PAGE_SIZE)
   const shownEnd = cursor + pageItems.length
   const hasMore = shownEnd < items.length
   const headerBits = [`期間:${periodLabel}`]
+  if (senderQ) headerBits.push(`投稿者:${senderQ}`)
   if (kw) headerBits.push(`キー:${kw}`)
   headerBits.push(`表示:${Math.min(shownEnd, items.length)}/${items.length}`)
   const linesOut = [
@@ -4013,7 +4015,7 @@ function buildMediaSearchCandidateListReply(
   ]
   if (items.length === 0) {
     linesOut.push('候補が見つかりませんでした。')
-    linesOut.push('条件を変える場合: キー:語句 / 期間変更')
+    linesOut.push('条件を変える場合: 投稿者:名前 / キー:語句 / 期間変更')
     return linesOut.join('\n')
   }
   for (const item of pageItems) {
@@ -4023,7 +4025,7 @@ function buildMediaSearchCandidateListReply(
   if (hasMore) {
     linesOut.push(`まだ残りのファイルがあります。「続き」で次の${MEDIA_SEARCH_REPLY_PAGE_SIZE}件を表示します（残り${items.length - shownEnd}件）。`)
   }
-  linesOut.push('絞り込み: 語句をそのまま返信（ファイル名・ファイル内の抽出テキスト）または キー:語句')
+  linesOut.push('絞り込み: 語句をそのまま返信（ファイル名・ファイル内の抽出テキスト）または キー:語句 / 投稿者:名前')
   linesOut.push('条件変更: 期間変更')
   return linesOut.join('\n')
 }
@@ -4221,27 +4223,30 @@ async function tryHandlePendingMediaSearch(
 
   const filter = parseMediaSearchFilterText(normalizedText)
   if (filter) {
+    const filterSender = filter.senderQuery?.trim() || undefined
     const filterKw = filter.keywordQuery?.trim() || undefined
-    if (!filterKw) {
-      return '候補番号（例: 1）または「キー:語句」を返信してください。'
+    if (!filterKw && !filterSender) {
+      return '候補番号（例: 1）または「キー:語句」「投稿者:名前」を返信してください。'
     }
+    const nextSenderQuery = filterSender ?? pending.sender_query
     const items = await buildMediaSearchCandidates(supabase, {
       periodMonths: pending.period_months,
       categoryKey: 'all',
-      senderQuery: '',
+      senderQuery: nextSenderQuery,
       ...(filterKw ? { keywordQuery: filterKw } : {}),
     })
     await savePendingMediaSearch(supabase, roomId, userId, {
       stage: 'select_item',
       periodMonths: pending.period_months,
       categoryKey: 'all',
-      senderQuery: pending.sender_query,
+      senderQuery: nextSenderQuery,
       itemCursor: 0,
       items,
     })
     return buildMediaSearchCandidateListReply({
       ...pending,
       category_key: 'all',
+      sender_query: nextSenderQuery,
       item_cursor: 0,
       items,
     }, items, filterKw ? { keywordQuery: filterKw, itemCursor: 0 } : { itemCursor: 0 })
@@ -4337,7 +4342,7 @@ async function tryHandlePendingMediaSearch(
     }
   }
 
-  return '候補番号（例: 1）を返信してください。続きは「続き」、絞り込みは語句または「キー:語句」、条件変更は「期間変更」です。'
+  return '候補番号（例: 1）を返信してください。続きは「続き」、絞り込みは語句・「キー:語句」・「投稿者:名前」、条件変更は「期間変更」です。'
 }
 
 async function loadLineMediaUsageTotals(
