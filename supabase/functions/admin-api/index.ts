@@ -879,10 +879,14 @@ async function fetchMonthlyPushUsageSummary(
   total_push_rows: number
   webhook_push_rows: number
   summary_push_rows: number
+  webhook_reply_rows: number
+  webhook_success_rows: number
+  free_quota_limit: number
+  free_quota_remaining: number
   by_source_context: PushUsageItem[]
 }> {
   const bounds = getCurrentJstMonthUtcBounds()
-  const [webhookRes, summaryRes] = await Promise.all([
+  const [webhookPushRes, summaryRes, webhookSuccessRes] = await Promise.all([
     supabase
       .from("line_webhook_delivery_logs")
       .select("context")
@@ -897,15 +901,25 @@ async function fetchMonthlyPushUsageSummary(
       .eq("line_send_success", true)
       .gte("run_at", bounds.startUtcIso)
       .lt("run_at", bounds.endUtcIso),
+    supabase
+      .from("line_webhook_delivery_logs")
+      .select("method")
+      .eq("line_send_success", true)
+      .gte("created_at", bounds.startUtcIso)
+      .lt("created_at", bounds.endUtcIso),
   ])
-  if (webhookRes.error) {
-    throw { status: 500, message: `Failed to fetch webhook push usage: ${webhookRes.error.message}` } satisfies AppError
+  if (webhookPushRes.error) {
+    throw { status: 500, message: `Failed to fetch webhook push usage: ${webhookPushRes.error.message}` } satisfies AppError
   }
   if (summaryRes.error) {
     throw { status: 500, message: `Failed to fetch summary push usage: ${summaryRes.error.message}` } satisfies AppError
   }
+  if (webhookSuccessRes.error) {
+    throw { status: 500, message: `Failed to fetch webhook usage: ${webhookSuccessRes.error.message}` } satisfies AppError
+  }
   const counter = new Map<string, number>()
-  const webhookRows = Array.isArray(webhookRes.data) ? webhookRes.data : []
+  const webhookRows = Array.isArray(webhookPushRes.data) ? webhookPushRes.data : []
+  const webhookSuccessRows = Array.isArray(webhookSuccessRes.data) ? webhookSuccessRes.data : []
   const summaryRows = Array.isArray(summaryRes.data) ? summaryRes.data : []
   for (const row of webhookRows) {
     const context = String((row as any)?.context ?? "").trim() || "unknown"
@@ -932,6 +946,13 @@ async function fetchMonthlyPushUsageSummary(
     total_push_rows: webhookRows.length + summaryRows.length,
     webhook_push_rows: webhookRows.length,
     summary_push_rows: summaryRows.length,
+    webhook_reply_rows: webhookSuccessRows.filter((row) => String((row as any)?.method ?? "").trim() === "reply").length,
+    webhook_success_rows: webhookSuccessRows.length,
+    free_quota_limit: 200,
+    free_quota_remaining: Math.max(
+      0,
+      200 - webhookSuccessRows.filter((row) => String((row as any)?.method ?? "").trim() === "reply").length,
+    ),
     by_source_context: bySourceContext,
   }
 }

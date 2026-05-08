@@ -1191,6 +1191,7 @@ const html = String.raw`<!doctype html>
 
       <section class="card logs">
         <h2>配信ログ（最新）</h2>
+        <div id="webhookQuotaSummary" class="meta usage-summary"></div>
         <div class="log-tabs" role="tablist" aria-label="配信ログの種類">
           <button type="button" class="log-tab active" id="logTabSummary" data-log-tab="summary" role="tab" aria-selected="true">定期・ジョブ配信</button>
           <button type="button" class="log-tab" id="logTabWebhook" data-log-tab="webhook" role="tab" aria-selected="false">Webhook（LINE返信）</button>
@@ -1411,6 +1412,7 @@ const html = String.raw`<!doctype html>
       logTableBody: document.getElementById('logTableBody'),
       logTabSummary: document.getElementById('logTabSummary'),
       logTabWebhook: document.getElementById('logTabWebhook'),
+      webhookQuotaSummary: document.getElementById('webhookQuotaSummary'),
       userPermissionTableBody: document.getElementById('userPermissionTableBody'),
       reloadUserPermissionsBtn: document.getElementById('reloadUserPermissionsBtn'),
       backfillUserPermissionsBtn: document.getElementById('backfillUserPermissionsBtn'),
@@ -2317,6 +2319,20 @@ const html = String.raw`<!doctype html>
       const st = state || {};
       const summaryLogs = Array.isArray(st.delivery_logs) ? st.delivery_logs : [];
       const webhookLogs = Array.isArray(st.webhook_delivery_logs) ? st.webhook_delivery_logs : [];
+      const usage = st.push_usage_monthly && typeof st.push_usage_monthly === 'object' ? st.push_usage_monthly : null;
+      if (dom.webhookQuotaSummary) {
+        if (!usage) {
+          dom.webhookQuotaSummary.textContent = 'Webhook無料枠（200）残り: 取得待ち';
+        } else {
+          const month = String(usage.month_jst || '').trim() || '-';
+          const limit = Number(usage.free_quota_limit || 200);
+          const used = Number(usage.webhook_reply_rows || 0);
+          const remaining = Math.max(0, Number(usage.free_quota_remaining != null ? usage.free_quota_remaining : (limit - used)));
+          dom.webhookQuotaSummary.textContent =
+            'Webhook無料枠（' + month + ' JST / 上限' + limit + '） 残り: '
+            + remaining + '回（使用: ' + used + '回）';
+        }
+      }
       if (dom.logTabSummary && dom.logTabWebhook) {
         dom.logTabSummary.classList.toggle('active', deliveryLogTab === 'summary');
         dom.logTabWebhook.classList.toggle('active', deliveryLogTab === 'webhook');
