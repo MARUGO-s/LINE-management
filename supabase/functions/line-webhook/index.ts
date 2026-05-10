@@ -387,6 +387,21 @@ type PendingReceiptCorrection = {
   expires_at: string
 }
 
+type PendingReceiptDuplicate = {
+  id: string
+  conversation_key: string
+  room_id: string
+  user_id: string | null
+  line_messages_id: string
+  line_message_id: string
+  receipt_payload: LineImageReceiptAnalysis
+  summary_text: string | null
+  store_partition_key: string
+  receipt_date: string
+  sender_display_name: string | null
+  expires_at: string
+}
+
 type MediaSearchStage = 'select_period' | 'select_category' | 'select_item' | 'input_keyword' | 'expand_confirm'
 type MediaSearchPeriodMonths = 1 | 3 | 6 | 12 | 0
 type MediaSearchCategoryKey =
@@ -467,6 +482,8 @@ const MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE = 'message_search_followup_pending_c
 const MESSAGE_SEARCH_PERIOD_PENDING_TABLE = 'message_search_period_pending_confirmations'
 const MEDIA_SEARCH_PENDING_TABLE = 'media_search_pending_confirmations'
 const RECEIPT_CORRECTION_PENDING_TABLE = 'receipt_correction_pending_confirmations'
+const RECEIPT_DUPLICATE_PENDING_TABLE = 'receipt_duplicate_pending_confirmations'
+const RECEIPT_DUPLICATE_PENDING_TTL_MIN = 30
 const HACCP_BULK_PENDING_TABLE = 'haccp_bulk_pending_confirmations'
 const HACCP_SCHEDULE_REGISTRATION_TABLE = 'haccp_schedule_calendar_registrations'
 const LEGACY_PENDING_PREFIX = '[[CAL_PENDING]]'
@@ -943,6 +960,7 @@ Deno.serve(async (req) => {
             continue
           }
           await clearPendingReceiptCorrection(supabase, roomId, userId)
+          await clearPendingReceiptDuplicate(supabase, roomId, userId)
           let startText: LineReplyPayload = buildMediaSearchPeriodPrompt()
           if (fileSearchStart.matched) {
             const keyword = fileSearchStart.keyword
@@ -1013,6 +1031,38 @@ Deno.serve(async (req) => {
           )
           if (!startReply.ok) {
             console.error('Failed to reply media search period prompt:', startReply.error)
+          }
+          continue
+        }
+
+        const receiptDuplicatePendingReply = await tryHandlePendingReceiptDuplicateConfirmation(
+          text,
+          supabase,
+          roomId,
+          userId,
+          roomReplyPolicy.receiptMidreportEnabled,
+        )
+        if (receiptDuplicatePendingReply) {
+          if (roomReplyPolicy.botReplyHardMuteEnabled) {
+            continue
+          }
+          if (!lineAccessToken || !replyToken) {
+            if (!lineAccessToken) {
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply receipt duplicate pending.')
+            }
+            if (!replyToken) {
+              console.error('Missing replyToken for receipt duplicate pending.')
+            }
+            continue
+          }
+          const dupReply = await replyLineMessage(
+            replyToken,
+            receiptDuplicatePendingReply,
+            lineAccessToken,
+            webhookDeliveryLog('receipt_duplicate_pending'),
+          )
+          if (!dupReply.ok) {
+            console.error('Failed to reply receipt duplicate pending:', dupReply.error)
           }
           continue
         }
@@ -2048,6 +2098,7 @@ async function trySaveLineMediaContent(
   receiptMidreportEnabled: boolean,
   sourceMeta: CalendarSourceMeta,
 ): Promise<LineReplyPayload | null> {
+  let receiptDuplicateConfirmationText: string | null = null
   const mediaType = normalizeStorableLineMediaType(message?.type)
   if (!mediaType) return null
 
@@ -2227,15 +2278,6 @@ async function trySaveLineMediaContent(
   let receiptBudgetFlexRows: Array<{ label: string; value: string; margin?: 'md' }> | null = null
   if (mediaType === 'image' && imageAnalysis?.receipt) {
     const now = new Date()
-    await saveLineReceiptEntry(supabase, {
-      messageId: lineMessageRowId,
-      lineMessageId,
-      roomId,
-      userId,
-      senderDisplayName,
-      receipt: imageAnalysis.receipt,
-      summary: imageAnalysis.summary,
-    })
     const canonicalStoreName = imageAnalysis.receipt.storeName
       ? (resolveBestStoreName(imageAnalysis.receipt.storeName) ?? imageAnalysis.receipt.storeName)
       : null
@@ -2243,25 +2285,68 @@ async function trySaveLineMediaContent(
     const receiptDateIsoForTotals =
       parseReceiptDateToIso(imageAnalysis.receipt.date) ?? resolveReceiptDateIsoForPersist(imageAnalysis.receipt.date)
     const receiptMonthStr = receiptDateIsoForTotals.slice(0, 7)
-    monthCumulativeTotals = await loadMonthCumulativeTotalsForStoreMonth(
-      supabase,
-      storePartitionKey,
-      receiptMonthStr,
-    )
-    receiptBudgetFlexRows = await buildReceiptBudgetComparisonRows(
-      supabase,
-      storePartitionKey,
-      receiptDateIsoForTotals,
-      receiptMonthStr,
-      monthCumulativeTotals,
-    )
-    midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
-      supabase,
-      roomId,
-      lineMessageId,
-      now,
-      receiptMidreportEnabled,
-    )
+
+    const duplicateExists =
+      storePartitionKey !== RECEIPT_STORE_PARTITION_UNKNOWN &&
+      await hasExistingReceiptEntryForStoreAndDate(supabase, storePartitionKey, receiptDateIsoForTotals)
+
+    let skipImmediateReceiptSave = false
+    if (duplicateExists) {
+      await clearPendingReceiptCorrection(supabase, roomId, userId)
+      const dupSave = await savePendingReceiptDuplicate(supabase, {
+        roomId,
+        userId,
+        lineMessagesId: lineMessageRowId,
+        lineMessageId,
+        receipt: imageAnalysis.receipt,
+        summary: imageAnalysis.summary ?? '',
+        storePartitionKey,
+        receiptDateIso: receiptDateIsoForTotals,
+        senderDisplayName,
+      })
+      if (dupSave.ok) {
+        receiptDuplicateConfirmationText = buildReceiptDuplicateConfirmationPrompt(
+          imageAnalysis.receipt,
+          receiptDateIsoForTotals,
+        )
+        skipImmediateReceiptSave = true
+      } else if (!dupSave.missingTable) {
+        receiptDuplicateConfirmationText =
+          '確認状態の保存に失敗しました。少し時間を置いて同じ画像を再送してください。'
+        skipImmediateReceiptSave = true
+      }
+    }
+    if (!skipImmediateReceiptSave) {
+      await clearPendingReceiptDuplicate(supabase, roomId, userId)
+      await saveLineReceiptEntry(supabase, {
+        messageId: lineMessageRowId,
+        lineMessageId,
+        roomId,
+        userId,
+        senderDisplayName,
+        receipt: imageAnalysis.receipt,
+        summary: imageAnalysis.summary,
+      })
+      monthCumulativeTotals = await loadMonthCumulativeTotalsForStoreMonth(
+        supabase,
+        storePartitionKey,
+        receiptMonthStr,
+      )
+      receiptBudgetFlexRows = await buildReceiptBudgetComparisonRows(
+        supabase,
+        storePartitionKey,
+        receiptDateIsoForTotals,
+        receiptMonthStr,
+        monthCumulativeTotals,
+      )
+      midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
+        supabase,
+        roomId,
+        lineMessageId,
+        now,
+        receiptMidreportEnabled,
+      )
+    }
   }
 
   console.log(`Saved media content (${mediaType}) for room=${roomId}, lineMessageId=${lineMessageId}`)
@@ -2270,6 +2355,9 @@ async function trySaveLineMediaContent(
     return midMonthReportReply
   }
   if (mediaType === 'image' && imageAnalysisReplyEnabled) {
+    if (receiptDuplicateConfirmationText) {
+      return receiptDuplicateConfirmationText
+    }
     if (imageAnalysis?.receipt) {
       const baseReply = buildLineReceiptImageAnalysisReply(
         imageAnalysis.receipt,
@@ -3692,6 +3780,7 @@ async function startReceiptCorrectionSession(
     return 'このルームには修正対象のレシートがまだありません。先にレシート画像を送信してください。'
   }
   await clearPendingMediaSearch(supabase, roomId, userId)
+  await clearPendingReceiptDuplicate(supabase, roomId, userId)
   const draft = normalizeReceiptCorrectionDraft(target.receipt)
   await savePendingReceiptCorrection(supabase, roomId, userId, {
     receiptEntryId: target.id,
@@ -3831,6 +3920,273 @@ async function tryHandlePendingReceiptCorrection(
     normalizedDraft,
     `${fieldLabel}を更新しました。続けて修正する場合は番号、完了する場合は「確定」を送ってください。`,
   )
+}
+
+function isMissingReceiptDuplicatePendingTableError(error: any): boolean {
+  const code = String(error?.code ?? '')
+  if (code === '42P01') return true
+  const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
+  return text.includes('receipt_duplicate_pending_confirmations') &&
+    (text.includes('does not exist') || text.includes('relation'))
+}
+
+async function hasExistingReceiptEntryForStoreAndDate(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  receiptDateIso: string,
+): Promise<boolean> {
+  if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return false
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(receiptDateIso ?? '').trim())) return false
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .select('id')
+    .eq('store_partition_key', storePartitionKey)
+    .eq('receipt_date', receiptDateIso.trim())
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    console.error('hasExistingReceiptEntryForStoreAndDate failed:', error.message)
+    return false
+  }
+  return data != null
+}
+
+function buildReceiptDuplicateConfirmationPrompt(
+  receipt: LineImageReceiptAnalysis,
+  receiptDateIso: string,
+): string {
+  const lines = [
+    '【レシート解析】',
+    receipt.storeName ? `店名: ${receipt.storeName}` : null,
+    receipt.date ? `日付: ${receipt.date}` : null,
+    receipt.grossSales ? `総売上: ${receipt.grossSales}` : null,
+    receipt.partyCount ? `会計組数: ${receipt.partyCount}` : null,
+    receipt.guestCount ? `客数: ${receipt.guestCount}` : null,
+    '',
+    `同じ店舗・同じレシート日（${receiptDateIso}）のデータがすでに登録されています。`,
+    'この内容を追加で登録してよいですか？',
+    '「はい」または「いいえ」で返信してください。',
+  ]
+  return lines.filter((x) => x != null && String(x).length > 0).join('\n')
+}
+
+async function rollbackPendingDuplicateReceiptUpload(
+  supabase: ReturnType<typeof createClient>,
+  lineMessageId: string,
+  lineMessagesId: string,
+): Promise<void> {
+  const { data: media } = await supabase
+    .from('line_message_media')
+    .select('storage_bucket, storage_path')
+    .eq('line_message_id', lineMessageId)
+    .maybeSingle()
+  if (media && (media as any).storage_bucket && (media as any).storage_path) {
+    const bucket = String((media as any).storage_bucket)
+    const path = String((media as any).storage_path)
+    const { error: stErr } = await supabase.storage.from(bucket).remove([path])
+    if (stErr) {
+      console.error('rollback duplicate receipt: storage remove failed:', stErr.message)
+    }
+  }
+  const { error: delErr } = await supabase.from('line_messages').delete().eq('id', lineMessagesId)
+  if (delErr) {
+    console.error('rollback duplicate receipt: line_messages delete failed:', delErr.message)
+  }
+}
+
+async function savePendingReceiptDuplicate(
+  supabase: ReturnType<typeof createClient>,
+  payload: {
+    roomId: string
+    userId: string | null
+    lineMessagesId: string
+    lineMessageId: string
+    receipt: LineImageReceiptAnalysis
+    summary: string
+    storePartitionKey: string
+    receiptDateIso: string
+    senderDisplayName: string | null
+  },
+): Promise<{ ok: boolean; missingTable: boolean }> {
+  const conversationKey = resolveReceiptCorrectionConversationKey(payload.roomId, payload.userId)
+  const { data: existingRow, error: existingErr } = await supabase
+    .from(RECEIPT_DUPLICATE_PENDING_TABLE)
+    .select('line_messages_id, line_message_id')
+    .eq('conversation_key', conversationKey)
+    .maybeSingle()
+  if (existingErr) {
+    if (isMissingReceiptDuplicatePendingTableError(existingErr)) {
+      return { ok: false, missingTable: true }
+    }
+    console.error('savePendingReceiptDuplicate: load existing failed:', existingErr.message)
+    return { ok: false, missingTable: false }
+  }
+  if (existingRow) {
+    const oldMid = String((existingRow as any).line_messages_id ?? '')
+    const oldLmid = String((existingRow as any).line_message_id ?? '')
+    if (oldMid && oldLmid && oldMid !== payload.lineMessagesId) {
+      await rollbackPendingDuplicateReceiptUpload(supabase, oldLmid, oldMid)
+    }
+  }
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + RECEIPT_DUPLICATE_PENDING_TTL_MIN * 60 * 1000).toISOString()
+  const { error } = await supabase
+    .from(RECEIPT_DUPLICATE_PENDING_TABLE)
+    .upsert(
+      {
+        conversation_key: conversationKey,
+        room_id: payload.roomId,
+        user_id: payload.userId,
+        line_messages_id: payload.lineMessagesId,
+        line_message_id: payload.lineMessageId,
+        receipt_payload: payload.receipt,
+        summary_text: normalizeInlineText(payload.summary).slice(0, 240) || null,
+        store_partition_key: payload.storePartitionKey,
+        receipt_date: payload.receiptDateIso,
+        sender_display_name: payload.senderDisplayName ? String(payload.senderDisplayName).trim() : null,
+        expires_at: expiresAt,
+        updated_at: nowIso,
+      },
+      { onConflict: 'conversation_key' },
+    )
+  if (error) {
+    if (isMissingReceiptDuplicatePendingTableError(error)) {
+      return { ok: false, missingTable: true }
+    }
+    console.error('savePendingReceiptDuplicate: upsert failed:', error.message)
+    return { ok: false, missingTable: false }
+  }
+  return { ok: true, missingTable: false }
+}
+
+async function loadPendingReceiptDuplicate(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingReceiptDuplicate | null> {
+  const conversationKey = resolveReceiptCorrectionConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(RECEIPT_DUPLICATE_PENDING_TABLE)
+    .select(
+      'id, conversation_key, room_id, user_id, line_messages_id, line_message_id, receipt_payload, summary_text, store_partition_key, receipt_date, sender_display_name, expires_at',
+    )
+    .eq('conversation_key', conversationKey)
+    .maybeSingle()
+  if (error) {
+    if (!isMissingReceiptDuplicatePendingTableError(error)) {
+      console.error('loadPendingReceiptDuplicate failed:', error.message)
+    }
+    return null
+  }
+  if (!data) return null
+  const expiresAt = String((data as any).expires_at ?? '')
+  if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+    await clearPendingReceiptDuplicate(supabase, roomId, userId)
+    return null
+  }
+  const rd = String((data as any).receipt_date ?? '').slice(0, 10)
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    room_id: String((data as any).room_id ?? roomId),
+    user_id: (data as any).user_id == null ? null : String((data as any).user_id),
+    line_messages_id: String((data as any).line_messages_id ?? ''),
+    line_message_id: String((data as any).line_message_id ?? ''),
+    receipt_payload: (data as any).receipt_payload as LineImageReceiptAnalysis,
+    summary_text: (data as any).summary_text == null ? null : String((data as any).summary_text),
+    store_partition_key: String((data as any).store_partition_key ?? ''),
+    receipt_date: rd,
+    sender_display_name: (data as any).sender_display_name == null
+      ? null
+      : String((data as any).sender_display_name),
+    expires_at: expiresAt,
+  }
+}
+
+async function clearPendingReceiptDuplicate(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<void> {
+  const conversationKey = resolveReceiptCorrectionConversationKey(roomId, userId)
+  const { error } = await supabase
+    .from(RECEIPT_DUPLICATE_PENDING_TABLE)
+    .delete()
+    .eq('conversation_key', conversationKey)
+  if (error && !isMissingReceiptDuplicatePendingTableError(error)) {
+    console.error('clearPendingReceiptDuplicate failed:', error.message)
+  }
+}
+
+async function tryHandlePendingReceiptDuplicateConfirmation(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  receiptMidreportEnabled: boolean,
+): Promise<LineReplyPayload | null> {
+  const pending = await loadPendingReceiptDuplicate(supabase, roomId, userId)
+  if (!pending) return null
+  const decision = normalizeConfirmationDecision(text)
+  if (decision == null) {
+    return '「はい」または「いいえ」で返信してください。'
+  }
+  if (decision === 'no') {
+    await rollbackPendingDuplicateReceiptUpload(supabase, pending.line_message_id, pending.line_messages_id)
+    await clearPendingReceiptDuplicate(supabase, roomId, userId)
+    return '登録を中止しました。送信した画像の保存も取り消しました。'
+  }
+  const now = new Date()
+  await saveLineReceiptEntry(supabase, {
+    messageId: pending.line_messages_id,
+    lineMessageId: pending.line_message_id,
+    roomId: pending.room_id,
+    userId: pending.user_id,
+    senderDisplayName: pending.sender_display_name,
+    receipt: pending.receipt_payload,
+    summary: pending.summary_text ?? '',
+  })
+  const { data: insertedRow } = await supabase
+    .from('line_receipt_entries')
+    .select('id')
+    .eq('line_message_id', pending.line_message_id)
+    .maybeSingle()
+  if (!insertedRow) {
+    return 'レシートの登録に失敗しました。しばらくしてから「はい」を再度送ってください。'
+  }
+  await clearPendingReceiptDuplicate(supabase, roomId, userId)
+  const receiptMonthStr = pending.receipt_date.slice(0, 7)
+  const monthCumulativeTotals = await loadMonthCumulativeTotalsForStoreMonth(
+    supabase,
+    pending.store_partition_key,
+    receiptMonthStr,
+  )
+  const receiptBudgetFlexRows = await buildReceiptBudgetComparisonRows(
+    supabase,
+    pending.store_partition_key,
+    pending.receipt_date,
+    receiptMonthStr,
+    monthCumulativeTotals,
+  )
+  const midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
+    supabase,
+    pending.room_id,
+    pending.line_message_id,
+    now,
+    receiptMidreportEnabled,
+  )
+  const baseReply = buildLineReceiptImageAnalysisReply(
+    pending.receipt_payload,
+    monthCumulativeTotals,
+    {
+      correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(pending.line_message_id),
+      budgetRows: receiptBudgetFlexRows ?? undefined,
+    },
+  )
+  if (midMonthReportReply) {
+    return [...baseReply, ...midMonthReportReply]
+  }
+  return baseReply
 }
 
 function resolveHaccpBulkConversationKey(roomId: string, userId: string | null): string {
