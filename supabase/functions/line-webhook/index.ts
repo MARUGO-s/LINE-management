@@ -1968,8 +1968,13 @@ Deno.serve(async (req) => {
             )
             // 無返信自動登録ONでは roomCanReply が false になるが、ファイル（HACCP Excel 等）の
             // 解析結果・確認プロンプトは返信必須のため roomCanReply に依存しない。
-            if (mediaSaveReply && !aiAutoCreateReply) {
-              aiAutoCreateReply = mediaSaveReply
+            // 画像は常にメディア側の解析返信を優先（テキスト系の aiAutoCreateReply が誤って残るケースを防ぐ）
+            if (mediaSaveReply) {
+              if (event.message?.type === 'image') {
+                aiAutoCreateReply = mediaSaveReply
+              } else if (!aiAutoCreateReply) {
+                aiAutoCreateReply = mediaSaveReply
+              }
             }
           }
         }
@@ -1982,7 +1987,12 @@ Deno.serve(async (req) => {
       }
 
       if (aiAutoCreateReply) {
-        if (roomReplyPolicy.botReplyHardMuteEnabled) {
+        // ハードミュートでも「画像→解析・レシート確認」はユーザーが明示した操作のため返信する（保存済みメディア前提）
+        const forceImageAnalysisReply =
+          event.message?.type === 'image' &&
+          roomReplyPolicy.imageAnalysisReplyEnabled &&
+          shouldStoreMediaFile
+        if (roomReplyPolicy.botReplyHardMuteEnabled && !forceImageAnalysisReply) {
           continue
         }
         if (!lineAccessToken) {
@@ -3951,36 +3961,33 @@ async function hasExistingReceiptEntryForStoreAndDate(
   return data != null
 }
 
-/** 同日重複時: Flex で解析内容と 3 択（ボタンは message アクションで既存の normalize と連携） */
+/** 同日重複時: Flex（buildLineReceiptImageAnalysisReply と同型の bubble で API 互換性を揃える） */
 function buildReceiptDuplicateConfirmationFlexReply(
   receipt: LineImageReceiptAnalysis,
   receiptDateIso: string,
 ): LineReplyMessage[] {
   const labelFlex = 3
+  const cap = (raw: string | null | undefined, max: number) => {
+    const s = String(raw ?? '').trim()
+    if (!s) return '-'
+    return s.length > max ? `${s.slice(0, max)}…` : s
+  }
   const parsedDateIso = parseReceiptDateToIso(receipt.date)
-  const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? receipt.date ?? '-'
+  const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? cap(receipt.date, 80)
   const rows: Array<{ label: string; value: string }> = [
-    { label: '店名', value: receipt.storeName || '-' },
+    { label: '店名', value: cap(receipt.storeName, 120) },
     { label: '日付', value: displayDate },
-    { label: '総売上', value: receipt.grossSales || '-' },
-    { label: '会計組数', value: receipt.partyCount || '-' },
-    { label: '客数', value: receipt.guestCount || '-' },
+    { label: '総売上', value: cap(receipt.grossSales, 40) },
+    { label: '会計組数', value: cap(receipt.partyCount, 20) },
+    { label: '客数', value: cap(receipt.guestCount, 20) },
   ]
   const detailRows = rows.map((row) => ({
-    type: 'box' as const,
-    layout: 'baseline' as const,
-    spacing: 'sm' as const,
+    type: 'box',
+    layout: 'baseline',
+    spacing: 'sm',
     contents: [
-      { type: 'text' as const, text: row.label, size: 'sm' as const, color: '#7A7A7A', wrap: false, flex: labelFlex },
-      {
-        type: 'text' as const,
-        text: row.value,
-        size: 'sm' as const,
-        wrap: true,
-        color: '#1F1F1F',
-        flex: 5,
-        weight: 'bold' as const,
-      },
+      { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
+      { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: 5, weight: 'bold' },
     ],
   }))
 
@@ -3994,115 +4001,66 @@ function buildReceiptDuplicateConfirmationFlexReply(
     .join(' / ')
     .slice(0, 400)
 
+  const bodyContents: Array<Record<string, unknown>> = [
+    {
+      type: 'text',
+      text: '同日のレシートが既に登録されています。',
+      size: 'sm',
+      weight: 'bold',
+      color: '#1F1F1F',
+      wrap: true,
+    },
+    {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      margin: 'md',
+      contents: detailRows,
+    },
+    {
+      type: 'text',
+      text: '以下を選択してクリックしてください',
+      size: 'xs',
+      color: '#555555',
+      wrap: true,
+      margin: 'md',
+    },
+  ]
+
   return [
     {
       type: 'flex',
       altText: altText || 'レシート解析（同日重複の確認）',
       contents: {
         type: 'bubble',
-        header: {
-          type: 'box',
-          layout: 'vertical',
-          paddingAll: '14dp',
-          backgroundColor: '#006c3a',
-          contents: [
-            { type: 'text', text: '🧾 レシート解析', size: 'lg', weight: 'bold', color: '#FFFFFF' },
-            {
-              type: 'text',
-              text: '同日のデータがすでに登録されています',
-              size: 'xs',
-              color: '#CCFFDD',
-              margin: 'sm',
-              wrap: true,
-            },
-          ],
-        },
         body: {
           type: 'box',
           layout: 'vertical',
-          spacing: 'md',
-          paddingAll: '14dp',
-          contents: [
-            { type: 'box', layout: 'vertical', spacing: 'xs', contents: detailRows },
-            { type: 'separator', margin: 'md' },
-            {
-              type: 'text',
-              text: `同じ店舗・同じレシート日（${receiptDateIso}）のデータがすでに登録されています。`,
-              size: 'sm',
-              color: '#B45309',
-              weight: 'bold',
-              wrap: true,
-            },
-            {
-              type: 'text',
-              text: '次のボタンから選ぶか、テキストで「加算」「中止」「置き換え」、または番号 1／2／3 を送ってください。',
-              size: 'xs',
-              color: '#555555',
-              wrap: true,
-              margin: 'sm',
-            },
-            {
-              type: 'box',
-              layout: 'vertical',
-              spacing: 'xs',
-              margin: 'md',
-              contents: [
-                {
-                  type: 'text',
-                  text: '1・加算 … 既存のまま残し、今回も追加（同日に複数レシート）。',
-                  size: 'xs',
-                  color: '#333333',
-                  wrap: true,
-                },
-                {
-                  type: 'text',
-                  text: '2・中止 … 今回は登録しない（送信画像の保存も取り消し）。',
-                  size: 'xs',
-                  color: '#333333',
-                  wrap: true,
-                },
-                {
-                  type: 'text',
-                  text: '3・置き換え … 同日の既存をすべて削除し、今回の結果だけにする。',
-                  size: 'xs',
-                  color: '#333333',
-                  wrap: true,
-                },
-              ],
-            },
-            {
-              type: 'text',
-              text: '※「はい」は加算、「いいえ」は中止と同じ扱いです。',
-              size: 'xs',
-              color: '#888888',
-              wrap: true,
-            },
-          ],
+          spacing: 'sm',
+          contents: bodyContents,
         },
         footer: {
           type: 'box',
           layout: 'vertical',
           spacing: 'sm',
-          paddingAll: '12dp',
           contents: [
             {
               type: 'button',
-              style: 'primary',
-              color: '#006c3a',
+              style: 'secondary',
               height: 'sm',
-              action: { type: 'message', label: '1 ・ 加算', text: '加算' },
+              action: { type: 'message', label: '1 加算', text: '加算' },
             },
             {
               type: 'button',
               style: 'secondary',
               height: 'sm',
-              action: { type: 'message', label: '2 ・ 中止', text: '中止' },
+              action: { type: 'message', label: '2 中止', text: '中止' },
             },
             {
               type: 'button',
               style: 'secondary',
               height: 'sm',
-              action: { type: 'message', label: '3 ・ 置き換え', text: '置き換え' },
+              action: { type: 'message', label: '3 置き換え', text: '置き換え' },
             },
           ],
         },
@@ -5863,12 +5821,43 @@ function formatAverageCount(value: number | null): string {
   return value.toFixed(2).replace(/\.?0+$/, '')
 }
 
+/** LINE Messaging API: uri 長すぎで Flex 全体が 400 invalid になるため上限に収める */
+const LINE_MESSAGING_URI_MAX_LEN = 1000
+const LINE_MESSAGE_ACTION_TEXT_MAX_LEN = 300
+
+function buildReceiptAnalyticsDashboardUri(): string {
+  const base = 'https://marugo-s.github.io/LINE-management/analytics.html'
+  const token = String(Deno.env.get('ADMIN_DASHBOARD_TOKEN') ?? '').trim()
+  if (!token) return base
+  for (let n = token.length; n >= 0; n--) {
+    const suffix = n === 0 ? '' : `?t=${encodeURIComponent(token.slice(0, n))}`
+    const candidate = `${base}${suffix}`
+    if (candidate.length <= LINE_MESSAGING_URI_MAX_LEN) return candidate
+  }
+  return base
+}
+
+function clampLineMessageActionText(text: string): string {
+  const t = String(text ?? '').trim()
+  if (t.length <= LINE_MESSAGE_ACTION_TEXT_MAX_LEN) return t
+  return t.slice(0, LINE_MESSAGE_ACTION_TEXT_MAX_LEN)
+}
+
+/** Flex 用: 制御文字除去 + 長さ上限（OCR 由来の異常文字で 400 になるのを防ぐ） */
+function lineSafeFlexText(value: string | null | undefined, maxLen: number): string {
+  const s = String(value ?? '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replace(/\r\n/g, '\n')
+    .trim()
+  if (!s) return '-'
+  return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s
+}
+
 function buildMidMonthReceiptReportMessage(
   aggregate: LineReceiptAggregate,
   opts: { periodStartDate: string; periodEndDate: string },
 ): Array<Record<string, unknown>> {
-  const adminToken = Deno.env.get('ADMIN_DASHBOARD_TOKEN') ?? ''
-  const dashboardUri = `https://marugo-s.github.io/LINE-management/analytics.html${adminToken ? `?t=${encodeURIComponent(adminToken)}` : ''}`
+  const dashboardUri = buildReceiptAnalyticsDashboardUri()
 
   const row = (label: string, value: string): Record<string, unknown> => ({
     type: 'box', layout: 'baseline', spacing: 'sm',
@@ -5911,7 +5900,7 @@ function buildMidMonthReceiptReportMessage(
         type: 'box', layout: 'vertical', spacing: 'sm', paddingAll: '12dp',
         contents: [{
           type: 'button', style: 'secondary', height: 'sm',
-          action: { type: 'uri', label: '📈 売上推移を見る', uri: dashboardUri },
+          action: { type: 'uri', label: '売上推移を見る', uri: dashboardUri },
         }],
       },
     },
@@ -6825,13 +6814,13 @@ function buildLineReceiptImageAnalysisReply(
   const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? receipt.date
   const cum = monthCumulativeTotals ?? { grossSalesYen: null, partyCount: null, guestCount: null }
   const baseRows: Array<{ label: string; value: string; margin?: 'md' }> = [
-    { label: '店名', value: receipt.storeName || '-' },
-    { label: '日付', value: displayDate || '-' },
-    { label: '消費税', value: receipt.taxAmount || '-' },
-    { label: '総売上（税込）', value: receipt.grossSales || '-' },
-    { label: '会計組数', value: receipt.partyCount || '-' },
-    { label: '客数', value: receipt.guestCount || '-' },
-    { label: '客単価', value: receipt.unitPrice || '-' },
+    { label: '店名', value: lineSafeFlexText(receipt.storeName, 120) },
+    { label: '日付', value: lineSafeFlexText(displayDate || '-', 80) },
+    { label: '消費税', value: lineSafeFlexText(receipt.taxAmount, 40) },
+    { label: '総売上（税込）', value: lineSafeFlexText(receipt.grossSales, 40) },
+    { label: '会計組数', value: lineSafeFlexText(receipt.partyCount, 20) },
+    { label: '客数', value: lineSafeFlexText(receipt.guestCount, 20) },
+    { label: '客単価', value: lineSafeFlexText(receipt.unitPrice, 40) },
   ]
   const budgetRows = Array.isArray(options?.budgetRows) ? options!.budgetRows! : []
   const monthRows: Array<{ label: string; value: string; margin?: 'md' }> = [
@@ -6857,8 +6846,8 @@ function buildLineReceiptImageAnalysisReply(
       layout: 'baseline',
       spacing: 'sm',
       contents: [
-        { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
-        { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
+        { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
+        { type: 'text', text: lineSafeFlexText(row.value, 240), size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
       ],
     }
     if (row.margin) payload.margin = row.margin
@@ -6908,7 +6897,7 @@ function buildLineReceiptImageAnalysisReply(
               action: {
                 type: 'message',
                 label: 'この結果を修正',
-                text: options?.correctionCommandText || 'レシート修正',
+                text: clampLineMessageActionText(options?.correctionCommandText || 'レシート修正'),
               },
             },
             {
@@ -6917,8 +6906,8 @@ function buildLineReceiptImageAnalysisReply(
               height: 'sm',
               action: {
                 type: 'uri',
-                label: '📊 売上推移を見る',
-                uri: `https://marugo-s.github.io/LINE-management/analytics.html?t=${encodeURIComponent(Deno.env.get('ADMIN_DASHBOARD_TOKEN') ?? '')}`,
+                label: '売上推移を見る',
+                uri: buildReceiptAnalyticsDashboardUri(),
               },
             },
           ],
