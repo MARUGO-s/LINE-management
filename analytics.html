@@ -232,6 +232,101 @@
     body[data-theme='light'] .cross-table tfoot td { background: rgba(45,106,151,0.08); }
     body[data-theme='light'] .cross-table tbody th { background: rgba(45,106,151,0.04); }
 
+    /* 日次売上（数値表）— 管理画面 index から移設。2/3/4 ブロックはビューポート連動 */
+    .receipt-daily { padding: 14px 16px; }
+    .receipt-daily .card-title { margin-bottom: 8px; }
+    .receipt-daily-table-wrap {
+      margin-top: 8px;
+      max-height: min(48vh, 340px);
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(8,21,35,0.35);
+    }
+    body[data-theme='light'] .receipt-daily-table-wrap {
+      background: rgba(230,243,253,0.55);
+    }
+    .receipt-daily #receiptDailyTable {
+      width: 100%;
+      min-width: 0;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+    .receipt-daily #receiptDailyTable th,
+    .receipt-daily #receiptDailyTable td {
+      padding: 2px 5px;
+      font-size: 0.7rem;
+      line-height: 1.2;
+      border-bottom: 1px solid var(--line);
+    }
+    .receipt-daily #receiptDailyTable th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      font-size: 0.62rem;
+      padding: 3px 5px;
+      letter-spacing: 0.02em;
+      color: var(--sub);
+      text-transform: uppercase;
+      background: color-mix(in srgb, var(--card) 92%, transparent);
+      box-shadow: 0 1px 0 var(--line);
+    }
+    body[data-theme='light'] .receipt-daily #receiptDailyTable th {
+      background: color-mix(in srgb, var(--card) 95%, #fff);
+    }
+    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable { min-width: 26rem; }
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable { min-width: 38rem; }
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable { min-width: 50rem; }
+    .receipt-daily #receiptDailyTable th:nth-child(4n+1),
+    .receipt-daily #receiptDailyTable td:nth-child(4n+1) {
+      width: 10%;
+      white-space: nowrap;
+    }
+    .receipt-daily #receiptDailyTable th:nth-child(4n+2),
+    .receipt-daily #receiptDailyTable td:nth-child(4n+2) { width: 15%; }
+    .receipt-daily #receiptDailyTable th:nth-child(4n+3),
+    .receipt-daily #receiptDailyTable td:nth-child(4n+3),
+    .receipt-daily #receiptDailyTable th:nth-child(4n+4),
+    .receipt-daily #receiptDailyTable td:nth-child(4n+4) { width: 10%; }
+    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable th:nth-child(4),
+    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable td:nth-child(4) {
+      border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+    }
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable th:nth-child(4),
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable td:nth-child(4),
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable th:nth-child(8),
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable td:nth-child(8) {
+      border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+    }
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable th:nth-child(4),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(4),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable th:nth-child(8),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(8),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable th:nth-child(12),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(12) {
+      border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+    }
+    .receipt-daily #receiptDailyTable th:nth-child(n+2):not(:nth-child(4n+1)),
+    .receipt-daily #receiptDailyTable td:nth-child(n+2):not(:nth-child(4n+1)) {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .receipt-daily #receiptDailyTable td.empty {
+      text-align: center;
+      color: var(--sub);
+      padding: 12px;
+    }
+    .receipt-daily--blocks-2 .receipt-daily-block0-empty td:nth-child(-n+4) { opacity: 0.48; }
+    .receipt-daily--blocks-2 .receipt-daily-block1-empty td:nth-child(n+5) { opacity: 0.48; }
+    .receipt-daily--blocks-3 .receipt-daily-block0-empty td:nth-child(-n+4) { opacity: 0.48; }
+    .receipt-daily--blocks-3 .receipt-daily-block1-empty td:nth-child(n+5):nth-child(-n+8) { opacity: 0.48; }
+    .receipt-daily--blocks-3 .receipt-daily-block2-empty td:nth-child(n+9) { opacity: 0.48; }
+    .receipt-daily--blocks-4 .receipt-daily-block0-empty td:nth-child(-n+4) { opacity: 0.48; }
+    .receipt-daily--blocks-4 .receipt-daily-block1-empty td:nth-child(n+5):nth-child(-n+8) { opacity: 0.48; }
+    .receipt-daily--blocks-4 .receipt-daily-block2-empty td:nth-child(n+9):nth-child(-n+12) { opacity: 0.48; }
+    .receipt-daily--blocks-4 .receipt-daily-block3-empty td:nth-child(n+13) { opacity: 0.48; }
+
     /* canvas overflow 防止 / grid item min-width reset */
     html { overflow-x: hidden; }
     .chart-wrap canvas { max-width: 100% !important; display: block; }
@@ -361,6 +456,24 @@
       <div class="kpi-card"><div class="kpi-label">月間客数</div><div class="kpi-value" id="kpiGuest">-</div><div class="kpi-sub" id="kpiGuestAvg"></div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeGuestMom"></span><span class="kpi-badge flat" id="kpiBadgeGuestYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">客単価（平均）</div><div class="kpi-value" id="kpiUnit">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeUnitMom"></span><span class="kpi-badge flat" id="kpiBadgeUnitYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">営業日数</div><div class="kpi-value" id="kpiDays">-</div><div class="kpi-sub" id="kpiReceipts"></div></div>
+    </div>
+  </section>
+
+  <!-- 日次売上（数値表）— 絞り込みと連動 -->
+  <section class="card receipt-daily receipt-daily--blocks-2" aria-labelledby="receiptDailyHeading">
+    <h2 class="card-title" id="receiptDailyHeading">日次売上（数値）</h2>
+    <p class="meta" style="margin-top:0">絞り込みの店舗・対象期間に連動します（複数月のときは<span style="white-space:nowrap">最終月</span>の日別）。</p>
+    <div id="receiptDailyMeta" class="meta"></div>
+    <div class="receipt-daily-table-wrap">
+      <table id="receiptDailyTable" aria-describedby="receiptDailyHeading">
+        <thead>
+          <tr>
+            <th>日付</th><th>総売上</th><th>組数</th><th>客数</th>
+            <th>日付</th><th>総売上</th><th>組数</th><th>客数</th>
+          </tr>
+        </thead>
+        <tbody id="receiptDailyTableBody"></tbody>
+      </table>
     </div>
   </section>
 
@@ -641,12 +754,201 @@ const dom = {
   weatherStatus: $('weatherStatus'),
   weatherAddress: $('weatherAddress'),
   loadingDaily: $('loadingDaily'), loadingMonthly: $('loadingMonthly'),
+  receiptDailyMeta: $('receiptDailyMeta'),
+  receiptDailyTable: $('receiptDailyTable'),
+  receiptDailyTableBody: $('receiptDailyTableBody'),
 };
+
+/** 日次売上数値表：ビューポート変更時の再描画用 */
+let lastReceiptDailyData = null;
 
 /* ── helpers ── */
 function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
 function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
 function removeToken() { localStorage.removeItem(TOKEN_KEY); }
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatReceiptDailyUpdatedAt(iso) {
+  if (!iso) return '-';
+  try {
+    return new Date(iso).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
+  } catch {
+    return String(iso);
+  }
+}
+
+function formatYenReceiptInt(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return '-';
+  return '¥' + Math.round(x).toLocaleString('ja-JP');
+}
+
+function formatReceiptDailyDateNoYear(raw) {
+  const s = String(raw || '').trim();
+  if (!s || s === '-') return '-';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (m) return `${Number(m[2])}/${Number(m[3])}`;
+  return s;
+}
+
+function receiptDailyCellsForDay(r) {
+  if (!r) return '<td></td><td></td><td></td><td></td>';
+  return (
+    `<td>${escapeHtml(formatReceiptDailyDateNoYear(r.date))}</td>` +
+    `<td style="text-align:right">${formatYenReceiptInt(r.gross_sales_yen)}</td>` +
+    `<td style="text-align:right">${Number(r.party_count || 0)}</td>` +
+    `<td style="text-align:right">${Number(r.guest_count || 0)}</td>`
+  );
+}
+
+function receiptDailyBlockCount() {
+  if (typeof window.matchMedia !== 'function') return 2;
+  if (window.matchMedia('(min-width: 1024px)').matches) return 4;
+  if (window.matchMedia('(min-width: 768px)').matches) return 3;
+  return 2;
+}
+
+function receiptDailyColspan() {
+  return receiptDailyBlockCount() * 4;
+}
+
+function receiptDailySyncLayoutChrome(optBlocks) {
+  const n = optBlocks != null ? optBlocks : receiptDailyBlockCount();
+  const card = dom.receiptDailyTable?.closest('.receipt-daily');
+  if (card) {
+    card.classList.toggle('receipt-daily--blocks-4', n === 4);
+    card.classList.toggle('receipt-daily--blocks-3', n === 3);
+    card.classList.toggle('receipt-daily--blocks-2', n === 2);
+  }
+  const hr = dom.receiptDailyTable?.querySelector('thead tr');
+  if (!hr) return;
+  const one = '<th>日付</th><th>総売上</th><th>組数</th><th>客数</th>';
+  hr.innerHTML = one.repeat(n);
+}
+
+function splitReceiptDailySeries(series, numBlocks) {
+  const n = series.length;
+  const chunks = [];
+  let start = 0;
+  for (let c = 0; c < numBlocks; c++) {
+    const remaining = n - start;
+    const slots = numBlocks - c;
+    const size = Math.ceil(remaining / slots);
+    chunks.push(series.slice(start, start + size));
+    start += size;
+  }
+  return chunks;
+}
+
+function receiptDailyOnViewportChange() {
+  if (lastReceiptDailyData) {
+    renderReceiptDailyTable(lastReceiptDailyData);
+    return;
+  }
+  receiptDailySyncLayoutChrome();
+  const td = dom.receiptDailyTableBody?.querySelector('tr:first-child td.empty');
+  if (td) td.colSpan = receiptDailyColspan();
+}
+
+function renderReceiptDailyTable(data) {
+  if (!dom.receiptDailyTableBody || !dom.receiptDailyMeta) return;
+  const numBlocks = receiptDailyBlockCount();
+  receiptDailySyncLayoutChrome(numBlocks);
+  const colspan = numBlocks * 4;
+  const month = data?.month ? String(data.month) : '-';
+  let storeHead = data?.selected_store_name ? String(data.selected_store_name) : '';
+  if (!storeHead && data?.selected_store_key) storeHead = String(data.selected_store_key);
+  if (!storeHead) storeHead = '-';
+  dom.receiptDailyMeta.textContent =
+    `対象: ${storeHead} / ${month} — 更新: ${formatReceiptDailyUpdatedAt(data?.generated_at)}`;
+  const series = Array.isArray(data?.series) ? data.series : [];
+  const tb = dom.receiptDailyTableBody;
+  tb.innerHTML = '';
+  if (series.length === 0) {
+    const trE = document.createElement('tr');
+    trE.innerHTML = `<td class="empty" colspan="${colspan}">データがありません。</td>`;
+    tb.appendChild(trE);
+    return;
+  }
+  const chunks = splitReceiptDailySeries(series, numBlocks);
+  let nRows = 0;
+  for (let ci = 0; ci < chunks.length; ci++) {
+    if (chunks[ci].length > nRows) nRows = chunks[ci].length;
+  }
+  for (let ri = 0; ri < nRows; ri++) {
+    const tr = document.createElement('tr');
+    for (let bi = 0; bi < numBlocks; bi++) {
+      const row = chunks[bi][ri];
+      if (row && Number(row.receipt_count || 0) === 0) {
+        tr.classList.add(`receipt-daily-block${bi}-empty`);
+      }
+    }
+    let rowHtml = '';
+    for (let bi = 0; bi < numBlocks; bi++) {
+      rowHtml += receiptDailyCellsForDay(chunks[bi][ri]);
+    }
+    tr.innerHTML = rowHtml;
+    tb.appendChild(tr);
+  }
+  const t = data?.totals ?? {};
+  const trSum = document.createElement('tr');
+  trSum.style.fontWeight = 'bold';
+  trSum.style.borderTop = '2px solid rgba(128, 160, 188, 0.45)';
+  trSum.innerHTML =
+    '<td>月間合計</td>' +
+    `<td style="text-align:right">${formatYenReceiptInt(t.total_gross_sales_yen)}</td>` +
+    `<td style="text-align:right">${Number(t.total_party_count || 0)}</td>` +
+    `<td style="text-align:right">${Number(t.total_guest_count || 0)}</td>` +
+    `<td colspan="${4 * (numBlocks - 1)}"></td>`;
+  tb.appendChild(trSum);
+}
+
+function buildReceiptDailyTablePayload(salesData, displayMonth, isSingleMonth) {
+  const storeName = salesData?.selected_store_name ?? '';
+  const storeKey = salesData?.selected_store_key ?? '';
+  if (isSingleMonth) {
+    return {
+      month: salesData?.month ?? displayMonth,
+      series: salesData?.series ?? [],
+      totals: salesData?.totals ?? {},
+      generated_at: salesData?.generated_at,
+      selected_store_name: storeName,
+      selected_store_key: storeKey,
+    };
+  }
+  const prefix = `${displayMonth}-`;
+  const series = (state.dailySeries ?? []).filter((d) => String(d.date).startsWith(prefix));
+  const totals = {
+    total_gross_sales_yen: series.reduce((a, r) => a + (Number(r.gross_sales_yen) || 0), 0),
+    total_party_count: series.reduce((a, r) => a + (Number(r.party_count) || 0), 0),
+    total_guest_count: series.reduce((a, r) => a + (Number(r.guest_count) || 0), 0),
+  };
+  return {
+    month: displayMonth,
+    series,
+    totals,
+    generated_at: salesData?.generated_at,
+    selected_store_name: storeName,
+    selected_store_key: storeKey,
+  };
+}
+
+function resetReceiptDailyDisconnected() {
+  lastReceiptDailyData = null;
+  if (dom.receiptDailyMeta) dom.receiptDailyMeta.textContent = 'トークンを保存すると表示できます。';
+  receiptDailySyncLayoutChrome();
+  if (dom.receiptDailyTableBody) {
+    dom.receiptDailyTableBody.innerHTML =
+      `<tr><td class="empty" colspan="${receiptDailyColspan()}">未接続</td></tr>`;
+  }
+}
 
 function yen(v) {
   if (v == null) return '-';
@@ -795,6 +1097,7 @@ dom.clearToken.addEventListener('click', () => {
   removeToken();
   dom.tokenInput.value = '';
   updateAuthBadge();
+  resetReceiptDailyDisconnected();
 });
 
 /* ── theme ── */
@@ -984,61 +1287,95 @@ async function fetchWeather(storeKey, fromDate, toDate) {
 /* ── main load ── */
 async function loadAll() {
   const token = getToken();
-  if (!token) { dom.filterMeta.textContent = 'トークンを保存してください。'; return; }
+  if (!token) {
+    dom.filterMeta.textContent = 'トークンを保存してください。';
+    resetReceiptDailyDisconnected();
+    return;
+  }
 
   const months = periodToMonths(state.period);
   const { from, to } = dateRange(months);
   const isSingleMonth = months.length === 1;
   const displayMonth = months[months.length - 1];
+  const sortedMonths = [...months].sort();
 
   dom.filterMeta.textContent = '読み込み中…';
   dom.loadingDaily.classList.add('show');
   dom.loadingMonthly.classList.add('show');
 
   try {
-    // Fetch daily data for the selected period (use first month for store list if needed)
-    const monthParam = isSingleMonth ? months[0] : displayMonth;
-    const salesData = await apiFetch(`/receipts/sales?month=${monthParam}&store_key=${state.storeKey}`);
+    const fetchSalesMonth = (m, storeKey) =>
+      apiFetch(`/receipts/sales?month=${encodeURIComponent(m)}&store_key=${encodeURIComponent(storeKey ?? '')}`);
+    const fetchMonthly = (storeKey) =>
+      apiFetch(`/analytics/monthly?months=14&store_key=${encodeURIComponent(storeKey ?? '')}`).catch(() => null);
 
-    // Update store options (from first load)
-    if (salesData.store_options?.length) {
-      updateStoreSelect(salesData.store_options, salesData.selected_store_key);
-    }
-    if (!state.storeKey && salesData.selected_store_key) {
-      state.storeKey = salesData.selected_store_key;
-    }
+    let salesData;
+    let dailySeries;
+    /** 売上・月次と並行で開始し、UI は先に描画してから await する（体感の待ち時間を短くする） */
+    let weatherPromise;
 
-    // For multi-month, fetch all months in parallel and merge
-    let dailySeries = salesData.series ?? [];
-    if (!isSingleMonth) {
-      const otherMonths = months.slice(0, -1);
-      const extra = await Promise.all(
-        otherMonths.map(m => apiFetch(`/receipts/sales?month=${m}&store_key=${state.storeKey}`).catch(() => null))
+    if (state.storeKey) {
+      const sk = state.storeKey;
+      weatherPromise = fetchWeather(sk, from, to);
+      dom.weatherStatus.textContent = '天候取得中…';
+      const [salesResults, monthlyData] = await Promise.all([
+        Promise.all(sortedMonths.map((m) => fetchSalesMonth(m, sk).catch(() => null))),
+        fetchMonthly(sk),
+      ]);
+      const byMonth = new Map(
+        (salesResults.filter(Boolean)).map((r) => [r.month, r]),
       );
-      for (const d of extra) {
-        if (d?.series) dailySeries = [...d.series, ...dailySeries];
+      salesData = byMonth.get(displayMonth) ?? salesResults.filter(Boolean).slice(-1)[0];
+      if (!salesData) throw new Error('売上データを取得できませんでした。');
+      dailySeries = sortedMonths.flatMap((m) => byMonth.get(m)?.series ?? []);
+
+      state.monthlySeries = monthlyData?.series ?? [];
+    } else {
+      const primary = await fetchSalesMonth(displayMonth, '');
+      salesData = primary;
+      if (salesData.store_options?.length) {
+        updateStoreSelect(salesData.store_options, salesData.selected_store_key);
       }
+      if (!state.storeKey && salesData.selected_store_key) {
+        state.storeKey = salesData.selected_store_key;
+      }
+      const sk = state.storeKey || '';
+      const otherMonths = sortedMonths.filter((m) => m !== displayMonth);
+
+      weatherPromise = fetchWeather(sk, from, to);
+      dom.weatherStatus.textContent = '天候取得中…';
+      const parallel = [fetchMonthly(sk)];
+      if (otherMonths.length > 0) {
+        parallel.push(
+          Promise.all(otherMonths.map((m) => fetchSalesMonth(m, sk).catch(() => null))),
+        );
+      }
+      const wave = await Promise.all(parallel);
+      const monthlyData = wave[0];
+      const extraResults = otherMonths.length > 0 ? wave[1] : [];
+
+      state.monthlySeries = monthlyData?.series ?? [];
+
+      const extraByMonth = new Map(
+        (Array.isArray(extraResults) ? extraResults : []).filter(Boolean).map((r) => [r.month, r]),
+      );
+      dailySeries = sortedMonths.flatMap((m) => {
+        if (m === displayMonth) return salesData.series ?? [];
+        return extraByMonth.get(m)?.series ?? [];
+      });
     }
+
     state.dailySeries = dailySeries;
 
-    // Monthly trend と Weather を並列取得
-    dom.weatherStatus.textContent = '天候取得中…';
-    const [monthlyData, weatherResult] = await Promise.all([
-      apiFetch(`/analytics/monthly?months=14&store_key=${state.storeKey}`).catch(() => null),
-      fetchWeather(state.storeKey, from, to),
-    ]);
-    state.monthlySeries = monthlyData?.series ?? [];
-    state.weather = weatherResult?.map ?? {};
-    const weatherCount = Object.keys(state.weather).length;
-    if (weatherCount > 0) {
-      dom.weatherStatus.textContent = `天候データ ${weatherCount}日分（実績+予報10日）`;
-    } else {
-      dom.weatherStatus.textContent = '天候データなし';
+    if (state.storeKey && salesData.store_options?.length) {
+      updateStoreSelect(salesData.store_options, salesData.selected_store_key);
     }
+
+    state.weather = {};
     const addr = STORE_ADDRESS[state.storeKey];
     dom.weatherAddress.textContent = addr ? `📍 ${addr}` : '';
 
-    // KPI
+    // KPI（天候より先に表示）
     const totals = salesData.totals;
     dom.kpiPeriodLabel.textContent = isSingleMonth ? `（${displayMonth}）` : `（${months[0]}〜${displayMonth}）`;
     dom.kpiGross.textContent = yen(totals?.total_gross_sales_yen);
@@ -1058,8 +1395,30 @@ async function loadAll() {
     dom.lastRefresh.textContent = '最終更新: ' + new Date().toLocaleTimeString('ja-JP');
 
     renderAllCharts();
+
+    lastReceiptDailyData = buildReceiptDailyTablePayload(salesData, displayMonth, isSingleMonth);
+    renderReceiptDailyTable(lastReceiptDailyData);
+
+    dom.loadingDaily.classList.remove('show');
+    dom.loadingMonthly.classList.remove('show');
+
+    const weatherResult = await (weatherPromise ?? Promise.resolve({ map: {} })).catch(() => ({ map: {} }));
+    state.weather = weatherResult?.map ?? {};
+    const weatherCount = Object.keys(state.weather).length;
+    dom.weatherStatus.textContent = weatherCount > 0
+      ? `天候データ ${weatherCount}日分（実績+予報10日）`
+      : '天候データなし';
+
+    renderAllCharts();
   } catch (e) {
     dom.filterMeta.textContent = 'エラー: ' + e.message;
+    lastReceiptDailyData = null;
+    if (dom.receiptDailyMeta) dom.receiptDailyMeta.textContent = '取得失敗: ' + e.message;
+    receiptDailySyncLayoutChrome();
+    if (dom.receiptDailyTableBody) {
+      dom.receiptDailyTableBody.innerHTML =
+        `<tr><td class="empty" colspan="${receiptDailyColspan()}">取得に失敗しました</td></tr>`;
+    }
   } finally {
     dom.loadingDaily.classList.remove('show');
     dom.loadingMonthly.classList.remove('show');
@@ -1614,6 +1973,7 @@ function renderAllCharts() {
 function refreshAllCharts() {
   // Re-render after theme change
   renderAllCharts();
+  if (lastReceiptDailyData) renderReceiptDailyTable(lastReceiptDailyData);
 }
 
 /* ── init ── */
@@ -1632,6 +1992,16 @@ dom.monthPicker.value = state.customMonth;
 
 updateAuthBadge();
 dom.tokenInput.value = getToken() ? '' : '';
+(function setupReceiptDailyViewportListener() {
+  function addMq(query) {
+    const mq = window.matchMedia(query);
+    if (mq.addEventListener) mq.addEventListener('change', receiptDailyOnViewportChange);
+    else if (mq.addListener) mq.addListener(receiptDailyOnViewportChange);
+  }
+  addMq('(min-width: 768px)');
+  addMq('(min-width: 1024px)');
+})();
+if (!getToken()) resetReceiptDailyDisconnected();
 if (getToken()) loadAll();
 </script>
 </body>

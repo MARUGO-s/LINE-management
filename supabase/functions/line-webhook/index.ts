@@ -146,6 +146,25 @@ type PendingMessageSearchExpand = {
   expires_at: string
 }
 
+type PendingMessageSearchFollowup = {
+  id: string
+  conversation_key: string
+  keyword: string
+  search_days: MessageRetentionDays
+  search_scope: MessageSearchScope
+  retention_adjusted: boolean
+  offer_library: boolean
+  expires_at: string
+}
+
+type PendingMessageSearchPeriod = {
+  id: string
+  conversation_key: string
+  keyword: string
+  search_scope: MessageSearchScope
+  expires_at: string
+}
+
 type AiListIntent = {
   scope: CalendarListScope
   date?: string
@@ -172,6 +191,7 @@ type AiCalendarUpdateIntent = {
 type GoogleCalendarEvent = {
   id?: string
   htmlLink?: string
+  hangoutLink?: string
   summary?: string
   description?: string
   location?: string
@@ -279,6 +299,7 @@ type LineUserPermissionPolicy = {
 type CalendarSourceMeta = {
   roomName: string | null
   userName: string | null
+  meetingUrl?: string | null
 }
 
 type SearchMessageRow = {
@@ -319,6 +340,12 @@ type LineImageReceiptAnalysis = {
 type LineImageAnalysisResult = {
   summary: string
   receipt: LineImageReceiptAnalysis | null
+}
+
+type LineImageVisionFailure = {
+  stage: string
+  message: string
+  httpStatus?: number
 }
 
 type LineReceiptAggregate = {
@@ -430,6 +457,7 @@ const CALENDAR_UPDATE_PENDING_TABLE = 'calendar_update_pending_targets'
 const LIBRARY_SEARCH_PENDING_TABLE = 'message_search_library_pending_confirmations'
 const MESSAGE_SEARCH_EXPAND_PENDING_TABLE = 'message_search_expand_pending_confirmations'
 const MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE = 'message_search_followup_pending_confirmations'
+const MESSAGE_SEARCH_PERIOD_PENDING_TABLE = 'message_search_period_pending_confirmations'
 const MEDIA_SEARCH_PENDING_TABLE = 'media_search_pending_confirmations'
 const RECEIPT_CORRECTION_PENDING_TABLE = 'receipt_correction_pending_confirmations'
 const HACCP_BULK_PENDING_TABLE = 'haccp_bulk_pending_confirmations'
@@ -689,6 +717,7 @@ Deno.serve(async (req) => {
       let calendarSourceMeta: CalendarSourceMeta = {
         roomName: roomReplyPolicy.roomName,
         userName: senderDisplayName,
+        meetingUrl: null,
       }
 
       // 画像/ファイル投稿時も投稿者名を保存できるよう、メディア保存前に送信者表示名を補完する。
@@ -697,6 +726,7 @@ Deno.serve(async (req) => {
         calendarSourceMeta = {
           roomName: roomReplyPolicy.roomName,
           userName: senderDisplayName,
+          meetingUrl: null,
         }
       }
 
@@ -707,6 +737,7 @@ Deno.serve(async (req) => {
         calendarSourceMeta = {
           roomName: roomReplyPolicy.roomName,
           userName: senderDisplayName,
+          meetingUrl: extractMeetingUrlFromText(String(event.message?.text ?? '')),
         }
         const userIsActive = lineUserPermission.isActive
         const isCurrentRoomExcludedForMessageSearch = isRoomExcludedForMessageSearch(
@@ -722,6 +753,11 @@ Deno.serve(async (req) => {
         /** 予定の一覧・確認（list）。`can_calendar_view` で制御（作成・更新とは独立）。 */
         const canListCalendarEvents = userIsActive && lineUserPermission.canCalendarView
         const text = String(event.message.text ?? '').trim()
+        calendarSourceMeta = {
+          roomName: roomReplyPolicy.roomName,
+          userName: senderDisplayName,
+          meetingUrl: extractMeetingUrlFromText(text),
+        }
         const quotedMessageId = extractQuotedLineMessageId(event.message)
         if (!userIsActive) {
           if (roomCanReply && lineAccessToken && replyToken) {
@@ -900,7 +936,7 @@ Deno.serve(async (req) => {
             continue
           }
           await clearPendingReceiptCorrection(supabase, roomId, userId)
-          let startText = buildMediaSearchPeriodPrompt()
+          let startText: LineReplyPayload = buildMediaSearchPeriodPrompt()
           if (fileSearchStart.matched) {
             const keyword = fileSearchStart.keyword
             if (!keyword) {
@@ -1190,6 +1226,72 @@ Deno.serve(async (req) => {
           }
 
           if (canMessageSearch) {
+            const periodSearchReply = await tryHandlePendingMessageSearchPeriod(
+              text,
+              supabase,
+              roomId,
+              userId,
+              canLibrarySearch,
+              messageRetentionDays,
+              lineUserPermission.excludedMessageSearchRoomIds,
+              groqApiKey,
+              canUseMedia,
+            )
+            if (periodSearchReply) {
+              if (!roomCanReply) {
+                continue
+              }
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search period selection.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for message search period selection.')
+                continue
+              }
+              const periodReplyResult = await replyLineMessage(
+                replyToken,
+                periodSearchReply,
+                lineAccessToken,
+                webhookDeliveryLog('message_search_period'),
+              )
+              if (!periodReplyResult.ok) {
+                console.error('Failed to reply message search period selection:', periodReplyResult.error)
+              }
+              continue
+            }
+
+            const followupSearchReply = await tryHandlePendingMessageSearchFollowup(
+              text,
+              supabase,
+              roomId,
+              userId,
+              lineUserPermission.excludedMessageSearchRoomIds,
+            )
+            if (followupSearchReply) {
+              if (!roomCanReply) {
+                continue
+              }
+              if (!lineAccessToken) {
+                console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search followup.')
+                continue
+              }
+              if (!replyToken) {
+                console.error('Missing replyToken for message search followup.')
+                continue
+              }
+              const followupReplyResult = await replyLineMessage(
+                replyToken,
+                followupSearchReply,
+                lineAccessToken,
+                webhookDeliveryLog('message_search_followup'),
+              )
+              if (!followupReplyResult.ok) {
+                console.error('Failed to reply message search followup:', followupReplyResult.error)
+              }
+              continue
+            }
+
             const expandSearchReply = await tryHandlePendingMessageSearchExpand(
               text,
               supabase,
@@ -1401,19 +1503,31 @@ Deno.serve(async (req) => {
                 continue
               }
 
-              const replyMessages = await buildMessageSearchReply(
-                messageSearchCommand,
-                messageSearchError,
-                supabase,
-                roomId,
-                userId,
-                canLibrarySearch,
-                messageRetentionDays,
-                lineUserPermission.excludedMessageSearchRoomIds,
-                groqApiKey,
-                canUseMedia,
-                text,
-              )
+              const replyMessages = messageSearchError || !messageSearchCommand
+                ? await buildMessageSearchReply(
+                  messageSearchCommand,
+                  messageSearchError,
+                  supabase,
+                  roomId,
+                  userId,
+                  canLibrarySearch,
+                  messageRetentionDays,
+                  lineUserPermission.excludedMessageSearchRoomIds,
+                  groqApiKey,
+                  canUseMedia,
+                  text,
+                )
+                : (await savePendingMessageSearchPeriod(
+                  supabase,
+                  roomId,
+                  userId,
+                  messageSearchCommand,
+                ))
+                ? buildMessageSearchPeriodPrompt()
+                : buildConversationSearchFlexReplies(
+                  '会話検索の期間選択を開始できませんでした。しばらくしてからもう一度お試しください。',
+                  '会話検索',
+                )
 
               if (!lineAccessToken) {
                 console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply message search.')
@@ -2007,6 +2121,7 @@ async function trySaveLineMediaContent(
 
   let contentPreview: string | null = null
   let imageAnalysis: LineImageAnalysisResult | null = null
+  let imageVisionFailure: LineImageVisionFailure | null = null
   if (mediaType === 'file') {
     try {
       contentPreview = await extractLineMediaFileContentPreview(
@@ -2023,15 +2138,21 @@ async function trySaveLineMediaContent(
     isVisionAnalyzableImageMime(contentFetch.contentType)
   ) {
     try {
-      imageAnalysis = await analyzeLineImageWithGroqScout(
+      const analyzed = await analyzeLineImageWithGroqScout(
         contentFetch.bytes,
         contentFetch.contentType,
         originalFileName,
         groqApiKey,
       )
+      imageAnalysis = analyzed.analysis
+      imageVisionFailure = analyzed.failure
       contentPreview = imageAnalysis?.summary ?? null
     } catch (visionErr) {
       console.error(`line_image_vision failed (lineMessageId=${lineMessageId}):`, visionErr)
+      imageVisionFailure = {
+        stage: 'exception',
+        message: normalizeInlineText(String((visionErr as Error)?.message ?? visionErr ?? 'unknown error')).slice(0, 500),
+      }
     }
   }
 
@@ -2142,8 +2263,26 @@ async function trySaveLineMediaContent(
       }
       return baseReply
     }
+    if (imageVisionFailure) {
+      await writeWebhookLineDeliveryLog(supabase, {
+        roomId,
+        success: false,
+        method: 'reply',
+        lineHttpStatus: imageVisionFailure.httpStatus ?? null,
+        reason: `reply_build_failed · image_vision_${imageVisionFailure.stage}`,
+        context: 'image_analysis_failure',
+        details: {
+          line_message_id: lineMessageId,
+          media_type: mediaType,
+          failure_stage: imageVisionFailure.stage,
+          failure_message: imageVisionFailure.message,
+          failure_http_status: imageVisionFailure.httpStatus ?? null,
+        },
+      })
+    }
     const cap = String(contentPreview ?? '').trim()
     if (cap) return buildLineImageAnalysisReply(cap)
+    return '画像を保存しましたが、解析結果の生成に失敗しました。時間を置いて同じ画像を再送してください。'
   }
   if (midMonthReportReply) return midMonthReportReply
   return null
@@ -2328,6 +2467,8 @@ function toReceiptStorePartitionKey(storeName: string | null): string {
 const STORE_ALIAS_MAP: Record<string, string> = {
   'cavacava': 'BISTRO CAVA CAVA',
   'cava': 'BISTRO CAVA CAVA',
+  // OCR が語順を入れ替えることがある（例: CAVA BISTRO）
+  'cavabistro': 'BISTRO CAVA CAVA',
   'marugod': 'マルゴ D',
   'marugo d': 'マルゴ D',
   'sobaju': 'ソバージュ',
@@ -3047,13 +3188,48 @@ function normalizeReceiptCorrectionDraftForPersist(draft: LineImageReceiptAnalys
   }
 }
 
-function buildMediaSearchPeriodPrompt(): string {
-  return [
-    '保存メディア検索を開始します。まず期間を選んで返信してください。',
-    '1) 1ヶ月  2) 3ヶ月  3) 6ヶ月  4) 12ヶ月  5) 全期間',
-    '例: 1ヶ月',
-    '※ このあと候補一覧（番号付き）を返します。番号を送るとURLを返します。',
-  ].join('\n')
+function buildMediaSearchPeriodPrompt(): LineReplyPayload {
+  return [{
+    type: 'flex',
+    altText: '保存メディア検索を開始します。期間を選んでください。1)1ヶ月 2)3ヶ月 3)6ヶ月 4)12ヶ月 5)全期間',
+    contents: {
+      type: 'bubble',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#1E4FB1',
+        paddingTop: 'md',
+        paddingBottom: 'md',
+        paddingStart: 'md',
+        paddingEnd: 'md',
+        contents: [
+          { type: 'text', text: '保存メディア検索', size: 'lg', weight: 'bold', color: '#FFFFFF' },
+          { type: 'text', text: '検索期間を選択してください', size: 'sm', color: '#D7E6FF', margin: 'sm' },
+        ],
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: [
+          { type: 'text', text: '1) 1ヶ月', size: 'md', wrap: true },
+          { type: 'text', text: '2) 3ヶ月', size: 'md', wrap: true },
+          { type: 'text', text: '3) 6ヶ月', size: 'md', wrap: true },
+          { type: 'text', text: '4) 12ヶ月', size: 'md', wrap: true },
+          { type: 'text', text: '5) 全期間', size: 'md', wrap: true },
+          { type: 'separator', margin: 'md' },
+          {
+            type: 'text',
+            text: 'このあと候補一覧（番号付き）を返します。番号を送るとURLを返します。',
+            size: 'xs',
+            color: '#666666',
+            wrap: true,
+            margin: 'md',
+          },
+        ],
+      },
+    },
+  }]
 }
 
 function nextMediaSearchPeriod(current: MediaSearchPeriodMonths): MediaSearchPeriodMonths | null {
@@ -3997,7 +4173,7 @@ function buildMediaSearchCandidateListReply(
   pending: PendingMediaSearch,
   items: MediaSearchCandidate[],
   opts?: { keywordQuery?: string; itemCursor?: number },
-): string {
+): LineReplyPayload {
   const periodLabel = pending.period_months === 0 ? '全期間' : `${pending.period_months}ヶ月`
   const kw = String(opts?.keywordQuery ?? '').trim()
   const senderQ = String(pending.sender_query ?? '').trim()
@@ -4010,24 +4186,119 @@ function buildMediaSearchCandidateListReply(
   if (senderQ) headerBits.push(`投稿者:${senderQ}`)
   if (kw) headerBits.push(`キー:${kw}`)
   headerBits.push(`表示:${Math.min(shownEnd, items.length)}/${items.length}`)
-  const linesOut = [
-    `メディア候補（${headerBits.join(' / ')}）`,
-  ]
+  const bodyContents: Array<Record<string, unknown>> = []
   if (items.length === 0) {
-    linesOut.push('候補が見つかりませんでした。')
-    linesOut.push('条件を変える場合: 投稿者:名前 / キー:語句 / 期間変更')
-    return linesOut.join('\n')
+    bodyContents.push(
+      { type: 'text', text: '候補が見つかりませんでした。', size: 'md', wrap: true },
+      {
+        type: 'text',
+        text: '条件変更: 投稿者:名前 / キー:語句 / 期間変更',
+        size: 'xs',
+        color: '#666666',
+        wrap: true,
+        margin: 'md',
+      },
+    )
+  } else {
+    for (const item of pageItems) {
+      bodyContents.push({ type: 'text', text: `${item.idx}) ${item.display_name}`, size: 'sm', wrap: true })
+    }
+    bodyContents.push({ type: 'separator', margin: 'md' })
+    bodyContents.push({ type: 'text', text: '番号返信でURL送信（例: 2）', size: 'xs', color: '#666666', wrap: true })
+    if (hasMore) {
+      bodyContents.push({
+        type: 'text',
+        text: `まだ残りがあります。「続き」で次の${MEDIA_SEARCH_REPLY_PAGE_SIZE}件（残り${items.length - shownEnd}件）。`,
+        size: 'xs',
+        color: '#666666',
+        wrap: true,
+        margin: 'sm',
+      })
+    }
+    bodyContents.push({
+      type: 'text',
+      text: '絞り込み: 語句 / キー:語句 / 投稿者:名前 　条件変更: 期間変更',
+      size: 'xs',
+      color: '#666666',
+      wrap: true,
+      margin: 'sm',
+    })
   }
-  for (const item of pageItems) {
-    linesOut.push(`${item.idx}) ${item.display_name}`)
-  }
-  linesOut.push('番号返信でURL送信（例: 2）')
-  if (hasMore) {
-    linesOut.push(`まだ残りのファイルがあります。「続き」で次の${MEDIA_SEARCH_REPLY_PAGE_SIZE}件を表示します（残り${items.length - shownEnd}件）。`)
-  }
-  linesOut.push('絞り込み: 語句をそのまま返信（ファイル名・ファイル内の抽出テキスト）または キー:語句 / 投稿者:名前')
-  linesOut.push('条件変更: 期間変更')
-  return linesOut.join('\n')
+  return [{
+    type: 'flex',
+    altText: clipMediaPreview(`メディア候補（${headerBits.join(' / ')}）`, 300),
+    contents: {
+      type: 'bubble',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#1E4FB1',
+        paddingTop: 'md',
+        paddingBottom: 'md',
+        paddingStart: 'md',
+        paddingEnd: 'md',
+        contents: [
+          { type: 'text', text: 'メディア候補', size: 'lg', weight: 'bold', color: '#FFFFFF' },
+          { type: 'text', text: headerBits.join(' / '), size: 'xs', color: '#D7E6FF', wrap: true, margin: 'sm' },
+        ],
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: bodyContents,
+      },
+    },
+  }]
+}
+
+function buildMediaSearchSelectedDetailReply(
+  selected: MediaSearchCandidate,
+  url: string,
+): LineReplyPayload {
+  const detailLines = [
+    `日時: ${formatSearchDateTime(selected.created_at)}`,
+    `ルーム: ${selected.room_label}`,
+    `投稿者: ${selected.sender_name}`,
+    `分類: ${selected.category_label}`,
+    ...(selected.preview_short ? [`解析: ${selected.preview_short}`] : []),
+  ]
+  return [{
+    type: 'flex',
+    altText: clipMediaPreview(`選択: ${selected.display_name}`, 300),
+    contents: {
+      type: 'bubble',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#1E4FB1',
+        paddingTop: 'md',
+        paddingBottom: 'md',
+        paddingStart: 'md',
+        paddingEnd: 'md',
+        contents: [
+          { type: 'text', text: '選択したメディア', size: 'lg', weight: 'bold', color: '#FFFFFF' },
+          { type: 'text', text: selected.display_name, size: 'sm', color: '#D7E6FF', wrap: true, margin: 'sm' },
+        ],
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: [
+          ...detailLines.map((line) => ({ type: 'text', text: line, size: 'sm', wrap: true })),
+          { type: 'separator', margin: 'md' },
+          {
+            type: 'button',
+            style: 'primary',
+            color: '#1E4FB1',
+            action: { type: 'uri', label: 'ファイルを開く', uri: url },
+            margin: 'md',
+          },
+        ],
+      },
+    },
+  }]
 }
 
 async function tryHandlePendingMediaSearch(
@@ -4036,7 +4307,7 @@ async function tryHandlePendingMediaSearch(
   roomId: string,
   userId: string | null,
   canUseMedia: boolean,
-): Promise<string | null> {
+): Promise<LineReplyPayload | null> {
   const pending = await loadPendingMediaSearch(supabase, roomId, userId)
   if (!pending) return null
   const normalizedText = String(text ?? '').trim()
@@ -4289,16 +4560,7 @@ async function tryHandlePendingMediaSearch(
       return 'URL の作成に失敗しました。もう一度番号を選択してください。'
     }
     await clearPendingMediaSearch(supabase, roomId, userId)
-    const detailLines = [
-      `選択: ${selected.display_name}`,
-      `日時: ${formatSearchDateTime(selected.created_at)}`,
-      `ルーム: ${selected.room_label}`,
-      `送信者: ${selected.sender_name}`,
-      `分類: ${selected.category_label}`,
-      ...(selected.preview_short ? [`解析: ${selected.preview_short}`] : []),
-      url,
-    ]
-    return detailLines.join('\n')
+    return buildMediaSearchSelectedDetailReply(selected, url)
   }
 
   if (pending.stage === 'select_item') {
@@ -4572,11 +4834,23 @@ async function analyzeLineImageWithGroqScout(
   contentType: string | null,
   fileName: string,
   groqApiKey: string,
-): Promise<LineImageAnalysisResult | null> {
-  if (!groqApiKey) return null
-  if (bytes.byteLength <= 0 || bytes.byteLength > GROQ_VISION_BASE64_MAX_BYTES) return null
+): Promise<{ analysis: LineImageAnalysisResult | null; failure: LineImageVisionFailure | null }> {
+  if (!groqApiKey) {
+    return { analysis: null, failure: { stage: 'missing_api_key', message: 'GROQ_API_KEY is missing.' } }
+  }
+  if (bytes.byteLength <= 0 || bytes.byteLength > GROQ_VISION_BASE64_MAX_BYTES) {
+    return {
+      analysis: null,
+      failure: { stage: 'invalid_image_size', message: `Image bytes out of range: ${bytes.byteLength}` },
+    }
+  }
   const mime = String(contentType ?? '').trim().toLowerCase()
-  if (!isVisionAnalyzableImageMime(mime)) return null
+  if (!isVisionAnalyzableImageMime(mime)) {
+    return {
+      analysis: null,
+      failure: { stage: 'unsupported_mime', message: `Unsupported image mime: ${mime || '(empty)'}` },
+    }
+  }
 
   const imageDataUrl = `data:${mime};base64,${toBase64(bytes)}`
   const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -4628,23 +4902,43 @@ async function analyzeLineImageWithGroqScout(
   if (!response.ok) {
     const err = await response.text()
     console.error('Groq image vision failed:', response.status, err)
-    return null
+    return {
+      analysis: null,
+      failure: {
+        stage: 'groq_http_error',
+        httpStatus: response.status,
+        message: normalizeInlineText(String(err ?? '')).slice(0, 500) || 'Groq API request failed.',
+      },
+    }
   }
 
   const json = await response.json()
   const content = String(json?.choices?.[0]?.message?.content ?? '').trim()
-  if (!content) return null
+  if (!content) {
+    return { analysis: null, failure: { stage: 'empty_model_content', message: 'Groq response content is empty.' } }
+  }
   const extracted = parseFirstJsonObject(content)
   if (extracted && typeof extracted === 'object') {
     const normalized = normalizeLineImageAnalysisResult(extracted as Record<string, unknown>)
-    if (normalized) return normalized
+    if (normalized) return { analysis: normalized, failure: null }
   }
 
   const fallbackSummary = normalizeInlineText(content).slice(0, 240)
-  if (!fallbackSummary) return null
+  if (!fallbackSummary) {
+    return {
+      analysis: null,
+      failure: {
+        stage: 'unparsable_model_output',
+        message: 'Groq response could not be parsed into summary.',
+      },
+    }
+  }
   return {
-    summary: fallbackSummary,
-    receipt: null,
+    analysis: {
+      summary: fallbackSummary,
+      receipt: null,
+    },
+    failure: null,
   }
 }
 
@@ -4691,6 +4985,7 @@ function decodeEscapedUnicodeSequences(raw: string): string {
 function normalizeReceiptFieldText(raw: unknown, maxLen: number): string | null {
   const normalized = normalizeInlineText(decodeEscapedUnicodeSequences(String(raw ?? '')))
     .replace(/\u00a5/g, '¥')
+    .replace(/\u00a7/g, '¥')
     .trim()
   if (!normalized) return null
   return normalized.length > maxLen ? normalized.slice(0, maxLen) : normalized
@@ -4765,7 +5060,7 @@ function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalys
   const rawStoreName =
     normalizeReceiptFieldText(data.store_name ?? data.store ?? data.shop_name, 80)
   const storeName = rawStoreName ? (resolveBestStoreName(rawStoreName) ?? rawStoreName) : null
-  const date =
+  let date =
     normalizeReceiptFieldText(data.date ?? data.issued_at ?? data.issued_date, 80)
   let netSales =
     normalizeReceiptFieldText(data.net_sales ?? data.subtotal ?? data.net_amount, 40)
@@ -4854,7 +5149,10 @@ function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalys
   if (guestNum != null) guestCount = String(guestNum)
 
   const grossForUnitPrice = parseCurrencyAmount(grossSales) ?? normalizedGrossNum
-  if (!unitPrice && grossForUnitPrice != null && guestNum != null && guestNum > 0) {
+  const unitNum = parseCurrencyAmount(unitPrice)
+  if (unitNum != null) {
+    unitPrice = formatYenAmount(unitNum)
+  } else if (grossForUnitPrice != null && guestNum != null && guestNum > 0) {
     unitPrice = formatYenAmount(grossForUnitPrice / guestNum)
   }
 
@@ -4863,6 +5161,12 @@ function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalys
     .map((value) => normalizeReceiptFieldText(value, 80) ?? '')
     .filter((value) => value.length > 0)
     .slice(0, 5)
+
+  const dateIso = parseReceiptDateToIso(date)
+  if (dateIso) {
+    const dateJa = formatJapaneseReceiptDateFromIso(dateIso)
+    if (dateJa) date = dateJa
+  }
 
   const hasAnyField = !!(
     storeName ||
@@ -4894,12 +5198,30 @@ function parseReceiptDateToIso(raw: string | null): string | null {
   if (!raw) return null
   const normalized = decodeEscapedUnicodeSequences(raw).trim()
   if (!normalized) return null
-  const m = normalized.match(/(\d{4})[\/\-\.年](\d{1,2})[\/\-\.月](\d{1,2})/)
+  const m = normalized.match(/(\d{4})\D{0,6}(\d{1,2})\D{0,6}(\d{1,2})/)
   if (!m) return null
   const year = Number(m[1])
   const month = Number(m[2])
   const day = Number(m[3])
   return toIsoDateStringSafe(year, month, day)
+}
+
+function resolveReceiptDateIsoForPersist(raw: string | null): string {
+  const parsed = parseReceiptDateToIso(raw)
+  if (parsed) return parsed
+  const parts = getJstDateParts(new Date())
+  return toJstDateString(parts.year, parts.month, parts.day)
+}
+
+function formatJapaneseReceiptDateFromIso(iso: string | null): string | null {
+  if (!iso) return null
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return null
+  const year = Number(m[1])
+  const month = Number(m[2])
+  const day = Number(m[3])
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null
+  return `${year}年${month}月${day}日`
 }
 
 function getJstDateParts(base = new Date()): { year: number; month: number; day: number; hour: number; minute: number } {
@@ -5101,7 +5423,7 @@ async function updateLineReceiptEntryFromCorrectionDraft(
     ? (resolveBestStoreName(normalizedDraft.storeName) ?? normalizedDraft.storeName)
     : null
   const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
-  const receiptDateIso = parseReceiptDateToIso(normalizedDraft.date)
+  const receiptDateIso = resolveReceiptDateIsoForPersist(normalizedDraft.date)
   const netSalesYen = parseCurrencyAmount(normalizedDraft.netSales)
   const taxAmountYen = parseCurrencyAmount(normalizedDraft.taxAmount)
   const grossSalesYen = parseCurrencyAmount(normalizedDraft.grossSales)
@@ -5180,7 +5502,7 @@ async function saveLineReceiptEntry(
     ? (resolveBestStoreName(params.receipt.storeName) ?? params.receipt.storeName)
     : null
   const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
-  const receiptDateIso = parseReceiptDateToIso(params.receipt.date)
+  const receiptDateIso = resolveReceiptDateIsoForPersist(params.receipt.date)
   const netSalesYen = parseCurrencyAmount(params.receipt.netSales)
   const taxAmountYen = parseCurrencyAmount(params.receipt.taxAmount)
   const grossSalesYen = parseCurrencyAmount(params.receipt.grossSales)
@@ -5736,10 +6058,12 @@ function buildLineReceiptImageAnalysisReply(
   options?: { correctionCommandText?: string },
 ): LineReplyMessage[] {
   const labelFlex = 3
+  const parsedDateIso = parseReceiptDateToIso(receipt.date)
+  const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? receipt.date
   const cum = monthCumulativeTotals ?? { grossSalesYen: null, partyCount: null, guestCount: null }
   const rows: Array<{ label: string; value: string; margin?: 'md' }> = [
     { label: '店名', value: receipt.storeName || '-' },
-    { label: '日付', value: receipt.date || '-' },
+    { label: '日付', value: displayDate || '-' },
     { label: '消費税', value: receipt.taxAmount || '-' },
     { label: '総売上（税込）', value: receipt.grossSales || '-' },
     { label: '会計組数', value: receipt.partyCount || '-' },
@@ -6861,9 +7185,9 @@ async function buildMessageSearchReply(
   groqApiKey: string,
   includeSavedMedia: boolean,
   originalUserText: string,
-): Promise<string[]> {
-  if (parseError) return [parseError]
-  if (!command) return ['会話検索の意図を解釈できませんでした。']
+): Promise<LineReplyPayload> {
+  if (parseError) return buildConversationSearchFlexReplies(parseError, '会話検索結果')
+  if (!command) return buildConversationSearchFlexReplies('会話検索の意図を解釈できませんでした。', '会話検索結果')
 
   const primaryTarget = classifyMessageSearchPrimaryTarget(originalUserText)
 
@@ -6974,7 +7298,10 @@ async function buildMessageSearchReply(
     await runStageLoop()
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return [msg.startsWith('会話検索に失敗') ? msg : `会話検索に失敗しました。${msg}`]
+    return buildConversationSearchFlexReplies(
+      msg.startsWith('会話検索に失敗') ? msg : `会話検索に失敗しました。${msg}`,
+      '会話検索結果',
+    )
   }
 
   if (hitsRaw.length === 0 && phase1Wizard) {
@@ -6998,7 +7325,10 @@ async function buildMessageSearchReply(
         await runStageLoop()
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
-        return [msg.startsWith('会話検索に失敗') ? msg : `会話検索に失敗しました。${msg}`]
+        return buildConversationSearchFlexReplies(
+          msg.startsWith('会話検索に失敗') ? msg : `会話検索に失敗しました。${msg}`,
+          '会話検索結果',
+        )
       }
     }
   }
@@ -7017,7 +7347,7 @@ async function buildMessageSearchReply(
     : []
 
   if (hitsRaw.length === 0) {
-    const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+    const periodText = formatMessageSearchPeriodLabel(effectiveDays)
 
     if (!librarySearchEnabled) {
       const lines: string[] = [`「${command.keyword}」に一致する会話テキストはありません（${periodText}）`]
@@ -7030,7 +7360,7 @@ async function buildMessageSearchReply(
       } else {
         lines.push('※このルームでは資料ライブラリ検索（2段階目）が無効です。')
       }
-      return [lines.join('\n')]
+      return buildConversationSearchFlexReplies(lines.join('\n'), '会話検索結果')
     }
     const pendingSaved = await savePendingLibrarySearchConfirmation(
       supabase,
@@ -7046,11 +7376,11 @@ async function buildMessageSearchReply(
     if (phase1Wizard) {
       if (didChainedFullFromWizard) {
         lines.push(
-          `※まず過去${phase1WindowDays}日を検索し、続いて保持期間いっぱいまで会話を検索しましたが一致しませんでした。`,
+          `※まず${formatMessageSearchPeriodLabel(phase1WindowDays as MessageRetentionDays)}を検索し、続いて保持期間いっぱいまで会話を検索しましたが一致しませんでした。`,
         )
       } else {
         lines.push(
-          `※過去${phase1WindowDays}日の会話に加え、保持期間内はすでにすべて検索済みです（追加で広げる範囲はありません）。`,
+          `※${formatMessageSearchPeriodLabel(phase1WindowDays as MessageRetentionDays)}の会話に加え、保持期間内はすでにすべて検索済みです（追加で広げる範囲はありません）。`,
         )
       }
     }
@@ -7070,7 +7400,7 @@ async function buildMessageSearchReply(
       lines.push('')
       lines.push('資料ライブラリへ進む確認を保存できませんでした。しばらくしてからもう一度お試しください。')
     }
-    return [lines.join('\n')]
+    return buildConversationSearchFlexReplies(lines.join('\n'), '会話検索結果')
   }
 
   const roomLabels = command.scope === 'all_rooms'
@@ -7100,7 +7430,7 @@ async function buildMessageSearchReply(
   )
 
   const scopeLabel = command.scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
-  const periodLabel = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+  const periodLabel = formatMessageSearchPeriodLabel(effectiveDays)
   const lines: string[] = [
     '会話検索結果',
     `対象: ${scopeLabel}`,
@@ -7115,19 +7445,15 @@ async function buildMessageSearchReply(
   }
   if (initialNormalMaxCapped) {
     lines.push(
-      `※通常の会話検索は過去${MESSAGE_SEARCH_NORMAL_MAX_DAYS}日までに制限しています。保持期間いっぱい（例: 2年分）まで対象にするには「会話検索フル」「会話検索全履歴」「会話検索裏」などを付けてください。`,
+      `※通常の会話検索は${formatMessageSearchPeriodLabel(MESSAGE_SEARCH_NORMAL_MAX_DAYS as MessageRetentionDays)}までに制限しています。保持期間いっぱい（例: 2年分）まで対象にするには「会話検索フル」「会話検索全履歴」「会話検索裏」などを付けてください。`,
     )
   }
   if (didChainedFullFromWizard && hits.length > 0) {
     lines.push(
-      `※まず過去${phase1WindowDays}日を検索し一致がなかったため、保持期間の範囲で追加検索した結果です。`,
+      `※まず${formatMessageSearchPeriodLabel(phase1WindowDays as MessageRetentionDays)}を検索し一致がなかったため、保持期間の範囲で追加検索した結果です。`,
     )
   } else if (phase1Wizard && hits.length > 0) {
-    const d = Math.min(
-      rangePolicy.effectiveDays,
-      MESSAGE_SEARCH_NORMAL_MAX_DAYS,
-    )
-    lines.push(`※今回はまず過去${d}日の範囲を一度に検索しました。`)
+    // 注釈文は表示しない（ユーザー要望）
   }
   if (
     (explicitFullSearch || didChainedFullFromWizard) && effectiveDays > MESSAGE_SEARCH_NORMAL_MAX_DAYS
@@ -7138,7 +7464,7 @@ async function buildMessageSearchReply(
     lines.push(
       explicitFullSearch || didChainedFullFromWizard
         ? '※会話履歴は、約3ヶ月→約6ヶ月→設定上の全期間の順に試し、ヒットが出た段階で終了しました。'
-        : `※会話履歴は、約3ヶ月→約6ヶ月（通常は過去${MESSAGE_SEARCH_NORMAL_MAX_DAYS}日まで）の順に試し、ヒットが出た段階で終了しました。`,
+        : `※会話履歴は、約3ヶ月→約6ヶ月（通常は${formatMessageSearchPeriodLabel(MESSAGE_SEARCH_NORMAL_MAX_DAYS as MessageRetentionDays)}まで）の順に試し、ヒットが出た段階で終了しました。`,
     )
   }
   if (fetchTruncated) {
@@ -7147,7 +7473,7 @@ async function buildMessageSearchReply(
     )
   }
   if (includeSavedMedia && suppressMediaWithConversationHit) {
-    lines.push('※会話テキストに一致があるため、保存メディア一覧は省略しています。')
+    // 注釈文は表示しない（ユーザー要望）
   } else if (includeSavedMedia && mediaFirst) {
     lines.push('※保存メディアを優先して表示しています。')
   } else if (mediaLines.length > 0 && primaryTarget === 'both') {
@@ -7164,11 +7490,35 @@ async function buildMessageSearchReply(
     lines.push(`※一致件数が多いため、AI要約は省略しています（${SEARCH_AI_SUMMARY_MAX_HITS}件超）。`)
   }
   if (hits.length > 0) {
+    const followupSaved = await savePendingMessageSearchFollowup(
+      supabase,
+      roomId,
+      userId,
+      command,
+      effectiveDays,
+      adjustedByRetention,
+      librarySearchEnabled,
+    )
     lines.push('')
-    lines.push('一致メッセージ（新しい順）:')
+    lines.push('一致メッセージ（新しい順・要点）:')
     for (let i = 0; i < hits.length; i += 1) {
-      lines.push('')
-      lines.push(...formatMessageSearchPreview(hits[i], i + 1, command.scope === 'all_rooms'))
+      const hit = hits[i]
+      const content = normalizeMessagePreviewText(String(hit.content ?? ''))
+      const snippet = content.length > 80 ? `${content.slice(0, 80)}...` : (content || '（内容なし）')
+      const date = formatSearchDateTime(hit.created_at)
+      const roomLabel = command.scope === 'all_rooms'
+        ? ` | ルーム:${normalizeInlineText(String(hit.room_label ?? '')) || '（不明）'}`
+        : ''
+      if (i > 0) lines.push('')
+      lines.push(`${i + 1}) ${date}${roomLabel}`)
+      lines.push(`   ${snippet}`)
+    }
+    lines.push('')
+    if (followupSaved) {
+      lines.push(`※全文を見るには「番号」または「番号の全文」（例: 2 / 2の全文）と返信してください。`)
+      lines.push(`※${PENDING_CONFIRMATION_TTL_MIN}分以内。終了する場合は「終了」と返信してください。`)
+    } else {
+      lines.push('※詳細表示の受付を保存できませんでした。再度会話検索してからお試しください。')
     }
   }
   if (!mediaFirst && mediaLines.length > 0) {
@@ -7196,7 +7546,7 @@ async function buildMessageSearchReply(
     }
   }
 
-  return splitTextForLineReply(lines.join('\n'))
+  return buildConversationSearchFlexReplies(lines.join('\n'), '会話検索結果')
 }
 
 function resolveEffectiveMessageSearchDays(
@@ -7252,7 +7602,7 @@ async function buildLibrarySearchPromptWhenMessageSearchDisabled(
   )
   const effectiveDays = rangePolicy.effectiveDays
   const adjustedByRetention = rangePolicy.adjustedByRetention
-  const periodText = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+  const periodText = formatMessageSearchPeriodLabel(effectiveDays)
   const pendingSaved = await savePendingLibrarySearchConfirmation(
     supabase,
     roomId,
@@ -7597,7 +7947,7 @@ function formatMessageSearchPreview(
 ): string[] {
   const date = formatSearchDateTime(row.created_at)
   const content = normalizeMessagePreviewText(String(row.content ?? ''))
-  const compact = content.length > 220 ? `${content.slice(0, 220)}...` : (content || '（内容なし）')
+  const compact = content || '（内容なし）'
   const previewLines = splitMessagePreviewIntoParagraphLines(compact, 24)
   const lines = [`${index}件目`]
   if (includeRoomLabel) {
@@ -7713,7 +8063,7 @@ async function summarizeMessageSearchHitsWithGroq(
             role: 'user',
             content: [
               `検索キーワード: ${keyword}`,
-              `検索範囲: ${days > 0 ? `過去${days}日` : '全期間'}`,
+              `検索範囲: ${formatMessageSearchPeriodLabel(days)}`,
               '以下を要約してください:',
               transcript,
             ].join('\n\n'),
@@ -7739,7 +8089,23 @@ async function summarizeMessageSearchHitsWithGroq(
 }
 
 function messageMatchesKeyword(content: string, keyword: string): boolean {
-  return keywordMatchesHaystacks(keyword, [String(content ?? '')])
+  const text = String(content ?? '')
+  const normalizedKeyword = normalizeKeywordForSearch(keyword)
+  if (!normalizedKeyword) return true
+
+  // 固有語（特にカタカナ語）は誤ヒットしやすいため、まず厳密寄りの部分一致を優先する。
+  // 例: 「マンチーニ」で「ランチ」等が混ざるのを抑制。
+  const looksLikeSpecificKatakana = /[ァ-ヶー]/.test(normalizedKeyword) && normalizedKeyword.length >= 3
+  if (looksLikeSpecificKatakana) {
+    const target = normalizeKeywordForSearch(text)
+    const compactTarget = compactSearchText(text)
+    const compactKeyword = compactSearchText(normalizedKeyword)
+    const strictMatched = target.includes(normalizedKeyword)
+      || (compactKeyword && compactTarget.includes(compactKeyword))
+    if (!strictMatched) return false
+  }
+
+  return keywordMatchesHaystacks(keyword, [text])
 }
 
 function isLikelyBotDirectedSearchPrompt(text: string): boolean {
@@ -8795,6 +9161,69 @@ function isMissingMessageSearchFollowupTableError(error: any): boolean {
     && (text.includes('does not exist') || text.includes('relation'))
 }
 
+function isMissingMessageSearchPeriodTableError(error: any): boolean {
+  const code = String(error?.code ?? '')
+  if (code === '42P01') return true
+  const text = `${String(error?.message ?? '')} ${String(error?.details ?? '')}`.toLowerCase()
+  return text.includes('message_search_period_pending_confirmations')
+    && (text.includes('does not exist') || text.includes('relation'))
+}
+
+function buildMessageSearchPeriodPrompt(): LineReplyPayload {
+  return {
+    type: 'flex',
+    altText: '会話検索を開始します。期間を選んでください。1)1ヶ月 2)3ヶ月 3)6ヶ月 4)12ヶ月 5)全期間',
+    contents: {
+      type: 'bubble',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#E58A1F',
+        paddingAll: '12px',
+        contents: [
+          { type: 'text', text: '会話検索', weight: 'bold', color: '#FFFFFF', size: 'lg' },
+        ],
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'md',
+        contents: [
+          { type: 'text', text: 'まず検索範囲を番号で選んでください。', size: 'sm', wrap: true },
+          { type: 'text', text: '1) 1ヶ月', size: 'md', wrap: true },
+          { type: 'text', text: '2) 3ヶ月', size: 'md', wrap: true },
+          { type: 'text', text: '3) 6ヶ月', size: 'md', wrap: true },
+          { type: 'text', text: '4) 12ヶ月', size: 'md', wrap: true },
+          { type: 'text', text: '5) 全期間', size: 'md', wrap: true },
+        ],
+      },
+    },
+  }
+}
+
+function parseMessageSearchPeriodChoice(rawText: string): MessageRetentionDays | null {
+  const norm = normalizeSpaces(normalizeForRuleParsing(rawText)).toLowerCase()
+  if (!norm) return null
+  if (/^(1|１|1ヶ月|1か月|一ヶ月)$/.test(norm)) return 60
+  if (/^(2|２|3ヶ月|3か月|三ヶ月)$/.test(norm)) return 120
+  if (/^(3|３|6ヶ月|6か月|六ヶ月|半年)$/.test(norm)) return 180
+  if (/^(4|４|12ヶ月|12か月|十二ヶ月|1年|一年)$/.test(norm)) return 365
+  if (/^(5|５|全期間|無制限|フル|全履歴)$/.test(norm)) return 0
+  return null
+}
+
+function formatMessageSearchPeriodLabel(days: number): string {
+  if (days === 0) return '全期間'
+  if (days === 60) return '1ヶ月'
+  if (days === 120) return '3ヶ月'
+  if (days === 180) return '6ヶ月'
+  if (days === 365) return '12ヶ月'
+  if (days === 730) return '24ヶ月'
+  if (days === 1095) return '36ヶ月'
+  if (days >= 30 && days % 30 === 0) return `${Math.floor(days / 30)}ヶ月`
+  return `過去${days}日`
+}
+
 async function fetchPendingLibrarySearchConfirmation(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
@@ -8907,6 +9336,181 @@ async function savePendingLibrarySearchConfirmation(
     return false
   }
   return true
+}
+
+async function fetchPendingMessageSearchPeriod(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingMessageSearchPeriod | null> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(MESSAGE_SEARCH_PERIOD_PENDING_TABLE)
+    .select('id, conversation_key, keyword, search_scope, expires_at')
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    if (!isMissingMessageSearchPeriodTableError(error)) {
+      console.error('Failed to fetch message search period pending:', error)
+    }
+    return null
+  }
+  if (!data) return null
+  const scopeRaw = String((data as any).search_scope ?? '').trim()
+  const scope: MessageSearchScope = scopeRaw === 'current_room' ? 'current_room' : 'all_rooms'
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    keyword: String((data as any).keyword ?? ''),
+    search_scope: scope,
+    expires_at: String((data as any).expires_at ?? ''),
+  }
+}
+
+async function resolvePendingMessageSearchPeriod(
+  supabase: ReturnType<typeof createClient>,
+  pending: PendingMessageSearchPeriod,
+  status: 'confirmed' | 'cancelled' | 'expired' | 'superseded',
+): Promise<void> {
+  const { error } = await supabase
+    .from(MESSAGE_SEARCH_PERIOD_PENDING_TABLE)
+    .update({
+      status,
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('id', Number(pending.id))
+    .eq('status', 'pending')
+  if (error && !isMissingMessageSearchPeriodTableError(error)) {
+    console.error('Failed to resolve message search period pending:', error)
+  }
+}
+
+async function savePendingMessageSearchPeriod(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  command: MessageSearchCommand,
+): Promise<boolean> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + PENDING_CONFIRMATION_TTL_MIN * 60 * 1000).toISOString()
+
+  const { error: supersedeError } = await supabase
+    .from(MESSAGE_SEARCH_PERIOD_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: nowIso,
+    })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeError && !isMissingMessageSearchPeriodTableError(supersedeError)) {
+    console.error('Failed to supersede message search period pending:', supersedeError)
+  }
+
+  const { error: supersedeLibraryError } = await supabase
+    .from(LIBRARY_SEARCH_PENDING_TABLE)
+    .update({ status: 'superseded', resolved_at: nowIso })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeLibraryError && !isMissingLibraryPendingTableError(supersedeLibraryError)) {
+    console.error('Failed to supersede library pending when saving period pending:', supersedeLibraryError)
+  }
+
+  const { error: supersedeExpandError } = await supabase
+    .from(MESSAGE_SEARCH_EXPAND_PENDING_TABLE)
+    .update({ status: 'superseded', resolved_at: nowIso })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeExpandError && !isMissingMessageSearchExpandPendingTableError(supersedeExpandError)) {
+    console.error('Failed to supersede expand pending when saving period pending:', supersedeExpandError)
+  }
+
+  const { error: supersedeFollowupError } = await supabase
+    .from(MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE)
+    .update({ status: 'superseded', resolved_at: nowIso })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeFollowupError && !isMissingMessageSearchFollowupTableError(supersedeFollowupError)) {
+    console.error('Failed to supersede followup pending when saving period pending:', supersedeFollowupError)
+  }
+
+  const { error: insertError } = await supabase
+    .from(MESSAGE_SEARCH_PERIOD_PENDING_TABLE)
+    .insert({
+      conversation_key: conversationKey,
+      room_id: roomId,
+      user_id: userId,
+      keyword: command.keyword,
+      search_scope: command.scope,
+      status: 'pending',
+      expires_at: expiresAt,
+    })
+
+  if (insertError) {
+    if (!isMissingMessageSearchPeriodTableError(insertError)) {
+      console.error('Failed to save message search period pending:', insertError)
+    }
+    return false
+  }
+  return true
+}
+
+async function tryHandlePendingMessageSearchPeriod(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  librarySearchEnabled: boolean,
+  configuredRetentionDays: MessageRetentionDays,
+  excludedRoomIds: string[],
+  groqApiKey: string,
+  includeSavedMedia: boolean,
+): Promise<LineReplyPayload | null> {
+  const pending = await fetchPendingMessageSearchPeriod(supabase, roomId, userId)
+  if (!pending) return null
+  const expireAtMs = new Date(pending.expires_at).getTime()
+  if (!Number.isFinite(expireAtMs) || Date.now() >= expireAtMs) {
+    await resolvePendingMessageSearchPeriod(supabase, pending, 'expired')
+    return buildConversationSearchFlexReplies(
+      '会話検索の期間選択が期限切れです。もう一度「会話検索 キーワード」で開始してください。',
+      '会話検索',
+    )
+  }
+
+  const choice = parseMessageSearchPeriodChoice(text)
+  if (/(キャンセル|終了|やめる|中止|stop|cancel)/i.test(text.trim())) {
+    await resolvePendingMessageSearchPeriod(supabase, pending, 'cancelled')
+    return buildConversationSearchFlexReplies('会話検索をキャンセルしました。', '会話検索')
+  }
+  if (choice == null) {
+    return buildMessageSearchPeriodPrompt()
+  }
+
+  await resolvePendingMessageSearchPeriod(supabase, pending, 'confirmed')
+  const command: MessageSearchCommand = {
+    kind: 'search_messages',
+    keyword: pending.keyword,
+    days: choice,
+    scope: pending.search_scope,
+    fullRetentionSearch: choice === 0,
+  }
+  return await buildMessageSearchReply(
+    command,
+    null,
+    supabase,
+    roomId,
+    userId,
+    librarySearchEnabled,
+    configuredRetentionDays,
+    excludedRoomIds,
+    groqApiKey,
+    includeSavedMedia,
+    `会話検索 ${pending.keyword}`,
+  )
 }
 
 async function fetchPendingMessageSearchExpand(
@@ -9041,20 +9645,23 @@ async function tryHandlePendingMessageSearchExpand(
   userId: string | null,
   excludedRoomIds: string[],
   groqApiKey: string,
-): Promise<string[] | null> {
+): Promise<LineReplyPayload | null> {
   const pending = await fetchPendingMessageSearchExpand(supabase, roomId, userId)
   if (!pending) return null
 
   const expireAtMs = new Date(pending.expires_at).getTime()
   if (!Number.isFinite(expireAtMs) || Date.now() >= expireAtMs) {
     await resolvePendingMessageSearchExpand(supabase, pending, 'expired')
-    return ['さらに古い会話を検索する確認が期限切れです。もう一度会話検索からやり直してください。']
+    return buildConversationSearchFlexReplies(
+      'さらに古い会話を検索する確認が期限切れです。もう一度会話検索からやり直してください。',
+      '会話検索結果',
+    )
   }
 
   const decision = normalizeMessageSearchExpandConfirmation(text)
   if (decision === 'no') {
     await resolvePendingMessageSearchExpand(supabase, pending, 'cancelled')
-    return ['追加の古い帯への会話検索をキャンセルしました。']
+    return buildConversationSearchFlexReplies('追加の古い帯への会話検索をキャンセルしました。', '会話検索結果')
   }
   if (decision !== 'yes') {
     return null
@@ -9064,7 +9671,10 @@ async function tryHandlePendingMessageSearchExpand(
     && isRoomExcludedForMessageSearch(excludedRoomIds, roomId)
   if (currentRoomExcluded) {
     await resolvePendingMessageSearchExpand(supabase, pending, 'cancelled')
-    return ['このルームは会話検索の対象に含まれていません。管理画面のユーザー権限で、このルームにチェックを入れて対象にしてください。']
+    return buildConversationSearchFlexReplies(
+      'このルームは会話検索の対象に含まれていません。管理画面のユーザー権限で、このルームにチェックを入れて対象にしてください。',
+      '会話検索結果',
+    )
   }
 
   const windows = pending.stage_windows
@@ -9072,13 +9682,13 @@ async function tryHandlePendingMessageSearchExpand(
   const maxRingIdx = windows.length - 2
   if (ringIndex < 0 || ringIndex > maxRingIdx) {
     await resolvePendingMessageSearchExpand(supabase, pending, 'expired')
-    return ['追加検索の状態が不正です。もう一度会話検索からやり直してください。']
+    return buildConversationSearchFlexReplies('追加検索の状態が不正です。もう一度会話検索からやり直してください。', '会話検索結果')
   }
 
   const bounds = messageSearchRingTimeBounds(ringIndex, windows)
   if (!bounds) {
     await resolvePendingMessageSearchExpand(supabase, pending, 'expired')
-    return ['追加検索の帯の計算に失敗しました。もう一度会話検索からやり直してください。']
+    return buildConversationSearchFlexReplies('追加検索の帯の計算に失敗しました。もう一度会話検索からやり直してください。', '会話検索結果')
   }
 
   const excludedSet = new Set((excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0))
@@ -9100,7 +9710,7 @@ async function tryHandlePendingMessageSearchExpand(
     fetched = batch.rows
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    return [`会話検索（追加の古い帯）に失敗しました。${msg}`]
+    return buildConversationSearchFlexReplies(`会話検索（追加の古い帯）に失敗しました。${msg}`, '会話検索結果')
   }
 
   const rows = fetched.filter((row) => {
@@ -9134,7 +9744,7 @@ async function tryHandlePendingMessageSearchExpand(
   )
 
   const scopeLabel = pending.search_scope === 'all_rooms' ? '全ルーム横断' : 'このルーム'
-  const periodLabel = effectiveDays > 0 ? `過去${effectiveDays}日` : '全期間'
+  const periodLabel = formatMessageSearchPeriodLabel(effectiveDays)
   const ringCaption = formatMessageSearchRingCaption(ringIndex, windows)
 
   const lines: string[] = [
@@ -9190,7 +9800,207 @@ async function tryHandlePendingMessageSearchExpand(
     await resolvePendingMessageSearchExpand(supabase, pending, 'confirmed')
   }
 
-  return splitTextForLineReply(lines.join('\n'))
+  return buildConversationSearchFlexReplies(lines.join('\n'), '会話検索結果（追加）')
+}
+
+function parseMessageSearchDetailSelection(rawText: string): number | 'cancel' | null {
+  const normalized = normalizeForRuleParsing(rawText).trim().toLowerCase()
+  if (!normalized) return null
+  if (/(キャンセル|終了|やめる|閉じる|stop|cancel)/.test(normalized)) return 'cancel'
+  const m = normalized.match(/(?:^|\s)(\d{1,2})(?:\s*(?:件目|番|の全文|全文))?(?:\s|$)/)
+  if (!m) return null
+  const value = Number(m[1])
+  if (!Number.isInteger(value) || value <= 0) return null
+  return value
+}
+
+async function fetchPendingMessageSearchFollowup(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+): Promise<PendingMessageSearchFollowup | null> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const { data, error } = await supabase
+    .from(MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE)
+    .select('id, conversation_key, keyword, search_days, search_scope, retention_adjusted, offer_library, expires_at')
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) {
+    if (!isMissingMessageSearchFollowupTableError(error)) {
+      console.error('Failed to fetch message search followup pending:', error)
+    }
+    return null
+  }
+  if (!data) return null
+  const daysRaw = Number((data as any).search_days)
+  const days = isSupportedMessageRetentionDays(daysRaw) ? daysRaw : DEFAULT_MESSAGE_RETENTION_DAYS
+  const scopeRaw = String((data as any).search_scope ?? '').trim()
+  const scope: MessageSearchScope = scopeRaw === 'current_room' ? 'current_room' : 'all_rooms'
+  return {
+    id: String((data as any).id ?? ''),
+    conversation_key: String((data as any).conversation_key ?? ''),
+    keyword: String((data as any).keyword ?? ''),
+    search_days: days,
+    search_scope: scope,
+    retention_adjusted: Boolean((data as any).retention_adjusted),
+    offer_library: Boolean((data as any).offer_library),
+    expires_at: String((data as any).expires_at ?? ''),
+  }
+}
+
+async function resolvePendingMessageSearchFollowup(
+  supabase: ReturnType<typeof createClient>,
+  pending: PendingMessageSearchFollowup,
+  status: 'confirmed' | 'cancelled' | 'expired' | 'superseded',
+): Promise<void> {
+  const { error } = await supabase
+    .from(MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE)
+    .update({
+      status,
+      resolved_at: new Date().toISOString(),
+    })
+    .eq('id', Number(pending.id))
+    .eq('status', 'pending')
+  if (error && !isMissingMessageSearchFollowupTableError(error)) {
+    console.error('Failed to resolve message search followup pending:', error)
+  }
+}
+
+async function savePendingMessageSearchFollowup(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  command: MessageSearchCommand,
+  effectiveSearchDays: MessageRetentionDays,
+  retentionAdjusted: boolean,
+  offerLibrary: boolean,
+): Promise<boolean> {
+  const conversationKey = buildConversationKey(roomId, userId)
+  const nowIso = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + PENDING_CONFIRMATION_TTL_MIN * 60 * 1000).toISOString()
+
+  const { error: supersedeError } = await supabase
+    .from(MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE)
+    .update({
+      status: 'superseded',
+      resolved_at: nowIso,
+    })
+    .eq('conversation_key', conversationKey)
+    .eq('status', 'pending')
+  if (supersedeError && !isMissingMessageSearchFollowupTableError(supersedeError)) {
+    console.error('Failed to supersede message search followup pending:', supersedeError)
+  }
+
+  const { error: insertError } = await supabase
+    .from(MESSAGE_SEARCH_FOLLOWUP_PENDING_TABLE)
+    .insert({
+      conversation_key: conversationKey,
+      room_id: roomId,
+      user_id: userId,
+      keyword: command.keyword,
+      search_days: effectiveSearchDays,
+      search_scope: command.scope,
+      retention_adjusted: retentionAdjusted,
+      offer_library: offerLibrary,
+      status: 'pending',
+      expires_at: expiresAt,
+    })
+  if (insertError) {
+    if (!isMissingMessageSearchFollowupTableError(insertError)) {
+      console.error('Failed to save message search followup pending:', insertError)
+    }
+    return false
+  }
+  return true
+}
+
+async function tryHandlePendingMessageSearchFollowup(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  excludedRoomIds: string[],
+): Promise<LineReplyPayload | null> {
+  const pending = await fetchPendingMessageSearchFollowup(supabase, roomId, userId)
+  if (!pending) return null
+
+  const expireAtMs = new Date(pending.expires_at).getTime()
+  if (!Number.isFinite(expireAtMs) || Date.now() >= expireAtMs) {
+    await resolvePendingMessageSearchFollowup(supabase, pending, 'expired')
+    return buildConversationSearchFlexReplies(
+      '会話検索の詳細表示の受付が期限切れです。もう一度会話検索を実行してください。',
+      '会話検索結果',
+    )
+  }
+
+  const selection = parseMessageSearchDetailSelection(text)
+  if (selection === 'cancel') {
+    await resolvePendingMessageSearchFollowup(supabase, pending, 'cancelled')
+    return buildConversationSearchFlexReplies('会話検索の詳細表示を終了しました。', '会話検索結果')
+  }
+  if (selection == null) return null
+
+  const sinceIso = pending.search_days > 0
+    ? new Date(Date.now() - pending.search_days * 24 * 60 * 60 * 1000).toISOString()
+    : null
+  let fetched: SearchMessageRow[] = []
+  try {
+    const batch = await fetchLineMessagesForSearchBatched(
+      supabase,
+      roomId,
+      pending.search_scope,
+      sinceIso,
+      MESSAGE_SEARCH_STAGE_HARD_MAX_ROWS,
+      pending.keyword,
+      excludedRoomIds,
+    )
+    fetched = batch.rows
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return buildConversationSearchFlexReplies(`会話検索詳細の取得に失敗しました。${msg}`, '会話検索結果')
+  }
+
+  const excludedSet = new Set((excludedRoomIds ?? []).map((v) => String(v ?? '').trim()).filter((v) => v.length > 0))
+  const rows = fetched.filter((row) => {
+    if (pending.search_scope !== 'all_rooms') return true
+    return !excludedSet.has(String(row.room_id ?? '').trim())
+  })
+  const hitsRaw = rows.filter((row) => {
+    if (!messageMatchesKeyword(row.content, pending.keyword)) return false
+    if (isLikelyBotConversationText(row.content)) return false
+    return true
+  })
+  if (hitsRaw.length === 0) {
+    return buildConversationSearchFlexReplies(
+      `現在の一致結果が見つかりませんでした。もう一度「会話検索 ${pending.keyword}」を実行してください。`,
+      '会話検索結果',
+    )
+  }
+  if (selection > hitsRaw.length) {
+    return buildConversationSearchFlexReplies(
+      `指定番号が範囲外です。1〜${hitsRaw.length}で指定してください。`,
+      '会話検索結果',
+    )
+  }
+  const row = hitsRaw[selection - 1]
+  const roomLabel = pending.search_scope === 'all_rooms'
+    ? (await loadRoomLabelsForHits(supabase, [{ room_id: row.room_id }])).get(row.room_id) ?? row.room_id
+    : null
+  const lines: string[] = [
+    `会話検索 詳細 ${selection}件目`,
+    `キーワード: ${pending.keyword}`,
+    ...(roomLabel ? [`ルーム: ${roomLabel}`] : []),
+    `日時: ${formatSearchDateTime(row.created_at)}`,
+    '',
+    '全文:',
+    normalizeMessagePreviewText(String(row.content ?? '')) || '（内容なし）',
+    '',
+    `※他の全文は「2」や「3の全文」と返信してください（${PENDING_CONFIRMATION_TTL_MIN}分以内）。`,
+  ]
+  return buildConversationSearchFlexReplies(lines.join('\n'), '会話検索結果（詳細）')
 }
 
 function encodeLegacyPendingContent(payload: {
@@ -9892,7 +10702,13 @@ async function tryHandlePendingCalendarConfirmation(
   }
 
   const command = buildCalendarCreateCommandFromPending(pending, false)
-  const result = await createCalendarEvent(command, env, roomId, userId, undefined, sourceMeta)
+  const pendingSourceMeetingUrl = extractMeetingUrlFromText(String(pending.source_text ?? ''))
+  const mergedSourceMeta: CalendarSourceMeta = {
+    roomName: sourceMeta?.roomName ?? null,
+    userName: sourceMeta?.userName ?? null,
+    meetingUrl: pendingSourceMeetingUrl ?? sourceMeta?.meetingUrl ?? null,
+  }
+  const result = await createCalendarEvent(command, env, roomId, userId, undefined, mergedSourceMeta)
   if (!result.ok) {
     return `予定登録に失敗しました。${result.error}\n再試行する場合は「はい」、中止する場合は「いいえ」を送ってください。`
   }
@@ -10280,6 +11096,8 @@ async function tryHandlePendingLibrarySearchConfirmation(
   const decision = normalizeConfirmationDecision(text)
   if (decision === 'no') {
     await resolvePendingLibrarySearchConfirmation(supabase, pending, 'cancelled')
+    const followupPending = await fetchPendingMessageSearchFollowup(supabase, roomId, userId)
+    if (followupPending) await resolvePendingMessageSearchFollowup(supabase, followupPending, 'cancelled')
     return ['資料ライブラリ検索をキャンセルしました。']
   }
   if (decision !== 'yes') {
@@ -11731,6 +12549,13 @@ async function createCalendarEvent(
   const accessToken = providedAccessToken || await fetchGoogleAccessToken(env)
   const startDateTimeLocal = `${command.date}T${normalizedStartTime}:00+09:00`
   const endDateTimeLocal = `${endLocal.date}T${endLocal.time}:00+09:00`
+  const metadataLines = buildCalendarSourceMetadataLines(roomId, userId, sourceMeta)
+  const descriptionParts: string[] = []
+  const commandDescription = cleanCalendarDescription(String(command.description ?? ''))
+  if (commandDescription) descriptionParts.push(commandDescription)
+  const meetingUrl = normalizeMeetingUrl(String(sourceMeta?.meetingUrl ?? ''))
+  if (meetingUrl) descriptionParts.push(`会議リンク: ${meetingUrl}`)
+  const description = composeCalendarDescriptionWithMetadata(descriptionParts.join('\n\n'), metadataLines)
 
   const calendarPath = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(env.calendarId)}/events`
   const response = await fetch(calendarPath, {
@@ -11742,7 +12567,7 @@ async function createCalendarEvent(
     body: JSON.stringify({
       summary: command.title,
       ...(command.location ? { location: command.location } : {}),
-      description: buildCalendarSourceMetadataLines(roomId, userId, sourceMeta).join('\n'),
+      description,
       extendedProperties: {
         private: buildCalendarSourceMetadataMap(roomId, userId, sourceMeta),
       },
@@ -11808,7 +12633,7 @@ async function listCalendarEventsReply(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
   userId: string | null,
-): Promise<string> {
+): Promise<LineReplyPayload> {
   const accessToken = await fetchGoogleAccessToken(env)
   const range = resolveListRange(command)
   const keywordForFilter = command.keyword ? relaxCalendarListKeywordForFilter(String(command.keyword)) : ''
@@ -11851,27 +12676,79 @@ async function listCalendarEventsReply(
     ? `予定一覧（${selectedRange.label}${expandedNote} / キーワード: ${keywordForFilter || command.keyword}）`
     : `予定一覧（${selectedRange.label}）`
 
-  const lines: string[] = [heading]
-  for (let i = 0; i < items.length; i += 1) {
-    const item = items[i]
+  const shownItems = items.slice(0, 8)
+  const bodyContents: Array<Record<string, unknown>> = []
+  for (let i = 0; i < shownItems.length; i += 1) {
+    const item = shownItems[i]
     const detail = formatEventDetailBlock(item, env.timezone)
-    lines.push(`${i + 1}.`)
-    lines.push(`  日付: ${detail.date}`)
-    lines.push(`  時間: ${detail.time}`)
-    lines.push(`  予定: ${detail.title}`)
-    lines.push(`  内容: ${detail.content}`)
-    if (i < items.length - 1) {
-      lines.push('')
+    if (i > 0) bodyContents.push({ type: 'separator', margin: 'md' })
+    const itemContents: Array<Record<string, unknown>> = [
+      { type: 'text', text: `${i + 1}. ${detail.title}`, size: 'md', weight: 'bold', wrap: true },
+      { type: 'text', text: `日付: ${detail.date}`, size: 'sm', color: '#333333', wrap: true },
+      { type: 'text', text: `時間: ${detail.time}`, size: 'sm', color: '#333333', wrap: true },
+      { type: 'text', text: `内容:\n${detail.content}`, size: 'sm', color: '#333333', wrap: true },
+    ]
+    if (detail.meetingUrl) {
+      itemContents.push({
+        type: 'button',
+        style: 'link',
+        height: 'sm',
+        action: {
+          type: 'uri',
+          label: '会議リンクを開く',
+          uri: detail.meetingUrl,
+        },
+      })
     }
+    bodyContents.push({
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      contents: itemContents,
+    })
   }
-  lines.push('')
-  if (items.length === 1) {
-    lines.push('この予定を変更する場合は、このメッセージに返信して「時間を19:00に変更」のように送ってください。')
-  } else {
-    lines.push('表示した予定を変更する場合は、このメッセージに返信して送ってください。')
-    lines.push('例: 「2件目の時間を19:00に変更」「会議を店長会議に変更」')
+  if (items.length > shownItems.length) {
+    bodyContents.push({ type: 'separator', margin: 'md' })
+    bodyContents.push({
+      type: 'text',
+      text: `他 ${items.length - shownItems.length} 件は表示を省略しています。`,
+      size: 'xs',
+      color: '#888888',
+      wrap: true,
+    })
   }
-  return lines.join('\n')
+  const guideText = items.length === 1
+    ? 'この予定を変更する場合は、このメッセージに返信して「時間を19:00に変更」のように送ってください。'
+    : '表示した予定を変更する場合は、このメッセージに返信して送ってください。例: 「2件目の時間を19:00に変更」'
+  bodyContents.push({ type: 'separator', margin: 'md' })
+  bodyContents.push({ type: 'text', text: guideText, size: 'xs', color: '#666666', wrap: true })
+
+  return [{
+    type: 'flex',
+    altText: clipMediaPreview(heading, 300),
+    contents: {
+      type: 'bubble',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#1E4FB1',
+        paddingTop: 'md',
+        paddingBottom: 'md',
+        paddingStart: 'md',
+        paddingEnd: 'md',
+        contents: [
+          { type: 'text', text: '予定一覧', size: 'lg', weight: 'bold', color: '#FFFFFF' },
+          { type: 'text', text: heading.replace(/^予定一覧/, ''), size: 'sm', color: '#CCFFDD', wrap: true, margin: 'sm' },
+        ],
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: bodyContents,
+      },
+    },
+  }]
 }
 
 async function fetchCalendarEventsForListRange(
@@ -12366,7 +13243,7 @@ function buildCalendarDetailTemplateLines(detail: {
 function formatEventDetailBlock(
   event: GoogleCalendarEvent,
   timezone: string,
-): { date: string; time: string; title: string; content: string } {
+): { date: string; time: string; title: string; content: string; meetingUrl: string | null } {
   let date = '(日付不明)'
   let time = '(時間不明)'
 
@@ -12390,7 +13267,8 @@ function formatEventDetailBlock(
 
   const title = cleanCalendarTitle(String(event.summary ?? '(無題)'))
   const content = formatEventContentForList(event)
-  return { date, time, title, content }
+  const meetingUrl = extractCalendarMeetingUrl(event)
+  return { date, time, title, content, meetingUrl }
 }
 
 function formatEventContentForList(event: GoogleCalendarEvent): string {
@@ -12410,6 +13288,21 @@ function formatEventContentForList(event: GoogleCalendarEvent): string {
   return pieces.join(' / ')
 }
 
+function extractCalendarMeetingUrl(event: GoogleCalendarEvent): string | null {
+  const candidates = [
+    String(event.hangoutLink ?? ''),
+    String(event.description ?? ''),
+    String(event.location ?? ''),
+  ]
+  for (const candidate of candidates) {
+    const match = candidate.match(/https?:\/\/[^\s<>"')]+/i)
+    if (!match) continue
+    const url = match[0].replace(/[),.;]+$/, '')
+    if (url.startsWith('http://') || url.startsWith('https://')) return url
+  }
+  return null
+}
+
 function sanitizeEventDescriptionForList(raw: string): string {
   if (!raw) return ''
   const lines = raw
@@ -12421,8 +13314,29 @@ function sanitizeEventDescriptionForList(raw: string): string {
   const merged = normalizeInlineText(lines.join(' / '))
   const cleaned = stripCalendarSourceMetadataFragments(merged)
   if (!cleaned) return ''
-  if (cleaned.length > 140) return `${cleaned.slice(0, 140)}...`
+  const hasUrl = /https?:\/\/\S+/i.test(cleaned)
+  if (!hasUrl && cleaned.length > 140) return `${cleaned.slice(0, 140)}...`
+  if (hasUrl && cleaned.length > 500) return `${cleaned.slice(0, 500)}...`
   return cleaned
+}
+
+function normalizeMeetingUrl(raw: string): string {
+  const text = normalizeInlineText(String(raw ?? ''))
+  if (!text) return ''
+  if (/^https?:\/\//i.test(text)) return text
+  if (/^meet\.google\.com\//i.test(text)) return `https://${text}`
+  return ''
+}
+
+function extractMeetingUrlFromText(raw: string): string | null {
+  const text = String(raw ?? '')
+  if (!text) return null
+  const withScheme = text.match(/https?:\/\/meet\.google\.com\/[a-z0-9\-?&=_/%#]+/i)?.[0] ?? ''
+  const normalizedWithScheme = normalizeMeetingUrl(withScheme)
+  if (normalizedWithScheme) return normalizedWithScheme
+  const plain = text.match(/\bmeet\.google\.com\/[a-z0-9\-?&=_/%#]+/i)?.[0] ?? ''
+  const normalizedPlain = normalizeMeetingUrl(plain)
+  return normalizedPlain || null
 }
 
 function normalizeInlineText(raw: string): string {
@@ -12697,6 +13611,47 @@ function splitTextForLineReply(text: string, maxLength = 4900): string[] {
 
   flush()
   return chunks.length > 0 ? chunks : ['（空メッセージ）']
+}
+
+function buildConversationSearchFlexReplies(text: string, title: string): LineReplyPayload {
+  const chunks = splitTextForLineReply(text, 1800).filter((item) => item.length > 0)
+  return chunks.map((chunk, index) => ({
+    type: 'flex' as const,
+    altText: `${title}${chunks.length > 1 ? ` (${index + 1}/${chunks.length})` : ''}`.slice(0, 400),
+    contents: {
+      type: 'bubble',
+      header: {
+        type: 'box',
+        layout: 'vertical',
+        backgroundColor: '#E58A1F',
+        paddingAll: '12px',
+        contents: [
+          {
+            type: 'text',
+            text: title,
+            weight: 'bold',
+            color: '#FFFFFF',
+            size: 'md',
+            wrap: true,
+          },
+        ],
+      },
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'md',
+        contents: [
+          {
+            type: 'text',
+            text: chunk,
+            wrap: true,
+            size: 'sm',
+            color: '#222222',
+          },
+        ],
+      },
+    },
+  }))
 }
 
 function normalizeLineReplyMessages(payload: LineReplyPayload): LineReplyMessage[] {

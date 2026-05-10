@@ -2039,7 +2039,7 @@ async function fetchReceiptSalesState(
   const dayKeys = buildJstDateKeysForMonth(month)
   const dayKeySet = new Set(dayKeys)
 
-  const { data, error } = await supabase
+  let salesQuery = supabase
     .from("line_receipt_entries")
     .select(
       "store_partition_key, store_name, receipt_date, created_at, gross_sales_yen, net_sales_yen, tax_amount_yen, party_count, guest_count",
@@ -2048,6 +2048,13 @@ async function fetchReceiptSalesState(
     .lt("created_at", range.endIso)
     .order("created_at", { ascending: true })
     .limit(20000)
+
+  // 店舗指定時は DB 側で絞る（全店スキャン回避）。インデックス (store_partition_key, created_at) を利用
+  if (selectedStoreKeyRaw) {
+    salesQuery = salesQuery.eq("store_partition_key", selectedStoreKeyRaw)
+  }
+
+  const { data, error } = await salesQuery
 
   if (error) {
     throw { status: 500, message: `Failed to fetch receipt sales data: ${error.message}` } satisfies AppError
@@ -2083,7 +2090,6 @@ async function fetchReceiptSalesState(
     const storeNameRaw = toSafeString((row as Record<string, unknown>).store_name) || storeKey
     const dayKey = resolveReceiptEntryDateKeyForMonth(
       (row as Record<string, unknown>).receipt_date,
-      (row as Record<string, unknown>).created_at,
       month,
     )
     if (!dayKey || !dayKeySet.has(dayKey)) continue
@@ -2320,16 +2326,13 @@ async function fetchAnalyticsMonthly(
 
 function resolveReceiptEntryDateKeyForMonth(
   receiptDateValue: unknown,
-  createdAtValue: unknown,
   month: string,
 ): string | null {
   const receiptDate = toSafeString(receiptDateValue)
   if (/^\d{4}-(0[1-9]|1[0-2])-\d{2}$/.test(receiptDate) && receiptDate.startsWith(`${month}-`)) {
     return receiptDate
   }
-  const createdDate = toJstDateKeyFromIso(createdAtValue)
-  if (!createdDate || !createdDate.startsWith(`${month}-`)) return null
-  return createdDate
+  return null
 }
 
 function toJstDateKeyFromIso(value: unknown): string | null {

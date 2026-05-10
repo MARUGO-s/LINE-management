@@ -1888,15 +1888,19 @@ function formatCalendarEventDetail(
 }
 
 function formatCalendarEventContent(event: GoogleCalendarEvent): string {
-  const pieces: string[] = []
+  const sections: string[] = []
   const location = normalizeInlineText(String(event.location ?? ''))
-  if (location) pieces.push(location)
+  const rawDescription = String(event.description ?? '')
+  const metadata = extractLineWebhookDescriptionMetadata(rawDescription)
+  const description = sanitizeCalendarDescription(rawDescription)
 
-  const description = sanitizeCalendarDescription(String(event.description ?? ''))
-  if (description) pieces.push(description)
+  if (location) sections.push(`場所: ${location}`)
+  if (description) sections.push(`内容:\n${description}`)
+  if (metadata.roomName) sections.push(`ルーム:\n${metadata.roomName}`)
+  if (metadata.userName) sections.push(`投稿者:\n${metadata.userName}`)
 
-  if (pieces.length === 0) return '（内容なし）'
-  return pieces.join(' / ')
+  if (sections.length === 0) return '（内容なし）'
+  return sections.join('\n\n')
 }
 
 function sanitizeCalendarDescription(raw: string): string {
@@ -1905,11 +1909,24 @@ function sanitizeCalendarDescription(raw: string): string {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .filter((line) => !/^(LINE room_id:|LINE user_id:|source:\s*line-webhook)/i.test(line))
-  const merged = normalizeInlineText(lines.join(' / '))
+    .filter((line) => !/^(LINE (?:room_id|user_id|room_name|user_name):|source:\s*line-webhook)/i.test(line))
+  const merged = lines.map((line) => normalizeInlineText(line)).filter(Boolean).join('\n')
   if (!merged) return ''
   if (merged.length > 140) return `${merged.slice(0, 140)}...`
   return merged
+}
+
+function extractLineWebhookDescriptionMetadata(raw: string): { roomName: string; userName: string } {
+  const lines = String(raw ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  let roomName = ''
+  let userName = ''
+  for (const line of lines) {
+    const roomMatch = line.match(/^LINE\s*room_name\s*:\s*(.+)$/i)
+    if (roomMatch?.[1]) roomName = normalizeInlineText(roomMatch[1])
+    const userMatch = line.match(/^LINE\s*user_name\s*:\s*(.+)$/i)
+    if (userMatch?.[1]) userName = normalizeInlineText(userMatch[1])
+  }
+  return { roomName, userName }
 }
 
 function normalizeInlineText(raw: string): string {
