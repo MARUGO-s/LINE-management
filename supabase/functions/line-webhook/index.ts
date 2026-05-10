@@ -3966,7 +3966,8 @@ function buildReceiptDuplicateConfirmationFlexReply(
   receipt: LineImageReceiptAnalysis,
   receiptDateIso: string,
 ): LineReplyMessage[] {
-  const labelFlex = 3
+  const labelFlex = 7
+  const valueFlex = 5
   const cap = (raw: string | null | undefined, max: number) => {
     const s = String(raw ?? '').trim()
     if (!s) return '-'
@@ -3986,8 +3987,8 @@ function buildReceiptDuplicateConfirmationFlexReply(
     layout: 'baseline',
     spacing: 'sm',
     contents: [
-      { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', wrap: true, flex: labelFlex },
-      { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: 5, weight: 'bold' },
+      { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
+      { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: valueFlex, weight: 'bold' },
     ],
   }))
 
@@ -6828,6 +6829,7 @@ function buildLineImageAnalysisReply(preview: string): string {
 function buildReceiptFlexBaselineRows(
   rows: Array<{ label: string; value: string; margin?: 'md' }>,
   labelFlex: number,
+  valueFlex = 5,
 ): Array<Record<string, unknown>> {
   return rows.map((row) => {
     const payload: Record<string, unknown> = {
@@ -6835,8 +6837,9 @@ function buildReceiptFlexBaselineRows(
       layout: 'baseline',
       spacing: 'sm',
       contents: [
-        { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: true, flex: labelFlex },
-        { type: 'text', text: lineSafeFlexText(row.value, 240), size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
+        // ラベルは折り返さない（「総売上（税込）」が「税」と「込）」で分断されないようにする）
+        { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
+        { type: 'text', text: lineSafeFlexText(row.value, 240), size: 'sm', wrap: true, color: '#1F1F1F', flex: valueFlex },
       ],
     }
     if (row.margin) payload.margin = row.margin
@@ -6849,7 +6852,8 @@ function buildLineReceiptImageAnalysisReply(
   monthCumulativeTotals: MonthCumulativeTotals | null = null,
   options?: { correctionCommandText?: string; budgetRows?: Array<{ label: string; value: string; margin?: 'md' }> },
 ): LineReplyMessage[] {
-  const labelFlex = 3
+  const labelFlex = 7
+  const valueFlex = 5
   const parsedDateIso = parseReceiptDateToIso(receipt.date)
   const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? receipt.date
   const cum = monthCumulativeTotals ?? { grossSalesYen: null, partyCount: null, guestCount: null }
@@ -6888,7 +6892,7 @@ function buildLineReceiptImageAnalysisReply(
 
   const bodyContents: Array<Record<string, unknown>> = []
 
-  const baseDetailRows = buildReceiptFlexBaselineRows(baseRows, labelFlex)
+  const baseDetailRows = buildReceiptFlexBaselineRows(baseRows, labelFlex, valueFlex)
   if (baseDetailRows.length > 0) {
     bodyContents.push({
       type: 'box',
@@ -6913,11 +6917,11 @@ function buildLineReceiptImageAnalysisReply(
       type: 'box',
       layout: 'vertical',
       spacing: 'xs',
-      contents: buildReceiptFlexBaselineRows(budgetRows, labelFlex),
+      contents: buildReceiptFlexBaselineRows(budgetRows, labelFlex, valueFlex),
     })
   }
 
-  const monthDetailRows = buildReceiptFlexBaselineRows(monthRows, labelFlex)
+  const monthDetailRows = buildReceiptFlexBaselineRows(monthRows, labelFlex, valueFlex)
   if (monthDetailRows.length > 0) {
     bodyContents.push({
       type: 'box',
