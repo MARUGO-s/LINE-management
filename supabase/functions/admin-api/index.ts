@@ -291,6 +291,15 @@ Deno.serve(async (req) => {
       return json(receiptSalesState, 200)
     }
 
+    if (req.method === "PUT" && path === "/receipts/sales-budget") {
+      const body = await parseJson(req)
+      if (!isRecord(body)) {
+        throw { status: 400, message: "Invalid JSON body." } satisfies AppError
+      }
+      const result = await upsertReceiptSalesBudget(supabase, body)
+      return json(result, 200)
+    }
+
     if (req.method === "GET" && path === "/analytics/monthly") {
       const result = await fetchAnalyticsMonthly(supabase, url)
       return json(result, 200)
@@ -2029,6 +2038,93 @@ async function fetchReservationSearchState(
   }
 }
 
+function normalizeBudgetStoreKey(raw: string): string {
+  const s = String(raw ?? "").trim()
+  return s || "__all__"
+}
+
+async function fetchMonthBudgetYen(
+  supabase: ReturnType<typeof createClient>,
+  storeKeyQueryParam: string,
+  month: string,
+): Promise<number | null> {
+  const store_partition_key = normalizeBudgetStoreKey(storeKeyQueryParam)
+  const { data, error } = await supabase
+    .from("line_sales_month_budgets")
+    .select("budget_yen")
+    .eq("store_partition_key", store_partition_key)
+    .eq("target_month", month)
+    .maybeSingle()
+
+  if (error) {
+    throw { status: 500, message: `Failed to fetch sales budget: ${error.message}` } satisfies AppError
+  }
+  if (!data) return null
+  const n = toNonNegativeInteger((data as { budget_yen?: unknown }).budget_yen)
+  return n > 0 ? n : null
+}
+
+async function upsertReceiptSalesBudget(
+  supabase: ReturnType<typeof createClient>,
+  body: Record<string, unknown>,
+) {
+  const store_partition_key = normalizeBudgetStoreKey(toSafeString(body.store_key))
+  const month = normalizeCalendarMonthParam(toSafeString(body.month))
+  const rawBudget = body.budget_yen
+
+  const clearAndReturn = async () => {
+    const { error } = await supabase
+      .from("line_sales_month_budgets")
+      .delete()
+      .eq("store_partition_key", store_partition_key)
+      .eq("target_month", month)
+    if (error) {
+      throw { status: 500, message: `Failed to clear sales budget: ${error.message}` } satisfies AppError
+    }
+    return {
+      month_budget_yen: null as number | null,
+      store_partition_key,
+      month,
+    }
+  }
+
+  if (rawBudget === null || rawBudget === undefined || rawBudget === "") {
+    return await clearAndReturn()
+  }
+
+  const budgetYen = toNonNegativeInteger(rawBudget)
+  if (budgetYen <= 0) {
+    return await clearAndReturn()
+  }
+
+  const updatedAt = new Date().toISOString()
+  const { data, error } = await supabase
+    .from("line_sales_month_budgets")
+    .upsert(
+      {
+        store_partition_key,
+        target_month: month,
+        budget_yen: budgetYen,
+        updated_at: updatedAt,
+      },
+      { onConflict: "store_partition_key,target_month" },
+    )
+    .select("budget_yen")
+    .maybeSingle()
+
+  if (error) {
+    throw { status: 500, message: `Failed to save sales budget: ${error.message}` } satisfies AppError
+  }
+
+  const row = data as { budget_yen?: unknown } | null
+  const out = row != null ? toNonNegativeInteger(row.budget_yen) : budgetYen
+  return {
+    month_budget_yen: out > 0 ? out : null,
+    store_partition_key,
+    month,
+  }
+}
+
 async function fetchReceiptSalesState(
   supabase: ReturnType<typeof createClient>,
   url: URL,
@@ -2196,8 +2292,11 @@ async function fetchReceiptSalesState(
   const monthStartDate = dayKeys.length > 0 ? dayKeys[0] : `${month}-01`
   const monthEndDate = dayKeys.length > 0 ? dayKeys[dayKeys.length - 1] : `${month}-01`
 
+  const month_budget_yen = await fetchMonthBudgetYen(supabase, selectedStoreKeyRaw, month)
+
   return {
     month,
+    month_budget_yen,
     month_start_iso: range.startIso,
     month_end_iso: range.endIso,
     month_start_date: monthStartDate,

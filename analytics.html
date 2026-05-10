@@ -448,7 +448,7 @@
     </div>
     <div class="controls budget-row" style="margin-top:10px;flex-wrap:wrap;align-items:flex-end;gap:8px">
       <label style="display:flex;flex-direction:column;gap:4px;font-size:0.85rem;color:var(--sub);min-width:0">
-        <span>月間予算（円）<small style="font-weight:400"> — 表示月・選択店舗（ブラウザに保存）</small></span>
+        <span>月間予算（円）<small style="font-weight:400"> — 表示月・選択店舗（データベースに保存）</small></span>
         <input id="monthBudgetInput" class="input" type="number" min="0" step="1000" inputmode="numeric" placeholder="未設定" style="max-width:14rem">
       </label>
       <button id="monthBudgetSaveBtn" type="button" class="btn primary">保存</button>
@@ -586,7 +586,6 @@
 
 const TOKEN_KEY = 'line_summary_admin_token';
 const THEME_KEY = 'line_reservation_calendar_theme';
-const BUDGET_STORAGE_KEY = 'line_analytics_month_budget_v1';
 const PROJECT_URL = 'https://jhpmzqxqvapdkyvvhyra.supabase.co';
 
 /* ── store coordinates for weather (store_partition_key → {lat,lon}) ── */
@@ -748,6 +747,7 @@ const state = {
   charts: {},
   weekdayMetric: 'gross',
   lastGrossYen: null,
+  lastMonthBudgetYen: null,
 };
 
 /* ── dom refs ── */
@@ -993,65 +993,20 @@ function yen(v) {
 }
 function num(v) { return v == null ? '-' : Number(v).toLocaleString('ja-JP'); }
 
-function loadBudgetMap() {
-  try {
-    const raw = localStorage.getItem(BUDGET_STORAGE_KEY);
-    if (!raw) return {};
-    const o = JSON.parse(raw);
-    return o && typeof o === 'object' ? o : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveBudgetMap(map) {
-  try {
-    localStorage.setItem(BUDGET_STORAGE_KEY, JSON.stringify(map));
-  } catch { /* quota */ }
-}
-
-function budgetStorageKey(storeKey) {
-  return String(storeKey || '').trim() || '__all__';
-}
-
-function getBudgetForMonth(storeKey, month) {
-  const mo = String(month || '').trim();
-  if (!mo) return null;
-  const v = loadBudgetMap()[budgetStorageKey(storeKey)]?.[mo];
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
-}
-
-function setBudgetForMonth(storeKey, month, yenVal) {
-  const mo = String(month || '').trim();
-  if (!mo) return;
-  const map = loadBudgetMap();
-  const sk = budgetStorageKey(storeKey);
-  if (!map[sk]) map[sk] = {};
-  const numVal = Number(yenVal);
-  if (!Number.isFinite(numVal) || numVal <= 0) {
-    delete map[sk][mo];
-  } else {
-    map[sk][mo] = Math.round(numVal);
-  }
-  if (Object.keys(map[sk]).length === 0) delete map[sk];
-  saveBudgetMap(map);
-}
-
-function syncBudgetInput(storeKey, month) {
+function syncBudgetInput() {
   if (!dom.monthBudgetInput) return;
-  const b = getBudgetForMonth(storeKey, month);
+  const b = state.lastMonthBudgetYen;
   dom.monthBudgetInput.value = b != null ? String(b) : '';
 }
 
-function updateBudgetKpis(storeKey, month, grossYen) {
+function updateBudgetKpis(grossYen, monthLabel) {
   if (!dom.kpiBudget) return;
-  const mo = String(month || '').trim();
-  const b = getBudgetForMonth(storeKey, mo);
+  const mo = String(monthLabel || '').trim();
+  const b = state.lastMonthBudgetYen;
   const gross = Number(grossYen);
   const gOk = Number.isFinite(gross);
   dom.kpiBudget.textContent = b != null ? yen(b) : '未設定';
-  dom.kpiBudgetSub.textContent = mo ? `${mo}・この端末に保存` : '';
+  dom.kpiBudgetSub.textContent = mo ? `${mo}・DBに保存` : '';
   if (b != null && b > 0 && gOk) {
     const pct = (gross / b) * 100;
     dom.kpiBudgetAchieve.textContent = pct.toFixed(1) + '%';
@@ -1073,6 +1028,7 @@ function resetBudgetKpis(opts) {
   if (clearInput && dom.monthBudgetInput) dom.monthBudgetInput.value = '';
   if (dom.monthBudgetHint) dom.monthBudgetHint.textContent = '';
   state.lastGrossYen = null;
+  state.lastMonthBudgetYen = null;
 }
 
 function setBadge(el, cur, prev, label) {
@@ -1225,29 +1181,50 @@ dom.clearToken.addEventListener('click', () => {
 });
 
 if (dom.monthBudgetSaveBtn && dom.monthBudgetClearBtn) {
-  dom.monthBudgetSaveBtn.addEventListener('click', () => {
+  dom.monthBudgetSaveBtn.addEventListener('click', async () => {
     const dm = displayMonthFromPeriod();
     const raw = dom.monthBudgetInput?.value?.trim() ?? '';
+    let budget_yen = null;
     if (raw !== '') {
       const n = Number(raw.replace(/,/g, ''));
       if (!Number.isFinite(n) || n < 0) {
         dom.monthBudgetHint.textContent = '0以上の数値を入力してください';
         return;
       }
-      setBudgetForMonth(state.storeKey, dm, n);
-    } else {
-      setBudgetForMonth(state.storeKey, dm, NaN);
+      budget_yen = Math.round(n);
+      if (budget_yen <= 0) budget_yen = null;
     }
-    syncBudgetInput(state.storeKey, dm);
-    updateBudgetKpis(state.storeKey, dm, state.lastGrossYen);
-    dom.monthBudgetHint.textContent = dm ? `保存しました（${dm}）` : '保存しました';
+    dom.monthBudgetHint.textContent = '保存中…';
+    try {
+      const result = await apiFetch('/receipts/sales-budget', {
+        method: 'PUT',
+        body: { store_key: state.storeKey, month: dm, budget_yen },
+      });
+      const mb = result?.month_budget_yen;
+      state.lastMonthBudgetYen = mb != null && Number.isFinite(Number(mb)) ? Math.round(Number(mb)) : null;
+      syncBudgetInput();
+      updateBudgetKpis(state.lastGrossYen, dm);
+      dom.monthBudgetHint.textContent = dm ? `保存しました（${dm}）` : '保存しました';
+    } catch (e) {
+      dom.monthBudgetHint.textContent = '保存に失敗: ' + (e && e.message ? e.message : String(e));
+    }
   });
-  dom.monthBudgetClearBtn.addEventListener('click', () => {
+  dom.monthBudgetClearBtn.addEventListener('click', async () => {
     const dm = displayMonthFromPeriod();
-    setBudgetForMonth(state.storeKey, dm, NaN);
-    syncBudgetInput(state.storeKey, dm);
-    updateBudgetKpis(state.storeKey, dm, state.lastGrossYen);
-    dom.monthBudgetHint.textContent = '予算をクリアしました';
+    dom.monthBudgetHint.textContent = '保存中…';
+    try {
+      const result = await apiFetch('/receipts/sales-budget', {
+        method: 'PUT',
+        body: { store_key: state.storeKey, month: dm, budget_yen: null },
+      });
+      const mb = result?.month_budget_yen;
+      state.lastMonthBudgetYen = mb != null && Number.isFinite(Number(mb)) ? Math.round(Number(mb)) : null;
+      syncBudgetInput();
+      updateBudgetKpis(state.lastGrossYen, dm);
+      dom.monthBudgetHint.textContent = '予算をクリアしました';
+    } catch (e) {
+      dom.monthBudgetHint.textContent = 'クリアに失敗: ' + (e && e.message ? e.message : String(e));
+    }
   });
 }
 
@@ -1309,14 +1286,23 @@ dom.storeSelect.addEventListener('change', () => {
 });
 
 /* ── API fetch ── */
-async function apiFetch(path) {
+async function apiFetch(path, options = {}) {
   const token = getToken();
   if (!token) throw new Error('トークンが未設定です。');
   const url = PROJECT_URL.replace(/\/+$/, '') + '/functions/v1/admin-api' + path;
-  const res = await fetch(url, { headers: { 'x-admin-token': token } });
+  const method = options.method || 'GET';
+  const headers = { 'x-admin-token': token };
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json; charset=utf-8';
+  }
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+  });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`API error ${res.status}: ${text.slice(0, 120)}`);
+    throw new Error(`API error ${res.status}: ${text.slice(0, 160)}`);
   }
   return res.json();
 }
@@ -1540,8 +1526,12 @@ async function loadAll() {
     dom.kpiReceipts.textContent = totals?.receipt_count ? `レシート ${totals.receipt_count} 件` : '';
 
     state.lastGrossYen = totals?.total_gross_sales_yen ?? null;
-    syncBudgetInput(state.storeKey, displayMonth);
-    updateBudgetKpis(state.storeKey, displayMonth, totals?.total_gross_sales_yen);
+    {
+      const mb = salesData?.month_budget_yen;
+      state.lastMonthBudgetYen = mb != null && Number.isFinite(Number(mb)) ? Math.round(Number(mb)) : null;
+    }
+    syncBudgetInput();
+    updateBudgetKpis(totals?.total_gross_sales_yen, displayMonth);
 
     if (isSingleMonth) applyKpiBadges(displayMonth, state.monthlySeries);
     else applyKpiBadges(null, state.monthlySeries);
