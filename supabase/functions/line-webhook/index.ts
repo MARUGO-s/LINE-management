@@ -7,6 +7,11 @@ import {
 import { inferLineMediaFilePurposeLabel } from '../_shared/line_media_file_purpose_infer.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
 import { MARUGO_GROUP_STORE_OPTIONS } from '../_shared/marugo_group_stores.ts'
+import {
+  allocateDailyBudgetsForMonth,
+  getDefaultJapaneseHolidaySet,
+  type SalesBudgetAllocationWeights,
+} from '../_shared/sales_budget_allocation.ts'
 
 type CalendarListScope =
   | 'today'
@@ -2217,6 +2222,7 @@ async function trySaveLineMediaContent(
 
   let midMonthReportReply: Array<Record<string, unknown>> | null = null
   let monthCumulativeTotals: MonthCumulativeTotals = { grossSalesYen: null, partyCount: null, guestCount: null }
+  let receiptBudgetFlexRows: Array<{ label: string; value: string; margin?: 'md' }> | null = null
   if (mediaType === 'image' && imageAnalysis?.receipt) {
     const now = new Date()
     await saveLineReceiptEntry(supabase, {
@@ -2232,10 +2238,20 @@ async function trySaveLineMediaContent(
       ? (resolveBestStoreName(imageAnalysis.receipt.storeName) ?? imageAnalysis.receipt.storeName)
       : null
     const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
-    monthCumulativeTotals = await loadCurrentMonthCumulativeTotals(
+    const receiptDateIsoForTotals =
+      parseReceiptDateToIso(imageAnalysis.receipt.date) ?? resolveReceiptDateIsoForPersist(imageAnalysis.receipt.date)
+    const receiptMonthStr = receiptDateIsoForTotals.slice(0, 7)
+    monthCumulativeTotals = await loadMonthCumulativeTotalsForStoreMonth(
       supabase,
       storePartitionKey,
-      now,
+      receiptMonthStr,
+    )
+    receiptBudgetFlexRows = await buildReceiptBudgetComparisonRows(
+      supabase,
+      storePartitionKey,
+      receiptDateIsoForTotals,
+      receiptMonthStr,
+      monthCumulativeTotals,
     )
     midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
       supabase,
@@ -2256,7 +2272,10 @@ async function trySaveLineMediaContent(
       const baseReply = buildLineReceiptImageAnalysisReply(
         imageAnalysis.receipt,
         monthCumulativeTotals,
-        { correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(lineMessageId) },
+        {
+          correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(lineMessageId),
+          budgetRows: receiptBudgetFlexRows ?? undefined,
+        },
       )
       if (midMonthReportReply) {
         return [...baseReply, ...midMonthReportReply]
@@ -3733,7 +3752,24 @@ async function tryHandlePendingReceiptCorrection(
       const applied = await applyPendingReceiptCorrection(supabase, pending)
       if (!applied.ok) return applied.error
       await clearPendingReceiptCorrection(supabase, roomId, userId)
-      return buildLineReceiptImageAnalysisReply(applied.receipt, applied.monthCumulativeTotals)
+      const iso =
+        parseReceiptDateToIso(applied.receipt.date) ?? resolveReceiptDateIsoForPersist(applied.receipt.date)
+      const rm = iso.slice(0, 7)
+      const sk = toReceiptStorePartitionKey(
+        applied.receipt.storeName
+          ? (resolveBestStoreName(applied.receipt.storeName) ?? applied.receipt.storeName)
+          : null,
+      )
+      const budgetRows = await buildReceiptBudgetComparisonRows(
+        supabase,
+        sk,
+        iso,
+        rm,
+        applied.monthCumulativeTotals,
+      )
+      return buildLineReceiptImageAnalysisReply(applied.receipt, applied.monthCumulativeTotals, {
+        budgetRows: budgetRows ?? undefined,
+      })
     }
     const field = parseReceiptCorrectionFieldChoice(text)
     if (!field) {
@@ -5475,10 +5511,18 @@ async function updateLineReceiptEntryFromCorrectionDraft(
     storeName: canonicalStoreName,
   }
   const updatedStorePartitionKey = String((data as any).store_partition_key ?? storePartitionKey).trim() || storePartitionKey
-  const monthCumulativeTotals = await loadCurrentMonthCumulativeTotals(
+  let monthStr = ''
+  const rdRaw = (data as Record<string, unknown>).receipt_date
+  if (typeof rdRaw === 'string' && /^\d{4}-\d{2}-\d{2}/.test(rdRaw.trim())) {
+    monthStr = rdRaw.trim().slice(0, 7)
+  } else {
+    const p = getJstDateParts(new Date())
+    monthStr = `${p.year}-${String(p.month).padStart(2, '0')}`
+  }
+  const monthCumulativeTotals = await loadMonthCumulativeTotalsForStoreMonth(
     supabase,
     updatedStorePartitionKey,
-    new Date(),
+    monthStr,
   )
   return {
     receipt: updatedReceipt,
@@ -5606,13 +5650,27 @@ async function loadCurrentMonthCumulativeTotals(
   storePartitionKey: string,
   now: Date,
 ): Promise<MonthCumulativeTotals> {
+  const parts = getJstDateParts(now)
+  const monthStr = `${parts.year}-${String(parts.month).padStart(2, '0')}`
+  return loadMonthCumulativeTotalsForStoreMonth(supabase, storePartitionKey, monthStr)
+}
+
+/** レシート日付の属する月（YYYY-MM）で店舗別に集計 */
+async function loadMonthCumulativeTotalsForStoreMonth(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  targetMonthYyyyMm: string,
+): Promise<MonthCumulativeTotals> {
   const empty: MonthCumulativeTotals = { grossSalesYen: null, partyCount: null, guestCount: null }
   const normalizedStorePartitionKey = String(storePartitionKey ?? '').trim()
   if (!normalizedStorePartitionKey) return empty
 
-  const parts = getJstDateParts(now)
-  const startDateStr = toJstDateString(parts.year, parts.month, 1)
-  const nextMonth = shiftJstYearMonth(parts.year, parts.month, 1)
+  const m = /^(\d{4})-(\d{2})$/.exec(String(targetMonthYyyyMm).trim())
+  if (!m) return empty
+  const year = Number(m[1])
+  const mo = Number(m[2])
+  const startDateStr = toJstDateString(year, mo, 1)
+  const nextMonth = shiftJstYearMonth(year, mo, 1)
   const endDateStr = toJstDateString(nextMonth.year, nextMonth.month, 1)
   const { data, error } = await supabase
     .from('line_receipt_entries')
@@ -5624,7 +5682,7 @@ async function loadCurrentMonthCumulativeTotals(
 
   if (error) {
     console.error(
-      `Failed to load monthly cumulative totals (store_partition_key=${normalizedStorePartitionKey}):`,
+      `Failed to load monthly cumulative totals (store_partition_key=${normalizedStorePartitionKey}, month=${targetMonthYyyyMm}):`,
       error.message,
     )
     return empty
@@ -5645,6 +5703,91 @@ async function loadCurrentMonthCumulativeTotals(
     if (Number.isFinite(guest) && guest >= 0) totalGuestCount += Math.round(guest)
   }
   return { grossSalesYen: totalGrossSalesYen, partyCount: totalPartyCount, guestCount: totalGuestCount }
+}
+
+async function fetchSalesBudgetRowForWebhook(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  targetMonth: string,
+): Promise<{
+  budget_yen: number
+  weekday_weight: number
+  pre_holiday_weight: number
+  holiday_weight: number
+} | null> {
+  if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return null
+  const { data, error } = await supabase
+    .from('line_sales_month_budgets')
+    .select('budget_yen, weekday_weight, pre_holiday_weight, holiday_weight')
+    .eq('store_partition_key', storePartitionKey)
+    .eq('target_month', targetMonth)
+    .maybeSingle()
+  if (error || !data) return null
+  const row = data as Record<string, unknown>
+  const budgetYen = Number(row.budget_yen)
+  if (!Number.isFinite(budgetYen) || budgetYen <= 0) return null
+  const ww = Number(row.weekday_weight)
+  const pw = Number(row.pre_holiday_weight)
+  const hw = Number(row.holiday_weight)
+  return {
+    budget_yen: Math.round(budgetYen),
+    weekday_weight: Number.isFinite(ww) && ww > 0 ? ww : 1,
+    pre_holiday_weight: Number.isFinite(pw) && pw > 0 ? pw : 1.5,
+    holiday_weight: Number.isFinite(hw) && hw > 0 ? hw : 2,
+  }
+}
+
+async function loadStoreDayGrossSumForDate(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  receiptDateIso: string,
+): Promise<number> {
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .select('gross_sales_yen')
+    .eq('store_partition_key', storePartitionKey)
+    .eq('receipt_date', receiptDateIso)
+  if (error || !Array.isArray(data)) return 0
+  let sum = 0
+  for (const row of data) {
+    const g = Number((row as Record<string, unknown>).gross_sales_yen)
+    if (Number.isFinite(g) && g >= 0) sum += Math.round(g)
+  }
+  return sum
+}
+
+async function buildReceiptBudgetComparisonRows(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  receiptDateIso: string,
+  receiptMonthYyyyMm: string,
+  monthTotals: MonthCumulativeTotals,
+): Promise<Array<{ label: string; value: string; margin?: 'md' }> | null> {
+  if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return null
+  const row = await fetchSalesBudgetRowForWebhook(supabase, storePartitionKey, receiptMonthYyyyMm)
+  if (!row) return null
+
+  const weights: SalesBudgetAllocationWeights = {
+    weekday: row.weekday_weight,
+    pre_holiday: row.pre_holiday_weight,
+    holiday: row.holiday_weight,
+  }
+  const holidaySet = getDefaultJapaneseHolidaySet()
+  const dailyMap = allocateDailyBudgetsForMonth(receiptMonthYyyyMm, row.budget_yen, weights, holidaySet)
+  const dailyTarget = dailyMap.get(receiptDateIso)
+  if (dailyTarget == null) return null
+
+  const monthActual = monthTotals.grossSalesYen ?? 0
+  const monthPct = row.budget_yen > 0 ? ((monthActual / row.budget_yen) * 100).toFixed(1) : '-'
+  const dayActual = await loadStoreDayGrossSumForDate(supabase, storePartitionKey, receiptDateIso)
+  const dayPct = dailyTarget > 0 ? ((dayActual / dailyTarget) * 100).toFixed(1) : '-'
+
+  return [
+    { label: '【予算】月次目標', value: formatYenAmount(row.budget_yen), margin: 'md' },
+    { label: '【予算】月次実績', value: `${formatYenAmount(monthActual)}（${monthPct}%）` },
+    { label: '【予算】当日目標', value: formatYenAmount(dailyTarget) },
+    { label: '【予算】当日実績', value: `${formatYenAmount(dayActual)}（${dayPct}%）` },
+  ]
 }
 
 async function maybeCreateMidMonthReceiptReportOnPost(
@@ -6055,13 +6198,13 @@ function buildLineImageAnalysisReply(preview: string): string {
 function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
   monthCumulativeTotals: MonthCumulativeTotals | null = null,
-  options?: { correctionCommandText?: string },
+  options?: { correctionCommandText?: string; budgetRows?: Array<{ label: string; value: string; margin?: 'md' }> },
 ): LineReplyMessage[] {
   const labelFlex = 3
   const parsedDateIso = parseReceiptDateToIso(receipt.date)
   const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? receipt.date
   const cum = monthCumulativeTotals ?? { grossSalesYen: null, partyCount: null, guestCount: null }
-  const rows: Array<{ label: string; value: string; margin?: 'md' }> = [
+  const baseRows: Array<{ label: string; value: string; margin?: 'md' }> = [
     { label: '店名', value: receipt.storeName || '-' },
     { label: '日付', value: displayDate || '-' },
     { label: '消費税', value: receipt.taxAmount || '-' },
@@ -6069,6 +6212,9 @@ function buildLineReceiptImageAnalysisReply(
     { label: '会計組数', value: receipt.partyCount || '-' },
     { label: '客数', value: receipt.guestCount || '-' },
     { label: '客単価', value: receipt.unitPrice || '-' },
+  ]
+  const budgetRows = Array.isArray(options?.budgetRows) ? options!.budgetRows! : []
+  const monthRows: Array<{ label: string; value: string; margin?: 'md' }> = [
     {
       label: '月間総売上',
       value: cum.grossSalesYen == null ? '-' : formatYenAmount(cum.grossSalesYen),
@@ -6083,6 +6229,7 @@ function buildLineReceiptImageAnalysisReply(
       value: cum.guestCount == null ? '-' : String(cum.guestCount),
     },
   ]
+  const rows: Array<{ label: string; value: string; margin?: 'md' }> = [...baseRows, ...budgetRows, ...monthRows]
 
   const detailRows = rows.map((row) => {
     const payload: Record<string, unknown> = {

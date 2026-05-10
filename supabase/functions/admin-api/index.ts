@@ -4,6 +4,11 @@ import {
   isMarugoGroupStoreLabel,
   MARUGO_GROUP_STORE_OPTIONS,
 } from "../_shared/marugo_group_stores.ts"
+import {
+  allocateDailyBudgetsForMonth,
+  getDefaultJapaneseHolidaySet,
+  type SalesBudgetAllocationWeights,
+} from "../_shared/sales_budget_allocation.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0"
 import JSZip from "https://esm.sh/jszip@3.10.1"
 
@@ -2043,15 +2048,28 @@ function normalizeBudgetStoreKey(raw: string): string {
   return s || "__all__"
 }
 
-async function fetchMonthBudgetYen(
+function parsePositiveWeight(value: unknown, fallback: number): number {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return fallback
+  return n
+}
+
+type SalesBudgetRow = {
+  budget_yen: number
+  weekday_weight: number
+  pre_holiday_weight: number
+  holiday_weight: number
+}
+
+async function fetchSalesBudgetRow(
   supabase: ReturnType<typeof createClient>,
   storeKeyQueryParam: string,
   month: string,
-): Promise<number | null> {
+): Promise<SalesBudgetRow | null> {
   const store_partition_key = normalizeBudgetStoreKey(storeKeyQueryParam)
   const { data, error } = await supabase
     .from("line_sales_month_budgets")
-    .select("budget_yen")
+    .select("budget_yen, weekday_weight, pre_holiday_weight, holiday_weight")
     .eq("store_partition_key", store_partition_key)
     .eq("target_month", month)
     .maybeSingle()
@@ -2060,8 +2078,20 @@ async function fetchMonthBudgetYen(
     throw { status: 500, message: `Failed to fetch sales budget: ${error.message}` } satisfies AppError
   }
   if (!data) return null
-  const n = toNonNegativeInteger((data as { budget_yen?: unknown }).budget_yen)
-  return n > 0 ? n : null
+  const row = data as {
+    budget_yen?: unknown
+    weekday_weight?: unknown
+    pre_holiday_weight?: unknown
+    holiday_weight?: unknown
+  }
+  const budgetYen = toNonNegativeInteger(row.budget_yen)
+  if (budgetYen <= 0) return null
+  return {
+    budget_yen: budgetYen,
+    weekday_weight: parsePositiveWeight(row.weekday_weight, 1),
+    pre_holiday_weight: parsePositiveWeight(row.pre_holiday_weight, 1.5),
+    holiday_weight: parsePositiveWeight(row.holiday_weight, 2),
+  }
 }
 
 async function upsertReceiptSalesBudget(
@@ -2083,6 +2113,9 @@ async function upsertReceiptSalesBudget(
     }
     return {
       month_budget_yen: null as number | null,
+      weekday_weight: null as number | null,
+      pre_holiday_weight: null as number | null,
+      holiday_weight: null as number | null,
       store_partition_key,
       month,
     }
@@ -2097,6 +2130,11 @@ async function upsertReceiptSalesBudget(
     return await clearAndReturn()
   }
 
+  const ww = parsePositiveWeight(body.weekday_weight, 1)
+  const pw = parsePositiveWeight(body.pre_holiday_weight, 1.5)
+  const hw = parsePositiveWeight(body.holiday_weight, 2)
+  const weights: SalesBudgetAllocationWeights = { weekday: ww, pre_holiday: pw, holiday: hw }
+
   const updatedAt = new Date().toISOString()
   const { data, error } = await supabase
     .from("line_sales_month_budgets")
@@ -2105,21 +2143,32 @@ async function upsertReceiptSalesBudget(
         store_partition_key,
         target_month: month,
         budget_yen: budgetYen,
+        weekday_weight: ww,
+        pre_holiday_weight: pw,
+        holiday_weight: hw,
         updated_at: updatedAt,
       },
       { onConflict: "store_partition_key,target_month" },
     )
-    .select("budget_yen")
+    .select("budget_yen, weekday_weight, pre_holiday_weight, holiday_weight")
     .maybeSingle()
 
   if (error) {
     throw { status: 500, message: `Failed to save sales budget: ${error.message}` } satisfies AppError
   }
 
-  const row = data as { budget_yen?: unknown } | null
+  const row = data as {
+    budget_yen?: unknown
+    weekday_weight?: unknown
+    pre_holiday_weight?: unknown
+    holiday_weight?: unknown
+  } | null
   const out = row != null ? toNonNegativeInteger(row.budget_yen) : budgetYen
   return {
     month_budget_yen: out > 0 ? out : null,
+    weekday_weight: parsePositiveWeight(row?.weekday_weight, ww),
+    pre_holiday_weight: parsePositiveWeight(row?.pre_holiday_weight, pw),
+    holiday_weight: parsePositiveWeight(row?.holiday_weight, hw),
     store_partition_key,
     month,
   }
@@ -2292,11 +2341,35 @@ async function fetchReceiptSalesState(
   const monthStartDate = dayKeys.length > 0 ? dayKeys[0] : `${month}-01`
   const monthEndDate = dayKeys.length > 0 ? dayKeys[dayKeys.length - 1] : `${month}-01`
 
-  const month_budget_yen = await fetchMonthBudgetYen(supabase, selectedStoreKeyRaw, month)
+  const budgetRow = await fetchSalesBudgetRow(supabase, selectedStoreKeyRaw, month)
+  const month_budget_yen = budgetRow?.budget_yen ?? null
+  const budget_weekday_weight = budgetRow?.weekday_weight ?? null
+  const budget_pre_holiday_weight = budgetRow?.pre_holiday_weight ?? null
+  const budget_holiday_weight = budgetRow?.holiday_weight ?? null
+
+  let daily_budget_yen_by_date: Record<string, number> | null = null
+  if (
+    budgetRow &&
+    month_budget_yen != null &&
+    month_budget_yen > 0
+  ) {
+    const weights: SalesBudgetAllocationWeights = {
+      weekday: budgetRow.weekday_weight,
+      pre_holiday: budgetRow.pre_holiday_weight,
+      holiday: budgetRow.holiday_weight,
+    }
+    const holidaySet = getDefaultJapaneseHolidaySet()
+    const map = allocateDailyBudgetsForMonth(month, month_budget_yen, weights, holidaySet)
+    daily_budget_yen_by_date = Object.fromEntries(map)
+  }
 
   return {
     month,
     month_budget_yen,
+    budget_weekday_weight,
+    budget_pre_holiday_weight,
+    budget_holiday_weight,
+    daily_budget_yen_by_date,
     month_start_iso: range.startIso,
     month_end_iso: range.endIso,
     month_start_date: monthStartDate,
