@@ -3986,7 +3986,7 @@ function buildReceiptDuplicateConfirmationFlexReply(
     layout: 'baseline',
     spacing: 'sm',
     contents: [
-      { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
+      { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', wrap: true, flex: labelFlex },
       { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: 5, weight: 'bold' },
     ],
   }))
@@ -6869,7 +6869,7 @@ function buildLineReceiptImageAnalysisReply(
       layout: 'baseline',
       spacing: 'sm',
       contents: [
-        { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
+        { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: true, flex: labelFlex },
         { type: 'text', text: lineSafeFlexText(row.value, 240), size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
       ],
     }
