@@ -6,7 +6,10 @@ import {
 } from "../_shared/marugo_group_stores.ts"
 import {
   allocateDailyBudgetsForMonth,
+  enumerateMonthDates,
   getDefaultJapaneseHolidaySet,
+  mergeStoreClosedDateLists,
+  parseStoreClosedDatesForMonth,
   type SalesBudgetAllocationWeights,
 } from "../_shared/sales_budget_allocation.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0"
@@ -302,6 +305,20 @@ Deno.serve(async (req) => {
         throw { status: 400, message: "Invalid JSON body." } satisfies AppError
       }
       const result = await upsertReceiptSalesBudget(supabase, body)
+      return json(result, 200)
+    }
+
+    if (req.method === "GET" && path === "/receipts/sales-manual-months") {
+      const result = await fetchManualMonthsForYearState(supabase, url)
+      return json(result, 200)
+    }
+
+    if (req.method === "PUT" && path === "/receipts/sales-manual-months") {
+      const body = await parseJson(req)
+      if (!isRecord(body)) {
+        throw { status: 400, message: "Invalid JSON body." } satisfies AppError
+      }
+      const result = await upsertManualMonthEntries(supabase, body)
       return json(result, 200)
     }
 
@@ -2059,6 +2076,59 @@ type SalesBudgetRow = {
   weekday_weight: number
   pre_holiday_weight: number
   holiday_weight: number
+  store_closed_dates: string[]
+}
+
+async function fetchStoreClosedDatesFromTable(
+  supabase: ReturnType<typeof createClient>,
+  store_partition_key: string,
+  month: string,
+): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("line_sales_month_store_closed_days")
+    .select("closed_on")
+    .eq("store_partition_key", store_partition_key)
+    .eq("target_month", month)
+
+  if (error) {
+    throw { status: 500, message: `Failed to fetch store closed days: ${error.message}` } satisfies AppError
+  }
+  const allowed = new Set(enumerateMonthDates(month))
+  const out: string[] = []
+  for (const row of Array.isArray(data) ? data : []) {
+    const r = row as { closed_on?: unknown }
+    const s = String(r.closed_on ?? "").trim().slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) continue
+    if (!allowed.has(s)) continue
+    out.push(s)
+  }
+  return [...new Set(out)].sort()
+}
+
+async function replaceStoreClosedDatesInTable(
+  supabase: ReturnType<typeof createClient>,
+  store_partition_key: string,
+  month: string,
+  dates: string[],
+) {
+  const { error: delErr } = await supabase
+    .from("line_sales_month_store_closed_days")
+    .delete()
+    .eq("store_partition_key", store_partition_key)
+    .eq("target_month", month)
+  if (delErr) {
+    throw { status: 500, message: `Failed to clear store closed days: ${delErr.message}` } satisfies AppError
+  }
+  if (dates.length === 0) return
+  const rows = dates.map((closed_on) => ({
+    store_partition_key,
+    target_month: month,
+    closed_on,
+  }))
+  const { error: insErr } = await supabase.from("line_sales_month_store_closed_days").insert(rows)
+  if (insErr) {
+    throw { status: 500, message: `Failed to save store closed days: ${insErr.message}` } satisfies AppError
+  }
 }
 
 async function fetchSalesBudgetRow(
@@ -2069,7 +2139,7 @@ async function fetchSalesBudgetRow(
   const store_partition_key = normalizeBudgetStoreKey(storeKeyQueryParam)
   const { data, error } = await supabase
     .from("line_sales_month_budgets")
-    .select("budget_yen, weekday_weight, pre_holiday_weight, holiday_weight")
+    .select("budget_yen, weekday_weight, pre_holiday_weight, holiday_weight, store_closed_dates")
     .eq("store_partition_key", store_partition_key)
     .eq("target_month", month)
     .maybeSingle()
@@ -2083,14 +2153,18 @@ async function fetchSalesBudgetRow(
     weekday_weight?: unknown
     pre_holiday_weight?: unknown
     holiday_weight?: unknown
+    store_closed_dates?: unknown
   }
   const budgetYen = toNonNegativeInteger(row.budget_yen)
   if (budgetYen <= 0) return null
+  const fromTable = await fetchStoreClosedDatesFromTable(supabase, store_partition_key, month)
+  const store_closed_dates = mergeStoreClosedDateLists(fromTable, row.store_closed_dates, month)
   return {
     budget_yen: budgetYen,
     weekday_weight: parsePositiveWeight(row.weekday_weight, 1),
     pre_holiday_weight: parsePositiveWeight(row.pre_holiday_weight, 1.5),
     holiday_weight: parsePositiveWeight(row.holiday_weight, 2),
+    store_closed_dates,
   }
 }
 
@@ -2103,6 +2177,14 @@ async function upsertReceiptSalesBudget(
   const rawBudget = body.budget_yen
 
   const clearAndReturn = async () => {
+    const { error: delClosedErr } = await supabase
+      .from("line_sales_month_store_closed_days")
+      .delete()
+      .eq("store_partition_key", store_partition_key)
+      .eq("target_month", month)
+    if (delClosedErr) {
+      throw { status: 500, message: `Failed to clear store closed days: ${delClosedErr.message}` } satisfies AppError
+    }
     const { error } = await supabase
       .from("line_sales_month_budgets")
       .delete()
@@ -2116,6 +2198,7 @@ async function upsertReceiptSalesBudget(
       weekday_weight: null as number | null,
       pre_holiday_weight: null as number | null,
       holiday_weight: null as number | null,
+      store_closed_dates: null as string[] | null,
       store_partition_key,
       month,
     }
@@ -2133,7 +2216,7 @@ async function upsertReceiptSalesBudget(
   const ww = parsePositiveWeight(body.weekday_weight, 1)
   const pw = parsePositiveWeight(body.pre_holiday_weight, 1.5)
   const hw = parsePositiveWeight(body.holiday_weight, 2)
-  const weights: SalesBudgetAllocationWeights = { weekday: ww, pre_holiday: pw, holiday: hw }
+  const closedDates = parseStoreClosedDatesForMonth(body.store_closed_dates, month)
 
   const updatedAt = new Date().toISOString()
   const { data, error } = await supabase
@@ -2146,31 +2229,174 @@ async function upsertReceiptSalesBudget(
         weekday_weight: ww,
         pre_holiday_weight: pw,
         holiday_weight: hw,
+        store_closed_dates: closedDates,
         updated_at: updatedAt,
       },
       { onConflict: "store_partition_key,target_month" },
     )
-    .select("budget_yen, weekday_weight, pre_holiday_weight, holiday_weight")
+    .select("budget_yen, weekday_weight, pre_holiday_weight, holiday_weight, store_closed_dates")
     .maybeSingle()
 
   if (error) {
     throw { status: 500, message: `Failed to save sales budget: ${error.message}` } satisfies AppError
   }
 
-  const row = data as {
+  await replaceStoreClosedDatesInTable(supabase, store_partition_key, month, closedDates)
+
+  let row = data as {
     budget_yen?: unknown
     weekday_weight?: unknown
     pre_holiday_weight?: unknown
     holiday_weight?: unknown
+    store_closed_dates?: unknown
   } | null
+  let parsedClosed = await fetchStoreClosedDatesFromTable(supabase, store_partition_key, month)
+  if (parsedClosed.length === 0) {
+    parsedClosed = parseStoreClosedDatesForMonth(row?.store_closed_dates, month)
+  }
+  if (parsedClosed.length === 0 && closedDates.length > 0) {
+    parsedClosed = [...closedDates]
+  }
   const out = row != null ? toNonNegativeInteger(row.budget_yen) : budgetYen
   return {
     month_budget_yen: out > 0 ? out : null,
     weekday_weight: parsePositiveWeight(row?.weekday_weight, ww),
     pre_holiday_weight: parsePositiveWeight(row?.pre_holiday_weight, pw),
     holiday_weight: parsePositiveWeight(row?.holiday_weight, hw),
+    store_closed_dates: parsedClosed,
     store_partition_key,
     month,
+  }
+}
+
+function parseCompareYearQueryParam(raw: string | null, displayMonth: string): number {
+  const parsed = Number(raw)
+  if (Number.isFinite(parsed) && parsed >= 1900 && parsed <= 2100) {
+    return Math.floor(parsed)
+  }
+  const parts = displayMonth.split("-")
+  const y = Number(parts[0])
+  if (Number.isFinite(y)) return y - 1
+  return new Date().getUTCFullYear() - 1
+}
+
+function comparisonSalesMonth(displayMonth: string, compareYear: number): string {
+  const mm = displayMonth.slice(5, 7)
+  return `${compareYear}-${mm}`
+}
+
+async function fetchManualMonthGross(
+  supabase: ReturnType<typeof createClient>,
+  storeKeyQueryParam: string,
+  salesMonth: string,
+): Promise<number | null> {
+  const store_partition_key = normalizeBudgetStoreKey(storeKeyQueryParam)
+  const sm = normalizeCalendarMonthParam(salesMonth)
+  const { data, error } = await supabase
+    .from("line_sales_manual_month_gross")
+    .select("gross_sales_yen")
+    .eq("store_partition_key", store_partition_key)
+    .eq("sales_month", sm)
+    .maybeSingle()
+
+  if (error) {
+    throw { status: 500, message: `Failed to fetch manual month gross: ${error.message}` } satisfies AppError
+  }
+  if (!data) return null
+  const row = data as { gross_sales_yen?: unknown }
+  return toNonNegativeInteger(row.gross_sales_yen)
+}
+
+async function fetchManualMonthsForYearState(
+  supabase: ReturnType<typeof createClient>,
+  url: URL,
+) {
+  const store_partition_key = normalizeBudgetStoreKey(toSafeString(url.searchParams.get("store_key")))
+  const year = Number(url.searchParams.get("year"))
+  if (!Number.isInteger(year) || year < 1900 || year > 2100) {
+    throw { status: 400, message: "year must be an integer 1900-2100." } satisfies AppError
+  }
+  const start = `${year}-01`
+  const endExclusive = `${year + 1}-01`
+  const { data, error } = await supabase
+    .from("line_sales_manual_month_gross")
+    .select("sales_month, gross_sales_yen")
+    .eq("store_partition_key", store_partition_key)
+    .gte("sales_month", start)
+    .lt("sales_month", endExclusive)
+
+  if (error) {
+    throw { status: 500, message: `Failed to list manual month gross: ${error.message}` } satisfies AppError
+  }
+
+  const months: Record<string, number> = {}
+  for (const row of Array.isArray(data) ? data : []) {
+    const r = row as Record<string, unknown>
+    const sm = toSafeString(r.sales_month)
+    if (!/^\d{4}-\d{2}$/.test(sm)) continue
+    months[sm] = toNonNegativeInteger(r.gross_sales_yen)
+  }
+
+  return {
+    year,
+    store_partition_key,
+    months,
+    generated_at: new Date().toISOString(),
+  }
+}
+
+async function upsertManualMonthEntries(
+  supabase: ReturnType<typeof createClient>,
+  body: Record<string, unknown>,
+) {
+  const store_partition_key = normalizeBudgetStoreKey(toSafeString(body.store_key))
+  const entriesRaw = body.entries
+  if (!Array.isArray(entriesRaw)) {
+    throw { status: 400, message: "entries must be an array." } satisfies AppError
+  }
+
+  const updatedAt = new Date().toISOString()
+  let applied = 0
+
+  for (const entry of entriesRaw) {
+    if (!isRecord(entry)) continue
+    const sales_month = normalizeCalendarMonthParam(toSafeString(entry.sales_month))
+    const raw = entry.gross_sales_yen
+
+    if (raw === null || raw === undefined || raw === "") {
+      const { error: delErr } = await supabase
+        .from("line_sales_manual_month_gross")
+        .delete()
+        .eq("store_partition_key", store_partition_key)
+        .eq("sales_month", sales_month)
+      if (delErr) {
+        throw { status: 500, message: `Failed to clear manual month gross: ${delErr.message}` } satisfies AppError
+      }
+    } else {
+      const yenVal = toNonNegativeInteger(raw)
+      const { error: upErr } = await supabase
+        .from("line_sales_manual_month_gross")
+        .upsert(
+          {
+            store_partition_key,
+            sales_month,
+            gross_sales_yen: yenVal,
+            updated_at: updatedAt,
+          },
+          { onConflict: "store_partition_key,sales_month" },
+        )
+      if (upErr) {
+        throw { status: 500, message: `Failed to save manual month gross: ${upErr.message}` } satisfies AppError
+      }
+    }
+    applied += 1
+  }
+
+  return {
+    ok: true as const,
+    store_partition_key,
+    applied,
+    generated_at: new Date().toISOString(),
   }
 }
 
@@ -2341,11 +2567,25 @@ async function fetchReceiptSalesState(
   const monthStartDate = dayKeys.length > 0 ? dayKeys[0] : `${month}-01`
   const monthEndDate = dayKeys.length > 0 ? dayKeys[dayKeys.length - 1] : `${month}-01`
 
-  const budgetRow = await fetchSalesBudgetRow(supabase, selectedStoreKeyRaw, month)
+  // URL に store_key が無いときは、集計に使った既定店舗で予算を取得（__all__ との取り違え防止）
+  const budgetRow = await fetchSalesBudgetRow(
+    supabase,
+    selectedStoreKeyRaw || selectedStoreKey || "",
+    month,
+  )
   const month_budget_yen = budgetRow?.budget_yen ?? null
   const budget_weekday_weight = budgetRow?.weekday_weight ?? null
   const budget_pre_holiday_weight = budgetRow?.pre_holiday_weight ?? null
   const budget_holiday_weight = budgetRow?.holiday_weight ?? null
+  const store_closed_dates = budgetRow?.store_closed_dates ?? []
+
+  const compareYear = parseCompareYearQueryParam(url.searchParams.get("compare_year"), month)
+  const comparison_sales_month = comparisonSalesMonth(month, compareYear)
+  const manual_comparison_gross_yen = await fetchManualMonthGross(
+    supabase,
+    selectedStoreKeyRaw,
+    comparison_sales_month,
+  )
 
   let daily_budget_yen_by_date: Record<string, number> | null = null
   if (
@@ -2359,7 +2599,14 @@ async function fetchReceiptSalesState(
       holiday: budgetRow.holiday_weight,
     }
     const holidaySet = getDefaultJapaneseHolidaySet()
-    const map = allocateDailyBudgetsForMonth(month, month_budget_yen, weights, holidaySet)
+    const storeClosedSet = new Set(store_closed_dates)
+    const map = allocateDailyBudgetsForMonth(
+      month,
+      month_budget_yen,
+      weights,
+      holidaySet,
+      storeClosedSet,
+    )
     daily_budget_yen_by_date = Object.fromEntries(map)
   }
 
@@ -2369,6 +2616,10 @@ async function fetchReceiptSalesState(
     budget_weekday_weight,
     budget_pre_holiday_weight,
     budget_holiday_weight,
+    store_closed_dates,
+    comparison_year: compareYear,
+    comparison_sales_month,
+    manual_comparison_gross_yen,
     daily_budget_yen_by_date,
     month_start_iso: range.startIso,
     month_end_iso: range.endIso,
@@ -2752,6 +3003,16 @@ function escapeLikePattern(value: string): string {
 function normalizeCalendarMonthParam(value: string | null): string {
   const src = String(value ?? "").trim()
   if (/^\d{4}-(0[1-9]|1[0-2])$/.test(src)) return src
+  // 2026-5 のような 1 桁月や trim 漏れで「現在月」に落ちると、店舗休日が対象月と不一致で全除外される
+  const loose = /^(\d{4})-(\d{1,2})(?:-\d{1,2})?$/.exec(src)
+  if (loose) {
+    const y = Number(loose[1])
+    const moRaw = Number(loose[2])
+    if (Number.isFinite(y) && y >= 1900 && y <= 2100 && Number.isFinite(moRaw)) {
+      const mo = Math.min(12, Math.max(1, Math.floor(moRaw)))
+      return `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}`
+    }
+  }
   const now = new Date()
   const formatter = new Intl.DateTimeFormat("ja-JP", {
     timeZone: "Asia/Tokyo",

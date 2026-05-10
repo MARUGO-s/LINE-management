@@ -178,6 +178,11 @@
     body[data-theme='light'] .kpi-card { background: rgba(230,243,253,0.6); }
     .kpi-label { font-size: 0.78rem; color: var(--sub); margin-bottom: 4px; }
     .kpi-value { font-family: "Barlow Condensed", sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--accent); }
+    .kpi-value.kpi-budget-atrisk { color: #ff5c5c; }
+    body[data-theme='light'] .kpi-value.kpi-budget-atrisk { color: #d92d20; }
+    .kpi-value.kpi-yoy-up { color: var(--ok); }
+    .kpi-value.kpi-yoy-down { color: var(--bad); }
+    .kpi-value.kpi-yoy-neutral { color: var(--sub); }
     .kpi-sub { font-size: 0.78rem; color: var(--sub); margin-top: 2px; }
     .kpi-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; min-height: 1.4em; }
     .kpi-badge { font-size: 0.72rem; font-weight: 700; border-radius: 4px; padding: 1px 5px; }
@@ -232,12 +237,12 @@
     body[data-theme='light'] .cross-table tfoot td { background: rgba(45,106,151,0.08); }
     body[data-theme='light'] .cross-table tbody th { background: rgba(45,106,151,0.04); }
 
-    /* 日次売上（数値表）— 管理画面 index から移設。2/3/4 ブロックはビューポート連動 */
+    /* 日次売上（数値表）— 1〜4ブロックはビューポート連動。1ブロック=6列（日付・総売上・組数・客数・予算・差額） */
     .receipt-daily { padding: 14px 16px; }
     .receipt-daily .card-title { margin-bottom: 8px; }
     .receipt-daily-table-wrap {
       margin-top: 8px;
-      max-height: min(48vh, 340px);
+      max-height: min(52vh, 380px);
       overflow: auto;
       -webkit-overflow-scrolling: touch;
       border: 1px solid var(--line);
@@ -255,17 +260,19 @@
     }
     .receipt-daily #receiptDailyTable th,
     .receipt-daily #receiptDailyTable td {
-      padding: 2px 5px;
-      font-size: 0.7rem;
-      line-height: 1.2;
+      padding: 2px 4px;
+      font-size: 0.68rem;
+      line-height: 1.25;
       border-bottom: 1px solid var(--line);
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .receipt-daily #receiptDailyTable th {
       position: sticky;
       top: 0;
       z-index: 1;
-      font-size: 0.62rem;
-      padding: 3px 5px;
+      font-size: 0.58rem;
+      padding: 3px 4px;
       letter-spacing: 0.02em;
       color: var(--sub);
       text-transform: uppercase;
@@ -275,60 +282,68 @@
     body[data-theme='light'] .receipt-daily #receiptDailyTable th {
       background: color-mix(in srgb, var(--card) 95%, #fff);
     }
-    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable { min-width: 28rem; }
-    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable { min-width: 40rem; }
-    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable { min-width: 52rem; }
-    .receipt-daily #receiptDailyTable th:nth-child(4n+1),
-    .receipt-daily #receiptDailyTable td:nth-child(4n+1) {
-      width: 10%;
+    .receipt-daily.receipt-daily--blocks-1 #receiptDailyTable { min-width: min(100%, 22rem); }
+    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable { min-width: 42rem; }
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable { min-width: 62rem; }
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable { min-width: 82rem; }
+    .receipt-daily #receiptDailyTable th:nth-child(6n+1),
+    .receipt-daily #receiptDailyTable td:nth-child(6n+1) {
+      width: 9%;
       white-space: nowrap;
     }
     .receipt-daily .receipt-daily-wd { font-weight: 600; }
     .receipt-daily .receipt-daily-wd-sun { color: var(--bad); }
     .receipt-daily .receipt-daily-wd-sat { color: var(--c-rain); }
-    .receipt-daily #receiptDailyTable th:nth-child(4n+2),
-    .receipt-daily #receiptDailyTable td:nth-child(4n+2) { width: 15%; }
-    .receipt-daily #receiptDailyTable th:nth-child(4n+3),
-    .receipt-daily #receiptDailyTable td:nth-child(4n+3),
-    .receipt-daily #receiptDailyTable th:nth-child(4n+4),
-    .receipt-daily #receiptDailyTable td:nth-child(4n+4) { width: 10%; }
-    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable th:nth-child(4),
-    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable td:nth-child(4) {
+    .receipt-daily #receiptDailyTable th:nth-child(6n+2),
+    .receipt-daily #receiptDailyTable td:nth-child(6n+2) { width: 14%; }
+    .receipt-daily #receiptDailyTable th:nth-child(6n+3),
+    .receipt-daily #receiptDailyTable td:nth-child(6n+3),
+    .receipt-daily #receiptDailyTable th:nth-child(6n+4),
+    .receipt-daily #receiptDailyTable td:nth-child(6n+4) { width: 8%; }
+    .receipt-daily #receiptDailyTable th:nth-child(6n+5),
+    .receipt-daily #receiptDailyTable td:nth-child(6n+5),
+    .receipt-daily #receiptDailyTable th:nth-child(6n+6),
+    .receipt-daily #receiptDailyTable td:nth-child(6n+6) { width: 11%; }
+    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable th:nth-child(6),
+    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable td:nth-child(6) {
       border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
     }
-    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable th:nth-child(4),
-    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable td:nth-child(4),
-    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable th:nth-child(8),
-    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable td:nth-child(8) {
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable th:nth-child(6),
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable td:nth-child(6),
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable th:nth-child(12),
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable td:nth-child(12) {
       border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
     }
-    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable th:nth-child(4),
-    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(4),
-    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable th:nth-child(8),
-    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(8),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable th:nth-child(6),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(6),
     .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable th:nth-child(12),
-    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(12) {
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(12),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable th:nth-child(18),
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable td:nth-child(18) {
       border-right: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
     }
-    .receipt-daily #receiptDailyTable th:nth-child(n+2):not(:nth-child(4n+1)),
-    .receipt-daily #receiptDailyTable td:nth-child(n+2):not(:nth-child(4n+1)) {
+    .receipt-daily #receiptDailyTable th:nth-child(n+2):not(:nth-child(6n+1)),
+    .receipt-daily #receiptDailyTable td:nth-child(n+2):not(:nth-child(6n+1)) {
       text-align: right;
       font-variant-numeric: tabular-nums;
     }
+    .receipt-daily-diff-pos { color: var(--ok); font-weight: 600; }
+    .receipt-daily-diff-neg { color: var(--bad); font-weight: 600; }
     .receipt-daily #receiptDailyTable td.empty {
       text-align: center;
       color: var(--sub);
       padding: 12px;
     }
-    .receipt-daily--blocks-2 .receipt-daily-block0-empty td:nth-child(-n+4) { opacity: 0.48; }
-    .receipt-daily--blocks-2 .receipt-daily-block1-empty td:nth-child(n+5) { opacity: 0.48; }
-    .receipt-daily--blocks-3 .receipt-daily-block0-empty td:nth-child(-n+4) { opacity: 0.48; }
-    .receipt-daily--blocks-3 .receipt-daily-block1-empty td:nth-child(n+5):nth-child(-n+8) { opacity: 0.48; }
-    .receipt-daily--blocks-3 .receipt-daily-block2-empty td:nth-child(n+9) { opacity: 0.48; }
-    .receipt-daily--blocks-4 .receipt-daily-block0-empty td:nth-child(-n+4) { opacity: 0.48; }
-    .receipt-daily--blocks-4 .receipt-daily-block1-empty td:nth-child(n+5):nth-child(-n+8) { opacity: 0.48; }
-    .receipt-daily--blocks-4 .receipt-daily-block2-empty td:nth-child(n+9):nth-child(-n+12) { opacity: 0.48; }
-    .receipt-daily--blocks-4 .receipt-daily-block3-empty td:nth-child(n+13) { opacity: 0.48; }
+    .receipt-daily--blocks-2 .receipt-daily-block0-empty td:nth-child(-n+6) { opacity: 0.48; }
+    .receipt-daily--blocks-2 .receipt-daily-block1-empty td:nth-child(n+7) { opacity: 0.48; }
+    .receipt-daily--blocks-3 .receipt-daily-block0-empty td:nth-child(-n+6) { opacity: 0.48; }
+    .receipt-daily--blocks-3 .receipt-daily-block1-empty td:nth-child(n+7):nth-child(-n+12) { opacity: 0.48; }
+    .receipt-daily--blocks-3 .receipt-daily-block2-empty td:nth-child(n+13) { opacity: 0.48; }
+    .receipt-daily--blocks-4 .receipt-daily-block0-empty td:nth-child(-n+6) { opacity: 0.48; }
+    .receipt-daily--blocks-4 .receipt-daily-block1-empty td:nth-child(n+7):nth-child(-n+12) { opacity: 0.48; }
+    .receipt-daily--blocks-4 .receipt-daily-block2-empty td:nth-child(n+13):nth-child(-n+18) { opacity: 0.48; }
+    .receipt-daily--blocks-4 .receipt-daily-block3-empty td:nth-child(n+19) { opacity: 0.48; }
+    .receipt-daily--blocks-1 .receipt-daily-block0-empty td:nth-child(-n+6) { opacity: 0.48; }
 
     /* 予算モーダル */
     .budget-modal-backdrop {
@@ -341,9 +356,13 @@
     .budget-modal-backdrop.show { display: flex; }
     body[data-theme='light'] .budget-modal-backdrop { background: rgba(15, 36, 54, 0.45); }
     .budget-modal {
-      width: min(520px, 100%);
+      width: min(520px, calc(100vw - 32px));
+      max-width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
       max-height: min(88vh, 720px);
       overflow: auto;
+      overflow-x: hidden;
       background: var(--card);
       border: 1px solid var(--line);
       border-radius: var(--radius);
@@ -351,21 +370,64 @@
       padding: 16px 18px;
     }
     .budget-modal h3 { margin: 0 0 8px; font-size: 1.05rem; }
+    /* 比率入力：狭い画面は縦並び（521〜767px で3列が潰れる問題を回避） */
     .budget-ratio-grid {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 8px;
+      grid-template-columns: 1fr;
+      gap: 10px;
       margin-top: 10px;
+      width: 100%;
+      min-width: 0;
     }
-    @media (max-width: 520px) {
-      .budget-ratio-grid { grid-template-columns: 1fr; }
+    @media (min-width: 768px) {
+      .budget-ratio-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+    .budget-ratio-grid label {
+      display: block;
+      min-width: 0;
+    }
+    .budget-modal label input.input,
+    .budget-modal label .input {
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
     }
     .budget-modal label span { display: block; font-size: 0.78rem; color: var(--sub); margin-bottom: 4px; }
     .budget-modal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
-    .budget-preview-wrap { margin-top: 12px; max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+    .manual-month-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(7.25rem, 1fr));
+      gap: 8px 10px;
+      margin-top: 8px;
+      max-height: min(52vh, 28rem);
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+    .manual-month-grid label span { display: block; font-size: 0.72rem; color: var(--sub); margin-bottom: 4px; }
+    .budget-preview-wrap { margin-top: 12px; max-height: min(40vh, 280px); overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
     .budget-preview-table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
     .budget-preview-table th, .budget-preview-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; }
     .budget-preview-table th { position: sticky; top: 0; background: color-mix(in srgb, var(--card) 92%, transparent); }
+    .budget-preview-table .budget-store-closed-cell { text-align: center; width: 4.5rem; vertical-align: middle; }
+    .budget-preview-table .budget-store-closed-cb { cursor: pointer; }
+    .budget-weekday-bulk-row {
+      margin: 8px 0 6px;
+      font-size: 0.72rem;
+      color: var(--sub);
+    }
+    .budget-weekday-bulk-row .budget-weekday-bulk-label { display: block; margin-bottom: 6px; }
+    .budget-weekday-bulk-cbs {
+      display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center;
+    }
+    .budget-weekday-bulk-cbs label {
+      display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+      color: var(--text);
+      user-select: none;
+    }
+    .budget-weekday-bulk-cbs input { cursor: pointer; }
 
     /* canvas overflow 防止 / grid item min-width reset */
     html { overflow-x: hidden; }
@@ -481,12 +543,18 @@
         <button class="chart-tab" data-period="6m">6ヶ月</button>
         <button class="chart-tab" data-period="12m">12ヶ月</button>
       </div>
+      <label style="display:flex;align-items:center;gap:6px;white-space:nowrap">
+        <span class="meta">比較西暦</span>
+        <select id="compareYearSelect" class="select" aria-label="売上比較で使う西暦年" title="前年比の基準となる年（対象月と同じ月日付で結びつけます）"></select>
+      </label>
       <button id="reloadBtn" class="btn primary">再読み込み</button>
     </div>
     <div class="controls budget-row" style="margin-top:10px;flex-wrap:wrap;align-items:center;gap:8px">
       <button id="openBudgetModalBtn" type="button" class="btn primary">予算・日別配分を設定</button>
-      <span class="meta" style="flex:1;min-width:12rem">表示月・店舗ごとにDBへ保存（平日・休日前日・休日の比率で按分）</span>
+      <button id="openPriorYearModalBtn" type="button" class="btn primary">月別売上を入力（西暦）</button>
+      <span class="meta" style="flex:1;min-width:12rem">表示月・店舗ごとに保存。予算は按分比率／比較売上は<strong>西暦×各月</strong>で登録（複数年可）</span>
       <span id="budgetRowHint" class="meta"></span>
+      <span id="priorYearRowHint" class="meta"></span>
     </div>
     <div id="filterMeta" class="meta">未取得</div>
   </section>
@@ -503,6 +571,8 @@
       <div class="kpi-card"><div class="kpi-label">営業日数</div><div class="kpi-value" id="kpiDays">-</div><div class="kpi-sub" id="kpiReceipts"></div></div>
       <div class="kpi-card"><div class="kpi-label">月間予算（設定）</div><div class="kpi-value" id="kpiBudget">-</div><div class="kpi-sub" id="kpiBudgetSub"></div></div>
       <div class="kpi-card"><div class="kpi-label">予算達成率</div><div class="kpi-value" id="kpiBudgetAchieve">-</div><div class="kpi-sub" id="kpiBudgetDiff"></div></div>
+      <div class="kpi-card"><div class="kpi-label">日次予算差（累計）</div><div class="kpi-value" id="kpiReceiptDailyDiff">-</div></div>
+      <div class="kpi-card"><div class="kpi-label">前年同月対比</div><div class="kpi-value" id="kpiYoyPct">-</div></div>
     </div>
   </section>
 
@@ -515,8 +585,8 @@
       <table id="receiptDailyTable" aria-describedby="receiptDailyHeading">
         <thead>
           <tr>
-            <th>日付</th><th>総売上</th><th>組数</th><th>客数</th>
-            <th>日付</th><th>総売上</th><th>組数</th><th>客数</th>
+            <th>日付</th><th>総売上</th><th>組数</th><th>客数</th><th>予算</th><th>差額</th>
+            <th>日付</th><th>総売上</th><th>組数</th><th>客数</th><th>予算</th><th>差額</th>
           </tr>
         </thead>
         <tbody id="receiptDailyTableBody"></tbody>
@@ -619,6 +689,7 @@
     <h3 id="budgetModalTitle">月間予算・日別配分</h3>
     <p class="meta" style="margin:0 0 12px;font-size:0.82rem;line-height:1.45">
       月間予算を <strong>平日</strong>・<strong>休日前日</strong>・<strong>休日（日曜・祝日）</strong>の比率で各日に分配します（例 1 : 1.5 : 2）。
+      <strong>店舗休日</strong>にチェックした日は按分から除外され、その分がほかの営業日に振り分けられます。
     </p>
     <label>
       <span>月間予算（円）</span>
@@ -639,9 +710,21 @@
       </label>
     </div>
     <p class="meta" style="margin:10px 0 4px;font-size:0.78rem">プレビュー（対象月の日別予算）</p>
+    <div id="budgetWeekdayBulkRow" class="budget-weekday-bulk-row" hidden>
+      <span class="budget-weekday-bulk-label">店舗休日を曜日で一括（チェックでその曜日の全日を店舗休日に）</span>
+      <div class="budget-weekday-bulk-cbs" role="group" aria-label="曜日で店舗休日を一括選択">
+        <label><input type="checkbox" class="budget-weekday-bulk-cb" data-weekday="1" /><span>月</span></label>
+        <label><input type="checkbox" class="budget-weekday-bulk-cb" data-weekday="2" /><span>火</span></label>
+        <label><input type="checkbox" class="budget-weekday-bulk-cb" data-weekday="3" /><span>水</span></label>
+        <label><input type="checkbox" class="budget-weekday-bulk-cb" data-weekday="4" /><span>木</span></label>
+        <label><input type="checkbox" class="budget-weekday-bulk-cb" data-weekday="5" /><span>金</span></label>
+        <label><input type="checkbox" class="budget-weekday-bulk-cb" data-weekday="6" /><span>土</span></label>
+        <label><input type="checkbox" class="budget-weekday-bulk-cb" data-weekday="0" /><span>日</span></label>
+      </div>
+    </div>
     <div class="budget-preview-wrap">
       <table class="budget-preview-table" id="budgetPreviewTable">
-        <thead><tr><th>日付</th><th>区分</th><th>日別予算</th></tr></thead>
+        <thead><tr><th>日付</th><th>区分</th><th class="budget-store-closed-cell">店舗休日</th><th>日別予算</th></tr></thead>
         <tbody id="budgetPreviewBody"></tbody>
       </table>
     </div>
@@ -654,12 +737,49 @@
   </div>
 </div>
 
+<div id="priorYearModalBackdrop" class="budget-modal-backdrop" aria-hidden="true">
+  <div class="budget-modal" role="dialog" aria-modal="true" aria-labelledby="priorYearModalTitle" style="max-width:min(40rem,96vw)">
+    <h3 id="priorYearModalTitle">月別売上の手入力（西暦）</h3>
+    <p class="meta" style="margin:0 0 12px;font-size:0.82rem;line-height:1.45">
+      <strong>店舗</strong>ごとに、任意の<strong>西暦</strong>の<strong>1〜12月</strong>の総売上（円）を登録できます。複数の年を順に選んで入力してください。
+      ダッシュボードの「比較西暦」で選んだ年の<strong>同じ月番号</strong>と突き合わせて前年比を計算します（前年固定ではありません）。
+      手入力がある月は<strong>レシート集計より手入力が優先</strong>されます。
+    </p>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:8px">
+      <label>
+        <span style="display:block;font-size:0.78rem;color:var(--sub);margin-bottom:4px">入力する西暦</span>
+        <select id="manualMonthYearSelect" class="select" aria-label="手入力する西暦年"></select>
+      </label>
+      <span class="meta" style="font-size:0.78rem;flex:1;min-width:10rem">年を変更すると、その年の登録済みデータを読み込みます。</span>
+    </div>
+    <div id="manualMonthGrid" class="manual-month-grid"></div>
+    <div class="budget-modal-actions">
+      <button id="priorYearModalSave" type="button" class="btn primary">この年を保存</button>
+      <button id="priorYearModalClear" type="button" class="btn">この年をすべてクリア</button>
+      <button id="priorYearModalClose" type="button" class="btn">閉じる</button>
+    </div>
+    <div id="priorYearModalHint" class="meta" style="margin-top:8px"></div>
+  </div>
+</div>
+
 <script>
 'use strict';
 
 const TOKEN_KEY = 'line_summary_admin_token';
 const THEME_KEY = 'line_reservation_calendar_theme';
+const COMPARE_YEAR_STORAGE_KEY = 'line_analytics_compare_year_v2';
 const PROJECT_URL = 'https://jhpmzqxqvapdkyvvhyra.supabase.co';
+
+function readCompareYearFromStorage() {
+  try {
+    const s = localStorage.getItem(COMPARE_YEAR_STORAGE_KEY);
+    if (s === null || s === '') return null;
+    const n = Number(s);
+    return Number.isFinite(n) && n >= 1900 && n <= 2100 ? Math.floor(n) : null;
+  } catch (_) {
+    return null;
+  }
+}
 
 /* ── store coordinates for weather (store_partition_key → {lat,lon}) ── */
 const STORE_COORDS = {
@@ -837,6 +957,20 @@ function kindLabelJa(kind) {
   return '平日';
 }
 
+const BUDGET_WEEKDAY_JA = ['日', '月', '火', '水', '木', '金', '土'];
+
+function getJsWeekdayJstFromIso(isoDate) {
+  const dt = new Date(`${isoDate}T12:00:00+09:00`);
+  if (Number.isNaN(dt.getTime())) return 0;
+  return dt.getDay();
+}
+
+function formatBudgetPreviewDateCell(isoDate) {
+  const md = `${Number(isoDate.slice(5, 7))}/${Number(isoDate.slice(8, 10))}`;
+  const wd = getJsWeekdayJstFromIso(isoDate);
+  return `${md}（${BUDGET_WEEKDAY_JA[wd]}）`;
+}
+
 function enumerateMonthDatesJs(targetMonth) {
   const m = /^(\d{4})-(\d{2})$/.exec(String(targetMonth).trim());
   if (!m) return [];
@@ -850,22 +984,30 @@ function enumerateMonthDatesJs(targetMonth) {
   return out;
 }
 
-function allocateDailyBudgetsClient(targetMonth, monthBudgetYen, ww, pw, hw) {
+function allocateDailyBudgetsClient(targetMonth, monthBudgetYen, ww, pw, hw, storeClosedSet) {
+  const closed = storeClosedSet instanceof Set ? storeClosedSet : new Set(storeClosedSet || []);
   const days = enumerateMonthDatesJs(targetMonth);
   if (!days.length || !Number.isFinite(monthBudgetYen) || monthBudgetYen <= 0) return new Map();
   const rawWeights = days.map((d) => {
+    if (closed.has(d)) return 0;
     const k = classifySalesBudgetDayJs(d);
     if (k === 'holiday') return hw;
     if (k === 'pre_holiday') return pw;
     return ww;
   });
   const sumW = rawWeights.reduce((a, b) => a + b, 0);
-  if (sumW <= 0) return new Map();
+  if (sumW <= 0) {
+    const z = new Map();
+    for (const d of days) z.set(d, 0);
+    return z;
+  }
   const fractions = rawWeights.map((rw) => (monthBudgetYen * rw) / sumW);
   const floors = fractions.map((x) => Math.floor(x));
   let allocated = floors.reduce((a, b) => a + b, 0);
   const remainder = monthBudgetYen - allocated;
-  const remainders = fractions.map((x, i) => ({ i, r: x - floors[i] }));
+  const remainders = fractions
+    .map((x, i) => ({ i, r: x - floors[i] }))
+    .filter((x) => rawWeights[x.i] > 0);
   remainders.sort((a, b) => b.r - a.r);
   const result = new Map();
   for (let i = 0; i < days.length; i++) result.set(days[i], floors[i]);
@@ -894,6 +1036,13 @@ const state = {
   lastBudgetWeekdayWeight: null,
   lastBudgetPreHolidayWeight: null,
   lastBudgetHolidayWeight: null,
+  /** API の store_closed_dates（YYYY-MM-DD）。モーダルでは modalStoreClosedDates を編集 */
+  lastStoreClosedDates: [],
+  modalStoreClosedDates: null,
+  budgetKpiSingleMonth: false,
+  lastYoyGrossYen: null,
+  lastManualPriorYearGrossYen: null,
+  compareYear: readCompareYearFromStorage(),
 };
 
 /* ── dom refs ── */
@@ -902,7 +1051,7 @@ const dom = {
   authState: $('authState'), lastRefresh: $('lastRefresh'),
   projectUrl: $('projectUrlInput'), tokenInput: $('tokenInput'),
   saveToken: $('saveTokenBtn'), clearToken: $('clearTokenBtn'),
-  storeSelect: $('storeSelect'), monthPicker: $('monthPicker'), reloadBtn: $('reloadBtn'),
+  storeSelect: $('storeSelect'), monthPicker: $('monthPicker'), reloadBtn: $('reloadBtn'), compareYearSelect: $('compareYearSelect'),
   filterMeta: $('filterMeta'), themeBtn: $('themeBtn'),
   kpiPeriodLabel: $('kpiPeriodLabel'),
   kpiGross: $('kpiGross'),
@@ -911,12 +1060,23 @@ const dom = {
   kpiUnit: $('kpiUnit'), kpiDays: $('kpiDays'), kpiReceipts: $('kpiReceipts'),
   kpiBudget: $('kpiBudget'), kpiBudgetSub: $('kpiBudgetSub'),
   kpiBudgetAchieve: $('kpiBudgetAchieve'), kpiBudgetDiff: $('kpiBudgetDiff'),
+  kpiReceiptDailyDiff: $('kpiReceiptDailyDiff'),
+  kpiYoyPct: $('kpiYoyPct'),
   openBudgetModalBtn: $('openBudgetModalBtn'), budgetRowHint: $('budgetRowHint'),
+  openPriorYearModalBtn: $('openPriorYearModalBtn'), priorYearRowHint: $('priorYearRowHint'),
+  priorYearModalBackdrop: $('priorYearModalBackdrop'),
+  manualMonthYearSelect: $('manualMonthYearSelect'),
+  manualMonthGrid: $('manualMonthGrid'),
+  priorYearModalSave: $('priorYearModalSave'),
+  priorYearModalClear: $('priorYearModalClear'),
+  priorYearModalClose: $('priorYearModalClose'),
+  priorYearModalHint: $('priorYearModalHint'),
   budgetModalBackdrop: $('budgetModalBackdrop'),
   budgetModalTotal: $('budgetModalTotal'),
   budgetModalWWeekday: $('budgetModalWWeekday'),
   budgetModalWPre: $('budgetModalWPre'),
   budgetModalWHoliday: $('budgetModalWHoliday'),
+  budgetWeekdayBulkRow: $('budgetWeekdayBulkRow'),
   budgetPreviewBody: $('budgetPreviewBody'),
   budgetModalSave: $('budgetModalSave'),
   budgetModalClear: $('budgetModalClear'),
@@ -933,6 +1093,19 @@ const dom = {
   receiptDailyTable: $('receiptDailyTable'),
   receiptDailyTableBody: $('receiptDailyTableBody'),
 };
+
+initCompareYearSelect();
+if (dom.compareYearSelect) {
+  dom.compareYearSelect.addEventListener('change', () => {
+    const v = dom.compareYearSelect.value;
+    state.compareYear = v === '' ? null : Math.floor(Number(v));
+    try {
+      if (state.compareYear != null) localStorage.setItem(COMPARE_YEAR_STORAGE_KEY, String(state.compareYear));
+      else localStorage.removeItem(COMPARE_YEAR_STORAGE_KEY);
+    } catch (_) {}
+    if (getToken()) loadAll();
+  });
+}
 
 /** 日次売上数値表：ビューポート変更時の再描画用 */
 let lastReceiptDailyData = null;
@@ -965,6 +1138,18 @@ function formatYenReceiptInt(n) {
   return '¥' + Math.round(x).toLocaleString('ja-JP');
 }
 
+/** 差額（実績−予算）。符号付き・絶対値は通貨書式 */
+function formatYenSignedReceiptDiff(n) {
+  const x = Math.round(Number(n));
+  if (!Number.isFinite(x)) return '-';
+  const absStr = '¥' + Math.abs(x).toLocaleString('ja-JP');
+  if (x > 0) return '+' + absStr;
+  if (x < 0) return '-' + absStr;
+  return '¥0';
+}
+
+const RECEIPT_DAILY_COLS = 6;
+
 /** 日付列: M/D + 曜（Asia/Tokyo）。曜部分のみ色分け（祝日・日曜は同一色、土曜は別色） */
 function receiptDailyDateCellInnerHtml(raw) {
   const s = String(raw || '').trim();
@@ -989,25 +1174,138 @@ function receiptDailyDateCellInnerHtml(raw) {
   return escapeHtml(`${md}${wdPart}`);
 }
 
-function receiptDailyCellsForDay(r) {
-  if (!r) return '<td></td><td></td><td></td><td></td>';
+function receiptDailyDateKey(raw) {
+  const s = String(raw ?? '').trim();
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  return m ? m[1] : s.slice(0, 10);
+}
+
+/** 進行状況用: 本日（JST）より後の暦日なら true（差額は 0 扱い） */
+function receiptDailyIsAfterTodayJst(dateKey) {
+  if (!dateKey || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false;
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  return dateKey > today;
+}
+
+function receiptDailyBudgetLookup(budgetByDate, r) {
+  if (!budgetByDate || r == null || r.date == null) return null;
+  const key = receiptDailyDateKey(r.date);
+  const a = Number(budgetByDate[r.date]);
+  if (Number.isFinite(a) && a >= 0) return a;
+  const b = Number(budgetByDate[key]);
+  if (Number.isFinite(b) && b >= 0) return b;
+  return null;
+}
+
+function receiptDailyCellsForDay(r, budgetByDate, storeClosedSet) {
+  const empty6 = '<td></td><td></td><td></td><td></td><td></td><td></td>';
+  if (!r) return empty6;
+  const closed =
+    storeClosedSet instanceof Set ? storeClosedSet : new Set(storeClosedSet || []);
+  const dateKey = receiptDailyDateKey(r.date);
+  const storeClosed = dateKey && closed.has(dateKey);
+  const gross = Number(r.gross_sales_yen);
+  let budgetCell = '-';
+  let diffCell = '-';
+  let diffClass = '';
+  if (storeClosed) {
+    budgetCell = formatYenReceiptInt(0);
+    if (Number.isFinite(gross) && gross !== 0) {
+      const d = Math.round(gross);
+      diffCell = formatYenSignedReceiptDiff(d);
+      diffClass = d < 0 ? 'receipt-daily-diff-neg' : d > 0 ? 'receipt-daily-diff-pos' : '';
+    }
+  } else if (budgetByDate && typeof budgetByDate === 'object' && r.date != null) {
+    const b = receiptDailyBudgetLookup(budgetByDate, r);
+    if (b != null && Number.isFinite(b) && b >= 0) {
+      budgetCell = formatYenReceiptInt(b);
+      if (receiptDailyIsAfterTodayJst(dateKey)) {
+        diffCell = formatYenSignedReceiptDiff(0);
+        diffClass = '';
+      } else {
+        const gOp = Number.isFinite(gross) ? gross : 0;
+        const d = Math.round(gOp - b);
+        diffCell = formatYenSignedReceiptDiff(d);
+        diffClass = d < 0 ? 'receipt-daily-diff-neg' : d > 0 ? 'receipt-daily-diff-pos' : '';
+      }
+    }
+  }
+  const diffAttr = diffClass ? ` class="${diffClass}"` : '';
   return (
     `<td>${receiptDailyDateCellInnerHtml(r.date)}</td>` +
     `<td style="text-align:right">${formatYenReceiptInt(r.gross_sales_yen)}</td>` +
     `<td style="text-align:right">${Number(r.party_count || 0)}</td>` +
-    `<td style="text-align:right">${Number(r.guest_count || 0)}</td>`
+    `<td style="text-align:right">${Number(r.guest_count || 0)}</td>` +
+    `<td style="text-align:right">${budgetCell}</td>` +
+    `<td style="text-align:right"${diffAttr}>${diffCell}</td>`
   );
+}
+
+function receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet) {
+  const closed =
+    storeClosedSet instanceof Set ? storeClosedSet : new Set(storeClosedSet || []);
+  if (!budgetByDate || typeof budgetByDate !== 'object' || !Array.isArray(series)) {
+    return { budgetTotal: null, diffTotal: null };
+  }
+  let budgetTotal = 0;
+  let diffTotal = 0;
+  let anyB = false;
+  const todayJst = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  for (const r of series) {
+    const dk = receiptDailyDateKey(r.date);
+    let b;
+    if (dk && closed.has(dk)) b = 0;
+    else {
+      const lb = receiptDailyBudgetLookup(budgetByDate, r);
+      if (lb == null || !Number.isFinite(lb) || lb < 0) continue;
+      b = lb;
+    }
+    anyB = true;
+    budgetTotal += b;
+    if (dk && closed.has(dk)) continue;
+    if (dk && dk > todayJst) continue;
+    const g = Number(r.gross_sales_yen);
+    const gOp = Number.isFinite(g) ? g : 0;
+    diffTotal += Math.round(gOp - b);
+  }
+  if (!anyB) return { budgetTotal: null, diffTotal: null };
+  return { budgetTotal, diffTotal };
+}
+
+/** 日次売上（数値）表の「月間合計」差額と同じ値を KPI に反映 */
+function updateReceiptDailyDiffKpi(payload) {
+  if (!dom.kpiReceiptDailyDiff) return;
+  const series = Array.isArray(payload?.series) ? payload.series : [];
+  const budgetByDate =
+    payload?.daily_budget_yen_by_date && typeof payload.daily_budget_yen_by_date === 'object'
+      ? payload.daily_budget_yen_by_date
+      : null;
+  const rawClosed = payload?.store_closed_dates;
+  const storeClosedSet = new Set(
+    Array.isArray(rawClosed) ? rawClosed.map((x) => receiptDailyDateKey(x)) : [],
+  );
+  const { diffTotal } = receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet);
+  dom.kpiReceiptDailyDiff.classList.remove('kpi-yoy-up', 'kpi-yoy-down', 'kpi-yoy-neutral');
+  if (diffTotal == null) {
+    dom.kpiReceiptDailyDiff.textContent = '-';
+    return;
+  }
+  dom.kpiReceiptDailyDiff.textContent = formatYenSignedReceiptDiff(diffTotal);
+  if (diffTotal > 0) dom.kpiReceiptDailyDiff.classList.add('kpi-yoy-up');
+  else if (diffTotal < 0) dom.kpiReceiptDailyDiff.classList.add('kpi-yoy-down');
+  else dom.kpiReceiptDailyDiff.classList.add('kpi-yoy-neutral');
 }
 
 function receiptDailyBlockCount() {
   if (typeof window.matchMedia !== 'function') return 2;
-  if (window.matchMedia('(min-width: 1024px)').matches) return 4;
-  if (window.matchMedia('(min-width: 768px)').matches) return 3;
-  return 2;
+  if (window.matchMedia('(min-width: 1320px)').matches) return 4;
+  if (window.matchMedia('(min-width: 980px)').matches) return 3;
+  if (window.matchMedia('(min-width: 640px)').matches) return 2;
+  return 1;
 }
 
 function receiptDailyColspan() {
-  return receiptDailyBlockCount() * 4;
+  return receiptDailyBlockCount() * RECEIPT_DAILY_COLS;
 }
 
 function receiptDailySyncLayoutChrome(optBlocks) {
@@ -1017,10 +1315,12 @@ function receiptDailySyncLayoutChrome(optBlocks) {
     card.classList.toggle('receipt-daily--blocks-4', n === 4);
     card.classList.toggle('receipt-daily--blocks-3', n === 3);
     card.classList.toggle('receipt-daily--blocks-2', n === 2);
+    card.classList.toggle('receipt-daily--blocks-1', n === 1);
   }
   const hr = dom.receiptDailyTable?.querySelector('thead tr');
   if (!hr) return;
-  const one = '<th>日付</th><th>総売上</th><th>組数</th><th>客数</th>';
+  const one =
+    '<th>日付</th><th>総売上</th><th>組数</th><th>客数</th><th>予算</th><th>差額</th>';
   hr.innerHTML = one.repeat(n);
 }
 
@@ -1052,7 +1352,7 @@ function renderReceiptDailyTable(data) {
   if (!dom.receiptDailyTableBody || !dom.receiptDailyMeta) return;
   const numBlocks = receiptDailyBlockCount();
   receiptDailySyncLayoutChrome(numBlocks);
-  const colspan = numBlocks * 4;
+  const colspan = numBlocks * RECEIPT_DAILY_COLS;
   const month = data?.month ? String(data.month) : '-';
   let storeHead = data?.selected_store_name ? String(data.selected_store_name) : '';
   if (!storeHead && data?.selected_store_key) storeHead = String(data.selected_store_key);
@@ -1060,6 +1360,14 @@ function renderReceiptDailyTable(data) {
   dom.receiptDailyMeta.textContent =
     `対象: ${storeHead} / ${month} — 更新: ${formatReceiptDailyUpdatedAt(data?.generated_at)}`;
   const series = Array.isArray(data?.series) ? data.series : [];
+  const budgetByDate =
+    data?.daily_budget_yen_by_date && typeof data.daily_budget_yen_by_date === 'object'
+      ? data.daily_budget_yen_by_date
+      : null;
+  const rawClosed = data?.store_closed_dates;
+  const storeClosedSet = new Set(
+    Array.isArray(rawClosed) ? rawClosed.map((x) => receiptDailyDateKey(x)) : [],
+  );
   const tb = dom.receiptDailyTableBody;
   tb.innerHTML = '';
   if (series.length === 0) {
@@ -1083,12 +1391,24 @@ function renderReceiptDailyTable(data) {
     }
     let rowHtml = '';
     for (let bi = 0; bi < numBlocks; bi++) {
-      rowHtml += receiptDailyCellsForDay(chunks[bi][ri]);
+      rowHtml += receiptDailyCellsForDay(chunks[bi][ri], budgetByDate, storeClosedSet);
     }
     tr.innerHTML = rowHtml;
     tb.appendChild(tr);
   }
   const t = data?.totals ?? {};
+  const { budgetTotal, diffTotal } = receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet);
+  const bCell = budgetTotal == null ? '-' : formatYenReceiptInt(budgetTotal);
+  const dCell = diffTotal == null ? '-' : formatYenSignedReceiptDiff(diffTotal);
+  const diffSumCls =
+    diffTotal == null
+      ? ''
+      : diffTotal < 0
+        ? ' class="receipt-daily-diff-neg"'
+        : diffTotal > 0
+          ? ' class="receipt-daily-diff-pos"'
+          : '';
+  const tailColspan = RECEIPT_DAILY_COLS * (numBlocks - 1);
   const trSum = document.createElement('tr');
   trSum.style.fontWeight = 'bold';
   trSum.style.borderTop = '2px solid rgba(128, 160, 188, 0.45)';
@@ -1097,7 +1417,9 @@ function renderReceiptDailyTable(data) {
     `<td style="text-align:right">${formatYenReceiptInt(t.total_gross_sales_yen)}</td>` +
     `<td style="text-align:right">${Number(t.total_party_count || 0)}</td>` +
     `<td style="text-align:right">${Number(t.total_guest_count || 0)}</td>` +
-    `<td colspan="${4 * (numBlocks - 1)}"></td>`;
+    `<td style="text-align:right">${bCell}</td>` +
+    `<td style="text-align:right"${diffSumCls}>${dCell}</td>` +
+    (tailColspan > 0 ? `<td colspan="${tailColspan}"></td>` : '');
   tb.appendChild(trSum);
 }
 
@@ -1112,6 +1434,14 @@ function buildReceiptDailyTablePayload(salesData, displayMonth, isSingleMonth) {
       generated_at: salesData?.generated_at,
       selected_store_name: storeName,
       selected_store_key: storeKey,
+      daily_budget_yen_by_date:
+        salesData?.daily_budget_yen_by_date &&
+        typeof salesData.daily_budget_yen_by_date === 'object'
+          ? salesData.daily_budget_yen_by_date
+          : null,
+      store_closed_dates: Array.isArray(salesData?.store_closed_dates)
+        ? salesData.store_closed_dates.map(String)
+        : [],
     };
   }
   const prefix = `${displayMonth}-`;
@@ -1128,6 +1458,10 @@ function buildReceiptDailyTablePayload(salesData, displayMonth, isSingleMonth) {
     generated_at: salesData?.generated_at,
     selected_store_name: storeName,
     selected_store_key: storeKey,
+    daily_budget_yen_by_date: null,
+    store_closed_dates: Array.isArray(state.lastStoreClosedDates)
+      ? [...state.lastStoreClosedDates]
+      : [],
   };
 }
 
@@ -1161,9 +1495,114 @@ function syncBudgetModalFromState() {
   if (dom.budgetModalWHoliday) dom.budgetModalWHoliday.value = String(hw);
 }
 
+function compareYearForApi(displayMonth) {
+  if (state.compareYear != null && Number.isFinite(state.compareYear)) {
+    return state.compareYear;
+  }
+  const y = Number(String(displayMonth || '').slice(0, 4));
+  return Number.isFinite(y) ? y - 1 : new Date().getFullYear() - 1;
+}
+
+function formatYearMonthJa(ym) {
+  const s = String(ym || '').trim();
+  const m = /^(\d{4})-(\d{2})$/.exec(s);
+  if (!m) return s || '';
+  return `${m[1]}年${Number(m[2])}月`;
+}
+
+function initCompareYearSelect() {
+  const sel = dom.compareYearSelect;
+  if (!sel) return;
+  sel.innerHTML = '';
+  const auto = document.createElement('option');
+  auto.value = '';
+  auto.textContent = '自動（前年）';
+  sel.appendChild(auto);
+  for (let y = 2035; y >= 2015; y--) {
+    const o = document.createElement('option');
+    o.value = String(y);
+    o.textContent = `${y}年`;
+    sel.appendChild(o);
+  }
+  sel.value = state.compareYear != null ? String(state.compareYear) : '';
+}
+
+function ensureManualMonthGridBuilt() {
+  const grid = dom.manualMonthGrid;
+  if (!grid || grid.dataset.built === '1') return;
+  grid.dataset.built = '1';
+  for (let mi = 1; mi <= 12; mi++) {
+    const lab = document.createElement('label');
+    const sp = document.createElement('span');
+    sp.textContent = `${mi}月（円）`;
+    const inp = document.createElement('input');
+    inp.type = 'number';
+    inp.min = '0';
+    inp.step = '1000';
+    inp.className = 'input';
+    inp.id = 'manualM' + String(mi).padStart(2, '0');
+    inp.setAttribute('inputmode', 'numeric');
+    lab.appendChild(sp);
+    lab.appendChild(inp);
+    grid.appendChild(lab);
+  }
+}
+
+function populateManualMonthYearSelect() {
+  const sel = dom.manualMonthYearSelect;
+  if (!sel || sel.dataset.populated === '1') return;
+  sel.dataset.populated = '1';
+  sel.innerHTML = '';
+  for (let y = 2035; y >= 2015; y--) {
+    const o = document.createElement('option');
+    o.value = String(y);
+    o.textContent = `${y}年`;
+    sel.appendChild(o);
+  }
+}
+
+async function refreshManualMonthForm(year) {
+  ensureManualMonthGridBuilt();
+  const sk = state.storeKey || '';
+  const data = await apiFetch(
+    `/receipts/sales-manual-months?year=${year}&store_key=${encodeURIComponent(sk)}`,
+  );
+  const months = data?.months ?? {};
+  for (let mi = 1; mi <= 12; mi++) {
+    const key = `${year}-${String(mi).padStart(2, '0')}`;
+    const el = document.getElementById('manualM' + String(mi).padStart(2, '0'));
+    if (!el) continue;
+    const v = months[key];
+    el.value = v != null && Number.isFinite(Number(v)) ? String(v) : '';
+  }
+}
+
+function syncBudgetWeekdayBulkCheckboxes(targetMonth, closed) {
+  const row = dom.budgetWeekdayBulkRow;
+  if (!row) return;
+  const days = enumerateMonthDatesJs(targetMonth);
+  row.querySelectorAll('.budget-weekday-bulk-cb').forEach((cb) => {
+    const wd = Number(cb.getAttribute('data-weekday'));
+    const dates = days.filter((d) => getJsWeekdayJstFromIso(d) === wd);
+    if (!dates.length) {
+      cb.checked = false;
+      cb.disabled = true;
+      return;
+    }
+    cb.disabled = false;
+    cb.checked = dates.every((d) => closed.has(d));
+  });
+}
+
 function renderBudgetPreview() {
   if (!dom.budgetPreviewBody) return;
-  const dm = displayMonthFromPeriod();
+  const dm = normalizeYmForBudgetApi(displayMonthFromPeriod());
+  if (!dm || !/^\d{4}-\d{2}$/.test(dm)) {
+    dom.budgetPreviewBody.innerHTML =
+      '<tr><td colspan="4" style="text-align:center;color:var(--sub);padding:12px">表示範囲の月を選んでください</td></tr>';
+    if (dom.budgetWeekdayBulkRow) dom.budgetWeekdayBulkRow.hidden = true;
+    return;
+  }
   const totalRaw = dom.budgetModalTotal?.value?.trim() ?? '';
   const total = totalRaw === '' ? 0 : Number(totalRaw.replace(/,/g, ''));
   const ww = Number(dom.budgetModalWWeekday?.value);
@@ -1172,22 +1611,38 @@ function renderBudgetPreview() {
   const nww = Number.isFinite(ww) && ww > 0 ? ww : 1;
   const npw = Number.isFinite(pw) && pw > 0 ? pw : 1.5;
   const nhw = Number.isFinite(hw) && hw > 0 ? hw : 2;
+  const closed =
+    state.modalStoreClosedDates instanceof Set
+      ? state.modalStoreClosedDates
+      : new Set(state.lastStoreClosedDates || []);
   if (!Number.isFinite(total) || total <= 0) {
-    dom.budgetPreviewBody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--sub);padding:12px">月間予算を入力するとプレビュー表示されます</td></tr>';
+    dom.budgetPreviewBody.innerHTML =
+      '<tr><td colspan="4" style="text-align:center;color:var(--sub);padding:12px">月間予算を入力するとプレビュー表示されます</td></tr>';
+    if (dom.budgetWeekdayBulkRow) dom.budgetWeekdayBulkRow.hidden = true;
     return;
   }
-  const map = allocateDailyBudgetsClient(dm, Math.round(total), nww, npw, nhw);
+  const map = allocateDailyBudgetsClient(dm, Math.round(total), nww, npw, nhw, closed);
   const days = enumerateMonthDatesJs(dm);
   const rows = days.map((d) => {
+    const isClosed = closed.has(d);
     const kind = classifySalesBudgetDayJs(d);
+    const label = isClosed ? '店舗休日' : kindLabelJa(kind);
     const yen = map.get(d) ?? 0;
-    const md = `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}`;
-    return `<tr><td>${escapeHtml(md)}</td><td>${escapeHtml(kindLabelJa(kind))}</td><td style="text-align:right">${yen.toLocaleString('ja-JP')}円</td></tr>`;
+    const dateCell = formatBudgetPreviewDateCell(d);
+    const chk = isClosed ? ' checked' : '';
+    return (
+      `<tr><td>${escapeHtml(dateCell)}</td><td>${escapeHtml(label)}</td>` +
+      `<td class="budget-store-closed-cell"><input type="checkbox" class="budget-store-closed-cb" data-closed-date="${d}"${chk} aria-label="店舗休日 ${escapeHtml(dateCell)}" /></td>` +
+      `<td style="text-align:right">${yen.toLocaleString('ja-JP')}円</td></tr>`
+    );
   });
   dom.budgetPreviewBody.innerHTML = rows.join('');
+  if (dom.budgetWeekdayBulkRow) dom.budgetWeekdayBulkRow.hidden = false;
+  syncBudgetWeekdayBulkCheckboxes(dm, closed);
 }
 
 function openBudgetModal() {
+  state.modalStoreClosedDates = new Set(state.lastStoreClosedDates || []);
   syncBudgetModalFromState();
   renderBudgetPreview();
   if (dom.budgetModalBackdrop) {
@@ -1204,39 +1659,136 @@ function closeBudgetModal() {
   }
 }
 
+async function openPriorYearModal() {
+  populateManualMonthYearSelect();
+  ensureManualMonthGridBuilt();
+  const dm = displayMonthFromPeriod();
+  const yDefault = compareYearForApi(dm);
+  if (dom.manualMonthYearSelect) dom.manualMonthYearSelect.value = String(yDefault);
+  if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '読み込み中…';
+  try {
+    await refreshManualMonthForm(yDefault);
+    if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '';
+  } catch (e) {
+    if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '取得に失敗: ' + (e && e.message ? e.message : String(e));
+  }
+  if (dom.priorYearModalBackdrop) {
+    dom.priorYearModalBackdrop.classList.add('show');
+    dom.priorYearModalBackdrop.setAttribute('aria-hidden', 'false');
+  }
+}
+
+function closePriorYearModal() {
+  if (dom.priorYearModalBackdrop) {
+    dom.priorYearModalBackdrop.classList.remove('show');
+    dom.priorYearModalBackdrop.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function setYoyPctTone(el, tone) {
+  if (!el) return;
+  el.classList.remove('kpi-yoy-up', 'kpi-yoy-down', 'kpi-yoy-neutral');
+  if (tone === 'up') el.classList.add('kpi-yoy-up');
+  else if (tone === 'down') el.classList.add('kpi-yoy-down');
+  else el.classList.add('kpi-yoy-neutral');
+}
+
+function setBothYoyPctDisplay(text, tone) {
+  if (!dom.kpiYoyPct) return;
+  dom.kpiYoyPct.textContent = text;
+  setYoyPctTone(dom.kpiYoyPct, tone);
+}
+
+function effectivePriorYearGrossYen() {
+  if (state.lastManualPriorYearGrossYen != null && Number.isFinite(Number(state.lastManualPriorYearGrossYen))) {
+    return Number(state.lastManualPriorYearGrossYen);
+  }
+  const s = state.lastYoyGrossYen;
+  if (s != null && Number.isFinite(Number(s))) return Number(s);
+  return null;
+}
+
+function updateYoyKpiCard(grossYen) {
+  const gross = Number(grossYen);
+  const gOk = Number.isFinite(gross);
+  if (!dom.kpiYoyPct) return;
+  if (!state.budgetKpiSingleMonth || !gOk) {
+    setBothYoyPctDisplay('-', 'neutral');
+    return;
+  }
+  const yoyRaw = effectivePriorYearGrossYen();
+  if (yoyRaw == null || !Number.isFinite(yoyRaw)) {
+    setBothYoyPctDisplay('-', 'neutral');
+    return;
+  }
+  const yoy = Number(yoyRaw);
+  if (yoy === 0) {
+    setBothYoyPctDisplay('―', 'neutral');
+    return;
+  }
+  const yoyPct = ((gross - yoy) / yoy) * 100;
+  const yoySign = yoyPct >= 0 ? '+' : '';
+  const pctText = `${yoySign}${yoyPct.toFixed(1)}%`;
+  const tone = yoyPct > 0 ? 'up' : yoyPct < 0 ? 'down' : 'neutral';
+  setBothYoyPctDisplay(pctText, tone);
+}
+
 function updateBudgetKpis(grossYen, monthLabel) {
-  if (!dom.kpiBudget) return;
   const mo = String(monthLabel || '').trim();
   const b = state.lastMonthBudgetYen;
   const gross = Number(grossYen);
   const gOk = Number.isFinite(gross);
-  dom.kpiBudget.textContent = b != null ? yen(b) : '未設定';
-  dom.kpiBudgetSub.textContent = mo ? `${mo}・比率按分・DB保存` : '';
-  if (b != null && b > 0 && gOk) {
-    const pct = (gross / b) * 100;
-    dom.kpiBudgetAchieve.textContent = pct.toFixed(1) + '%';
-    const diff = gross - b;
-    const sign = diff >= 0 ? '+' : '-';
-    dom.kpiBudgetDiff.textContent = `差額 ${sign}${yen(Math.abs(diff))}`;
-  } else {
-    dom.kpiBudgetAchieve.textContent = '-';
-    dom.kpiBudgetDiff.textContent = '';
+  if (dom.kpiBudget) {
+    dom.kpiBudget.textContent = b != null ? yen(b) : '未設定';
+    dom.kpiBudgetSub.textContent = mo ? `${mo}・比率按分・DB保存` : '';
   }
+  if (dom.kpiBudgetAchieve && dom.kpiBudgetDiff) {
+    if (b != null && b > 0 && gOk) {
+      const pct = (gross / b) * 100;
+      dom.kpiBudgetAchieve.textContent = pct.toFixed(1) + '%';
+      dom.kpiBudgetAchieve.classList.toggle('kpi-budget-atrisk', pct <= 100);
+      const diff = gross - b;
+      const sign = diff >= 0 ? '+' : '-';
+      dom.kpiBudgetDiff.textContent = `予算差 ${sign}${yen(Math.abs(diff))}`;
+    } else {
+      dom.kpiBudgetAchieve.textContent = '-';
+      dom.kpiBudgetAchieve.classList.remove('kpi-budget-atrisk');
+      dom.kpiBudgetDiff.textContent = '';
+    }
+  }
+  updateYoyKpiCard(grossYen);
 }
 
 function resetBudgetKpis(opts) {
   const clearInput = opts && opts.clearInput;
   if (dom.kpiBudget) dom.kpiBudget.textContent = '-';
   if (dom.kpiBudgetSub) dom.kpiBudgetSub.textContent = '';
-  if (dom.kpiBudgetAchieve) dom.kpiBudgetAchieve.textContent = '-';
+  if (dom.kpiBudgetAchieve) {
+    dom.kpiBudgetAchieve.textContent = '-';
+    dom.kpiBudgetAchieve.classList.remove('kpi-budget-atrisk');
+  }
   if (dom.kpiBudgetDiff) dom.kpiBudgetDiff.textContent = '';
+  if (dom.kpiReceiptDailyDiff) {
+    dom.kpiReceiptDailyDiff.textContent = '-';
+    dom.kpiReceiptDailyDiff.classList.remove('kpi-yoy-up', 'kpi-yoy-down', 'kpi-yoy-neutral');
+  }
+  if (dom.kpiYoyPct) {
+    dom.kpiYoyPct.textContent = '-';
+    dom.kpiYoyPct.classList.remove('kpi-yoy-up', 'kpi-yoy-down', 'kpi-yoy-neutral');
+  }
   if (dom.budgetModalHint) dom.budgetModalHint.textContent = '';
   if (dom.budgetRowHint) dom.budgetRowHint.textContent = '';
+  if (dom.priorYearRowHint) dom.priorYearRowHint.textContent = '';
   state.lastGrossYen = null;
   state.lastMonthBudgetYen = null;
+  state.budgetKpiSingleMonth = false;
+  state.lastYoyGrossYen = null;
+  state.lastManualPriorYearGrossYen = null;
   state.lastBudgetWeekdayWeight = null;
   state.lastBudgetPreHolidayWeight = null;
   state.lastBudgetHolidayWeight = null;
+  state.lastStoreClosedDates = [];
+  state.modalStoreClosedDates = null;
   if (clearInput) syncBudgetModalFromState();
 }
 
@@ -1306,6 +1858,17 @@ function periodToMonths(period) {
 function displayMonthFromPeriod() {
   const months = periodToMonths(state.period);
   return months[months.length - 1] || '';
+}
+
+/** 予算APIの month と一致させる（1桁月・日付付き文字列でも YYYY-MM に正規化） */
+function normalizeYmForBudgetApi(ym) {
+  const s = String(ym ?? '').trim();
+  const m = /^(\d{4})-(\d{1,2})(?:-\d{1,2})?$/.exec(s);
+  if (!m) return s;
+  const y = Number(m[1]);
+  const mo = Math.min(12, Math.max(1, Math.floor(Number(m[2]))));
+  if (!Number.isFinite(y) || y < 1900 || y > 2100) return s;
+  return `${String(y).padStart(4, '0')}-${String(mo).padStart(2, '0')}`;
 }
 
 function isValidMonthString(value) {
@@ -1396,6 +1959,35 @@ if (dom.openBudgetModalBtn) {
   const el = document.getElementById(id);
   if (el) el.addEventListener('input', () => renderBudgetPreview());
 });
+if (dom.budgetPreviewBody) {
+  dom.budgetPreviewBody.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || t.type !== 'checkbox' || !t.classList.contains('budget-store-closed-cb')) return;
+    const d = t.getAttribute('data-closed-date');
+    if (!d || !(state.modalStoreClosedDates instanceof Set)) return;
+    if (t.checked) state.modalStoreClosedDates.add(d);
+    else state.modalStoreClosedDates.delete(d);
+    renderBudgetPreview();
+  });
+}
+if (dom.budgetWeekdayBulkRow) {
+  dom.budgetWeekdayBulkRow.addEventListener('change', (e) => {
+    const t = e.target;
+    if (!t || t.type !== 'checkbox' || !t.classList.contains('budget-weekday-bulk-cb')) return;
+    const wd = Number(t.getAttribute('data-weekday'));
+    if (!Number.isFinite(wd)) return;
+    if (!(state.modalStoreClosedDates instanceof Set)) return;
+    const dm = normalizeYmForBudgetApi(displayMonthFromPeriod());
+    if (!dm || !/^\d{4}-\d{2}$/.test(dm)) return;
+    const dates = enumerateMonthDatesJs(dm).filter((d) => getJsWeekdayJstFromIso(d) === wd);
+    if (t.checked) {
+      for (const d of dates) state.modalStoreClosedDates.add(d);
+    } else {
+      for (const d of dates) state.modalStoreClosedDates.delete(d);
+    }
+    renderBudgetPreview();
+  });
+}
 if (dom.budgetModalClose) {
   dom.budgetModalClose.addEventListener('click', () => closeBudgetModal());
 }
@@ -1406,7 +1998,11 @@ if (dom.budgetModalBackdrop) {
 }
 if (dom.budgetModalSave) {
   dom.budgetModalSave.addEventListener('click', async () => {
-    const dm = displayMonthFromPeriod();
+    const dm = normalizeYmForBudgetApi(displayMonthFromPeriod());
+    if (!dm || !/^\d{4}-\d{2}$/.test(dm)) {
+      if (dom.budgetModalHint) dom.budgetModalHint.textContent = '対象月が無効です。カレンダーで月を選び直してください。';
+      return;
+    }
     const raw = dom.budgetModalTotal?.value?.trim() ?? '';
     let budget_yen = null;
     if (raw !== '') {
@@ -1429,15 +2025,25 @@ if (dom.budgetModalSave) {
     }
     if (dom.budgetModalHint) dom.budgetModalHint.textContent = '保存中…';
     try {
+      const sk = (dom.storeSelect && dom.storeSelect.value) || state.storeKey || '';
+      if (!String(sk).trim()) {
+        if (dom.budgetModalHint) dom.budgetModalHint.textContent = '先に店舗を選んでから保存してください（未選択だと予算が別キーに保存され、再読み込みで休日が消えます）';
+        return;
+      }
+      const closedArr =
+        state.modalStoreClosedDates instanceof Set
+          ? Array.from(state.modalStoreClosedDates).sort()
+          : [...(state.lastStoreClosedDates || [])].sort();
       const body = budget_yen == null
-        ? { store_key: state.storeKey, month: dm, budget_yen: null }
+        ? { store_key: sk, month: dm, budget_yen: null }
         : {
-          store_key: state.storeKey,
+          store_key: sk,
           month: dm,
           budget_yen,
           weekday_weight: ww,
           pre_holiday_weight: pw,
           holiday_weight: hw,
+          store_closed_dates: closedArr,
         };
       const result = await apiFetch('/receipts/sales-budget', { method: 'PUT', body });
       const mb = result?.month_budget_yen;
@@ -1446,16 +2052,20 @@ if (dom.budgetModalSave) {
         state.lastBudgetWeekdayWeight = result?.weekday_weight != null ? Number(result.weekday_weight) : ww;
         state.lastBudgetPreHolidayWeight = result?.pre_holiday_weight != null ? Number(result.pre_holiday_weight) : pw;
         state.lastBudgetHolidayWeight = result?.holiday_weight != null ? Number(result.holiday_weight) : hw;
+        const sc = result?.store_closed_dates;
+        state.lastStoreClosedDates = Array.isArray(sc) ? sc.map(String) : closedArr;
       } else {
         state.lastBudgetWeekdayWeight = null;
         state.lastBudgetPreHolidayWeight = null;
         state.lastBudgetHolidayWeight = null;
+        state.lastStoreClosedDates = [];
       }
       syncBudgetModalFromState();
       updateBudgetKpis(state.lastGrossYen, dm);
       if (dom.budgetModalHint) dom.budgetModalHint.textContent = dm ? `保存しました（${dm}）` : '保存しました';
       if (dom.budgetRowHint) dom.budgetRowHint.textContent = '保存済み';
       closeBudgetModal();
+      if (getToken()) void loadAll();
     } catch (e) {
       if (dom.budgetModalHint) dom.budgetModalHint.textContent = '保存に失敗: ' + (e && e.message ? e.message : String(e));
     }
@@ -1463,25 +2073,133 @@ if (dom.budgetModalSave) {
 }
 if (dom.budgetModalClear) {
   dom.budgetModalClear.addEventListener('click', async () => {
-    const dm = displayMonthFromPeriod();
+    const dm = normalizeYmForBudgetApi(displayMonthFromPeriod());
+    if (!dm || !/^\d{4}-\d{2}$/.test(dm)) {
+      if (dom.budgetModalHint) dom.budgetModalHint.textContent = '対象月が無効です';
+      return;
+    }
     if (dom.budgetModalHint) dom.budgetModalHint.textContent = '保存中…';
     try {
+      const sk = (dom.storeSelect && dom.storeSelect.value) || state.storeKey || '';
+      if (!String(sk).trim()) {
+        if (dom.budgetModalHint) dom.budgetModalHint.textContent = '先に店舗を選択してください';
+        return;
+      }
       await apiFetch('/receipts/sales-budget', {
         method: 'PUT',
-        body: { store_key: state.storeKey, month: dm, budget_yen: null },
+        body: { store_key: sk, month: dm, budget_yen: null },
       });
       state.lastMonthBudgetYen = null;
       state.lastBudgetWeekdayWeight = null;
       state.lastBudgetPreHolidayWeight = null;
       state.lastBudgetHolidayWeight = null;
+      state.lastStoreClosedDates = [];
+      state.modalStoreClosedDates = new Set();
       syncBudgetModalFromState();
       updateBudgetKpis(state.lastGrossYen, dm);
       renderBudgetPreview();
       if (dom.budgetModalHint) dom.budgetModalHint.textContent = '予算をクリアしました';
       if (dom.budgetRowHint) dom.budgetRowHint.textContent = '予算未設定';
       closeBudgetModal();
+      if (getToken()) void loadAll();
     } catch (e) {
       if (dom.budgetModalHint) dom.budgetModalHint.textContent = 'クリアに失敗: ' + (e && e.message ? e.message : String(e));
+    }
+  });
+}
+
+if (dom.openPriorYearModalBtn) {
+  dom.openPriorYearModalBtn.addEventListener('click', () => openPriorYearModal());
+}
+if (dom.priorYearModalClose) {
+  dom.priorYearModalClose.addEventListener('click', () => closePriorYearModal());
+}
+if (dom.priorYearModalBackdrop) {
+  dom.priorYearModalBackdrop.addEventListener('click', (e) => {
+    if (e.target === dom.priorYearModalBackdrop) closePriorYearModal();
+  });
+}
+if (dom.manualMonthYearSelect) {
+  dom.manualMonthYearSelect.addEventListener('change', async () => {
+    const y = Number(dom.manualMonthYearSelect.value);
+    if (!Number.isFinite(y)) return;
+    if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '読み込み中…';
+    try {
+      await refreshManualMonthForm(y);
+      if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '';
+    } catch (e) {
+      if (dom.priorYearModalHint) dom.priorYearModalHint.textContent =
+        '取得に失敗: ' + (e && e.message ? e.message : String(e));
+    }
+  });
+}
+if (dom.priorYearModalSave) {
+  dom.priorYearModalSave.addEventListener('click', async () => {
+    const year = Number(dom.manualMonthYearSelect?.value);
+    if (!Number.isFinite(year)) {
+      if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '西暦を選択してください';
+      return;
+    }
+    ensureManualMonthGridBuilt();
+    const entries = [];
+    for (let mi = 1; mi <= 12; mi++) {
+      const key = `${year}-${String(mi).padStart(2, '0')}`;
+      const el = document.getElementById('manualM' + String(mi).padStart(2, '0'));
+      const raw = el?.value?.trim() ?? '';
+      if (raw !== '') {
+        const n = Number(raw.replace(/,/g, ''));
+        if (!Number.isFinite(n) || n < 0) {
+          if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${mi}月: 0以上の数値を入力してください`;
+          return;
+        }
+      }
+      entries.push({
+        sales_month: key,
+        gross_sales_yen: raw === '' ? null : Math.round(Number(raw.replace(/,/g, ''))),
+      });
+    }
+    if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '保存中…';
+    try {
+      await apiFetch('/receipts/sales-manual-months', {
+        method: 'PUT',
+        body: { store_key: state.storeKey, entries },
+      });
+      await refreshManualMonthForm(year);
+      if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${year}年を保存しました`;
+      closePriorYearModal();
+      loadAll();
+    } catch (e) {
+      if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '保存に失敗: ' + (e && e.message ? e.message : String(e));
+    }
+  });
+}
+if (dom.priorYearModalClear) {
+  dom.priorYearModalClear.addEventListener('click', async () => {
+    const year = Number(dom.manualMonthYearSelect?.value);
+    if (!Number.isFinite(year)) {
+      if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '西暦を選択してください';
+      return;
+    }
+    ensureManualMonthGridBuilt();
+    const entries = [];
+    for (let mi = 1; mi <= 12; mi++) {
+      entries.push({
+        sales_month: `${year}-${String(mi).padStart(2, '0')}`,
+        gross_sales_yen: null,
+      });
+    }
+    if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '保存中…';
+    try {
+      await apiFetch('/receipts/sales-manual-months', {
+        method: 'PUT',
+        body: { store_key: state.storeKey, entries },
+      });
+      await refreshManualMonthForm(year);
+      if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${year}年の登録をすべて削除しました`;
+      closePriorYearModal();
+      loadAll();
+    } catch (e) {
+      if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = 'クリアに失敗: ' + (e && e.message ? e.message : String(e));
     }
   });
 }
@@ -1699,8 +2417,12 @@ async function loadAll() {
   dom.loadingMonthly.classList.add('show');
 
   try {
-    const fetchSalesMonth = (m, storeKey) =>
-      apiFetch(`/receipts/sales?month=${encodeURIComponent(m)}&store_key=${encodeURIComponent(storeKey ?? '')}`);
+    const fetchSalesMonth = (m, storeKey) => {
+      const cy = compareYearForApi(m);
+      return apiFetch(
+        `/receipts/sales?month=${encodeURIComponent(m)}&store_key=${encodeURIComponent(storeKey ?? '')}&compare_year=${cy}`,
+      );
+    };
     const fetchMonthly = (storeKey) =>
       apiFetch(`/analytics/monthly?months=14&store_key=${encodeURIComponent(storeKey ?? '')}`).catch(() => null);
 
@@ -1726,8 +2448,7 @@ async function loadAll() {
 
       state.monthlySeries = monthlyData?.series ?? [];
     } else {
-      const primary = await fetchSalesMonth(displayMonth, '');
-      salesData = primary;
+      salesData = await fetchSalesMonth(displayMonth, '');
       if (salesData.store_options?.length) {
         updateStoreSelect(salesData.store_options, salesData.selected_store_key);
       }
@@ -1735,6 +2456,11 @@ async function loadAll() {
         state.storeKey = salesData.selected_store_key;
       }
       const sk = state.storeKey || '';
+      // 初回は store_key 無しで呼ぶため予算が __all__ キーになる。既定店舗が決まったら同じ月を店舗指定で取り直し、予算・按分を一致させる
+      if (sk) {
+        const refined = await fetchSalesMonth(displayMonth, sk).catch(() => null);
+        if (refined) salesData = refined;
+      }
       const otherMonths = sortedMonths.filter((m) => m !== displayMonth);
 
       weatherPromise = fetchWeather(sk, from, to);
@@ -1793,6 +2519,31 @@ async function loadAll() {
       state.lastBudgetWeekdayWeight = bw != null && Number.isFinite(Number(bw)) ? Number(bw) : null;
       state.lastBudgetPreHolidayWeight = bp != null && Number.isFinite(Number(bp)) ? Number(bp) : null;
       state.lastBudgetHolidayWeight = bh != null && Number.isFinite(Number(bh)) ? Number(bh) : null;
+      const sclosed = salesData?.store_closed_dates;
+      state.lastStoreClosedDates = Array.isArray(sclosed) ? sclosed.map(String) : [];
+      const pm =
+        salesData?.manual_comparison_gross_yen ?? salesData?.prior_year_gross_yen_manual;
+      state.lastManualPriorYearGrossYen =
+        pm != null && Number.isFinite(Number(pm)) ? Math.round(Number(pm)) : null;
+    }
+    if (dom.priorYearRowHint) {
+      const cmp = salesData?.comparison_sales_month;
+      const pm = state.lastManualPriorYearGrossYen;
+      const parts = [];
+      if (cmp) parts.push(`比較 ${formatYearMonthJa(cmp)}`);
+      parts.push(pm != null ? '手入力あり' : '手入力なし');
+      dom.priorYearRowHint.textContent = parts.join(' · ');
+    }
+    state.budgetKpiSingleMonth = isSingleMonth;
+    if (isSingleMonth && displayMonth) {
+      const byMonth = Object.fromEntries((state.monthlySeries || []).map((r) => [r.month, r]));
+      const [y, mo] = displayMonth.split('-').map(Number);
+      const yoyMo = `${y - 1}-${String(mo).padStart(2, '0')}`;
+      const yoyRow = byMonth[yoyMo];
+      const yg = yoyRow?.gross_sales_yen;
+      state.lastYoyGrossYen = yg != null && Number.isFinite(Number(yg)) ? Number(yg) : null;
+    } else {
+      state.lastYoyGrossYen = null;
     }
     syncBudgetModalFromState();
     updateBudgetKpis(totals?.total_gross_sales_yen, displayMonth);
@@ -1807,6 +2558,7 @@ async function loadAll() {
 
     lastReceiptDailyData = buildReceiptDailyTablePayload(salesData, displayMonth, isSingleMonth);
     renderReceiptDailyTable(lastReceiptDailyData);
+    updateReceiptDailyDiffKpi(lastReceiptDailyData);
 
     dom.loadingDaily.classList.remove('show');
     dom.loadingMonthly.classList.remove('show');
@@ -2408,8 +3160,9 @@ dom.tokenInput.value = getToken() ? '' : '';
     if (mq.addEventListener) mq.addEventListener('change', receiptDailyOnViewportChange);
     else if (mq.addListener) mq.addListener(receiptDailyOnViewportChange);
   }
-  addMq('(min-width: 768px)');
-  addMq('(min-width: 1024px)');
+  addMq('(min-width: 640px)');
+  addMq('(min-width: 980px)');
+  addMq('(min-width: 1320px)');
 })();
 if (!getToken()) resetReceiptDailyDisconnected();
 if (getToken()) loadAll();

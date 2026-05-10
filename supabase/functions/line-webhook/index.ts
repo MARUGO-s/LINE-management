@@ -9,7 +9,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
 import { MARUGO_GROUP_STORE_OPTIONS } from '../_shared/marugo_group_stores.ts'
 import {
   allocateDailyBudgetsForMonth,
+  enumerateMonthDates,
   getDefaultJapaneseHolidaySet,
+  mergeStoreClosedDateLists,
   type SalesBudgetAllocationWeights,
 } from '../_shared/sales_budget_allocation.ts'
 
@@ -5714,11 +5716,12 @@ async function fetchSalesBudgetRowForWebhook(
   weekday_weight: number
   pre_holiday_weight: number
   holiday_weight: number
+  store_closed_dates: string[]
 } | null> {
   if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return null
   const { data, error } = await supabase
     .from('line_sales_month_budgets')
-    .select('budget_yen, weekday_weight, pre_holiday_weight, holiday_weight')
+    .select('budget_yen, weekday_weight, pre_holiday_weight, holiday_weight, store_closed_dates')
     .eq('store_partition_key', storePartitionKey)
     .eq('target_month', targetMonth)
     .maybeSingle()
@@ -5729,11 +5732,30 @@ async function fetchSalesBudgetRowForWebhook(
   const ww = Number(row.weekday_weight)
   const pw = Number(row.pre_holiday_weight)
   const hw = Number(row.holiday_weight)
+  let fromTable: string[] = []
+  const { data: closedRows, error: closedErr } = await supabase
+    .from('line_sales_month_store_closed_days')
+    .select('closed_on')
+    .eq('store_partition_key', storePartitionKey)
+    .eq('target_month', targetMonth)
+  if (!closedErr && Array.isArray(closedRows)) {
+    const allowed = new Set(enumerateMonthDates(targetMonth))
+    for (const cr of closedRows) {
+      const r = cr as { closed_on?: unknown }
+      const s = String(r.closed_on ?? '').trim().slice(0, 10)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) continue
+      if (!allowed.has(s)) continue
+      fromTable.push(s)
+    }
+    fromTable = [...new Set(fromTable)].sort()
+  }
+  const closedArr = mergeStoreClosedDateLists(fromTable, row.store_closed_dates, targetMonth)
   return {
     budget_yen: Math.round(budgetYen),
     weekday_weight: Number.isFinite(ww) && ww > 0 ? ww : 1,
     pre_holiday_weight: Number.isFinite(pw) && pw > 0 ? pw : 1.5,
     holiday_weight: Number.isFinite(hw) && hw > 0 ? hw : 2,
+    store_closed_dates: closedArr,
   }
 }
 
@@ -5773,7 +5795,14 @@ async function buildReceiptBudgetComparisonRows(
     holiday: row.holiday_weight,
   }
   const holidaySet = getDefaultJapaneseHolidaySet()
-  const dailyMap = allocateDailyBudgetsForMonth(receiptMonthYyyyMm, row.budget_yen, weights, holidaySet)
+  const storeClosed = new Set(row.store_closed_dates ?? [])
+  const dailyMap = allocateDailyBudgetsForMonth(
+    receiptMonthYyyyMm,
+    row.budget_yen,
+    weights,
+    holidaySet,
+    storeClosed,
+  )
   const dailyTarget = dailyMap.get(receiptDateIso)
   if (dailyTarget == null) return null
 

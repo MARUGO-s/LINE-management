@@ -59,27 +59,100 @@ export function enumerateMonthDates(targetMonth: string): string[] {
 }
 
 /**
+ * DB / JSON の店舗休日を文字列配列へ（Postgres `text[]` が `"{a,b}"` 文字列で返る場合がある）
+ */
+export function coerceStoreClosedDatesItems(raw: unknown): string[] {
+  if (raw == null) return []
+  if (Array.isArray(raw)) {
+    return raw.map((x) => String(x ?? "").trim()).filter(Boolean)
+  }
+  if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+    const o = raw as Record<string, unknown>
+    const keys = Object.keys(o)
+    if (keys.length > 0 && keys.every((k) => /^\d+$/.test(k))) {
+      return keys
+        .sort((a, b) => Number(a) - Number(b))
+        .map((k) => String(o[k] ?? "").trim())
+        .filter(Boolean)
+    }
+  }
+  if (typeof raw === "string") {
+    const t = raw.trim()
+    if (t === "" || t === "{}") return []
+    if (t.startsWith("{") && t.endsWith("}")) {
+      const inner = t.slice(1, -1).trim()
+      if (!inner) return []
+      return inner.split(",").map((s) => s.replace(/^"|"$/g, "").trim()).filter(Boolean)
+    }
+    return [t]
+  }
+  return []
+}
+
+/** 対象月の暦日に限定した昇順ユニーク YYYY-MM-DD（PUT body と DB 読取りの両方で利用） */
+export function parseStoreClosedDatesForMonth(raw: unknown, targetMonth: string): string[] {
+  const allowed = new Set(enumerateMonthDates(targetMonth))
+  if (allowed.size === 0) return []
+  const out: string[] = []
+  for (const s of coerceStoreClosedDatesItems(raw)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) continue
+    if (!allowed.has(s)) continue
+    out.push(s)
+  }
+  return [...new Set(out)].sort()
+}
+
+/** 専用テーブルの日付と予算行の jsonb をマージ（どちらか片方だけにデータがある環境向け） */
+export function mergeStoreClosedDateLists(
+  tableDates: string[],
+  jsonbRaw: unknown,
+  month: string,
+): string[] {
+  const allowed = new Set(enumerateMonthDates(month))
+  const merged = new Set<string>()
+  for (const d of tableDates) {
+    if (allowed.has(d)) merged.add(d)
+  }
+  for (const d of parseStoreClosedDatesForMonth(jsonbRaw, month)) {
+    merged.add(d)
+  }
+  return [...merged].sort()
+}
+
+/**
  * 月間予算を「平日 / 休日前日 / 休日(日曜+祝)」の重みで日別に按分（端数は最大剰余法）
+ * `storeClosedDates` に含まれる日は按分から除外（重み0）し、月間総額は残りの日へ再配分する。
  */
 export function allocateDailyBudgetsForMonth(
   targetMonth: string,
   monthBudgetYen: number,
   weights: SalesBudgetAllocationWeights,
   holidayDates: Set<string>,
+  storeClosedDates?: Set<string> | null,
 ): Map<string, number> {
   const days = enumerateMonthDates(targetMonth)
   if (days.length === 0 || monthBudgetYen <= 0) return new Map()
 
   const kinds = days.map((d) => classifySalesBudgetDay(d, holidayDates))
   const rawWeights = kinds.map((k) => weightForDayKind(k, weights))
-  const sumW = rawWeights.reduce((a, b) => a + b, 0)
-  if (sumW <= 0) return new Map()
+  const effectiveWeights = days.map((d, i) =>
+    storeClosedDates?.has(d) ? 0 : rawWeights[i],
+  )
+  const sumW = effectiveWeights.reduce((a, b) => a + b, 0)
+  if (sumW <= 0) {
+    const zeroMap = new Map<string, number>()
+    for (const d of days) zeroMap.set(d, 0)
+    return zeroMap
+  }
 
-  const fractions = rawWeights.map((rw) => (monthBudgetYen * rw) / sumW)
+  const fractions = effectiveWeights.map((rw) => (monthBudgetYen * rw) / sumW)
   const floors = fractions.map((x) => Math.floor(x))
   let allocated = floors.reduce((a, b) => a + b, 0)
   const remainder = monthBudgetYen - allocated
-  const remainders = fractions.map((x, i) => ({ i, r: x - floors[i] }))
+  /** 端数1円は「按分対象の日」（店舗休日・重み0は除外）にのみ付与する */
+  const remainders = fractions
+    .map((x, i) => ({ i, r: x - floors[i] }))
+    .filter((x) => effectiveWeights[x.i] > 0)
   remainders.sort((a, b) => b.r - a.r)
 
   const result = new Map<string, number>()
@@ -100,8 +173,15 @@ export function getDailyBudgetForDateFromAllocation(
   monthBudgetYen: number,
   weights: SalesBudgetAllocationWeights,
   holidayDates: Set<string>,
+  storeClosedDates?: Set<string> | null,
 ): number | null {
-  const map = allocateDailyBudgetsForMonth(targetMonth, monthBudgetYen, weights, holidayDates)
+  const map = allocateDailyBudgetsForMonth(
+    targetMonth,
+    monthBudgetYen,
+    weights,
+    holidayDates,
+    storeClosedDates,
+  )
   const v = map.get(isoDate)
   return v == null ? null : v
 }
