@@ -6401,7 +6401,6 @@ async function buildReceiptBudgetComparisonRows(
   const monthActual = monthTotals.grossSalesYen ?? 0
   const monthPct = row.budget_yen > 0 ? ((monthActual / row.budget_yen) * 100).toFixed(1) : '-'
   const dayActual = await loadStoreDayGrossSumForDate(supabase, storePartitionKey, receiptDateIso)
-  const dayPct = dailyTarget > 0 ? ((dayActual / dailyTarget) * 100).toFixed(1) : '-'
 
   const isStoreClosed = storeClosed.has(receiptDateIso)
   let dailyBudgetDiffStr: string
@@ -6417,7 +6416,6 @@ async function buildReceiptBudgetComparisonRows(
     { label: '月次目標', value: formatYenAmount(row.budget_yen), margin: 'md' },
     { label: '月次実績', value: `${formatYenAmount(monthActual)}（${monthPct}%）` },
     { label: '当日目標', value: formatYenAmount(dailyTarget) },
-    { label: '当日実績', value: `${formatYenAmount(dayActual)}（${dayPct}%）` },
     { label: '日次予算差', value: dailyBudgetDiffStr },
   ]
 }
