@@ -6414,11 +6414,11 @@ async function buildReceiptBudgetComparisonRows(
   }
 
   return [
-    { label: '【予算】月次目標', value: formatYenAmount(row.budget_yen), margin: 'md' },
-    { label: '【予算】月次実績', value: `${formatYenAmount(monthActual)}（${monthPct}%）` },
-    { label: '【予算】当日目標', value: formatYenAmount(dailyTarget) },
-    { label: '【予算】当日実績', value: `${formatYenAmount(dayActual)}（${dayPct}%）` },
-    { label: '【予算】日次予算差', value: dailyBudgetDiffStr },
+    { label: '月次目標', value: formatYenAmount(row.budget_yen), margin: 'md' },
+    { label: '月次実績', value: `${formatYenAmount(monthActual)}（${monthPct}%）` },
+    { label: '当日目標', value: formatYenAmount(dailyTarget) },
+    { label: '当日実績', value: `${formatYenAmount(dayActual)}（${dayPct}%）` },
+    { label: '日次予算差', value: dailyBudgetDiffStr },
   ]
 }
 
@@ -6827,6 +6827,25 @@ function buildLineImageAnalysisReply(preview: string): string {
   return ['画像を保存しました。解析結果は次のとおりです。', capped].join('\n')
 }
 
+function buildReceiptFlexBaselineRows(
+  rows: Array<{ label: string; value: string; margin?: 'md' }>,
+  labelFlex: number,
+): Array<Record<string, unknown>> {
+  return rows.map((row) => {
+    const payload: Record<string, unknown> = {
+      type: 'box',
+      layout: 'baseline',
+      spacing: 'sm',
+      contents: [
+        { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: true, flex: labelFlex },
+        { type: 'text', text: lineSafeFlexText(row.value, 240), size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
+      ],
+    }
+    if (row.margin) payload.margin = row.margin
+    return payload
+  })
+}
+
 function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
   monthCumulativeTotals: MonthCumulativeTotals | null = null,
@@ -6861,21 +6880,6 @@ function buildLineReceiptImageAnalysisReply(
       value: cum.guestCount == null ? '-' : String(cum.guestCount),
     },
   ]
-  const rows: Array<{ label: string; value: string; margin?: 'md' }> = [...baseRows, ...budgetRows, ...monthRows]
-
-  const detailRows = rows.map((row) => {
-    const payload: Record<string, unknown> = {
-      type: 'box',
-      layout: 'baseline',
-      spacing: 'sm',
-      contents: [
-        { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: true, flex: labelFlex },
-        { type: 'text', text: lineSafeFlexText(row.value, 240), size: 'sm', wrap: true, color: '#1F1F1F', flex: 5 },
-      ],
-    }
-    if (row.margin) payload.margin = row.margin
-    return payload
-  })
 
   const altTextParts = [
     'レシート解析',
@@ -6886,13 +6890,43 @@ function buildLineReceiptImageAnalysisReply(
 
   const bodyContents: Array<Record<string, unknown>> = []
 
-  if (detailRows.length > 0) {
+  const baseDetailRows = buildReceiptFlexBaselineRows(baseRows, labelFlex)
+  if (baseDetailRows.length > 0) {
     bodyContents.push({
       type: 'box',
       layout: 'vertical',
       spacing: 'xs',
       margin: 'md',
-      contents: detailRows,
+      contents: baseDetailRows,
+    })
+  }
+
+  if (budgetRows.length > 0) {
+    bodyContents.push({
+      type: 'text',
+      text: '【予算】',
+      size: 'sm',
+      weight: 'bold',
+      color: '#7A7A7A',
+      margin: 'md',
+      wrap: true,
+    })
+    bodyContents.push({
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      contents: buildReceiptFlexBaselineRows(budgetRows, labelFlex),
+    })
+  }
+
+  const monthDetailRows = buildReceiptFlexBaselineRows(monthRows, labelFlex)
+  if (monthDetailRows.length > 0) {
+    bodyContents.push({
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      margin: 'md',
+      contents: monthDetailRows,
     })
   }
 
