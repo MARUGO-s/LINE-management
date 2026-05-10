@@ -2098,7 +2098,7 @@ async function trySaveLineMediaContent(
   receiptMidreportEnabled: boolean,
   sourceMeta: CalendarSourceMeta,
 ): Promise<LineReplyPayload | null> {
-  let receiptDuplicateConfirmationText: string | null = null
+  let receiptDuplicateConfirmationReply: LineReplyPayload | null = null
   const mediaType = normalizeStorableLineMediaType(message?.type)
   if (!mediaType) return null
 
@@ -2305,13 +2305,13 @@ async function trySaveLineMediaContent(
         senderDisplayName,
       })
       if (dupSave.ok) {
-        receiptDuplicateConfirmationText = buildReceiptDuplicateConfirmationPrompt(
+        receiptDuplicateConfirmationReply = buildReceiptDuplicateConfirmationFlexReply(
           imageAnalysis.receipt,
           receiptDateIsoForTotals,
         )
         skipImmediateReceiptSave = true
       } else if (!dupSave.missingTable) {
-        receiptDuplicateConfirmationText =
+        receiptDuplicateConfirmationReply =
           '確認状態の保存に失敗しました。少し時間を置いて同じ画像を再送してください。'
         skipImmediateReceiptSave = true
       }
@@ -2355,8 +2355,8 @@ async function trySaveLineMediaContent(
     return midMonthReportReply
   }
   if (mediaType === 'image' && imageAnalysisReplyEnabled) {
-    if (receiptDuplicateConfirmationText) {
-      return receiptDuplicateConfirmationText
+    if (receiptDuplicateConfirmationReply) {
+      return receiptDuplicateConfirmationReply
     }
     if (imageAnalysis?.receipt) {
       const baseReply = buildLineReceiptImageAnalysisReply(
@@ -3951,28 +3951,164 @@ async function hasExistingReceiptEntryForStoreAndDate(
   return data != null
 }
 
-function buildReceiptDuplicateConfirmationPrompt(
+/** 同日重複時: Flex で解析内容と 3 択（ボタンは message アクションで既存の normalize と連携） */
+function buildReceiptDuplicateConfirmationFlexReply(
   receipt: LineImageReceiptAnalysis,
   receiptDateIso: string,
-): string {
-  const lines = [
-    '【レシート解析】',
-    receipt.storeName ? `店名: ${receipt.storeName}` : null,
-    receipt.date ? `日付: ${receipt.date}` : null,
-    receipt.grossSales ? `総売上: ${receipt.grossSales}` : null,
-    receipt.partyCount ? `会計組数: ${receipt.partyCount}` : null,
-    receipt.guestCount ? `客数: ${receipt.guestCount}` : null,
-    '',
-    `同じ店舗・同じレシート日（${receiptDateIso}）のデータがすでに登録されています。`,
-    '次のいずれかで返信してください（番号 1／2／3 でも構いません）。',
-    '',
-    '1・加算 … 既存のまま残し、今回の分も追加登録します（同日に複数レシートになります）。',
-    '2・中止 … 今回は登録しません（送信した画像の保存も取り消します）。',
-    '3・置き換え … 同日の既存データをすべて削除し、今回の解析結果だけにします。',
-    '',
-    '※「はい」は加算、「いいえ」は中止と同じ扱いです。',
+): LineReplyMessage[] {
+  const labelFlex = 3
+  const parsedDateIso = parseReceiptDateToIso(receipt.date)
+  const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? receipt.date ?? '-'
+  const rows: Array<{ label: string; value: string }> = [
+    { label: '店名', value: receipt.storeName || '-' },
+    { label: '日付', value: displayDate },
+    { label: '総売上', value: receipt.grossSales || '-' },
+    { label: '会計組数', value: receipt.partyCount || '-' },
+    { label: '客数', value: receipt.guestCount || '-' },
   ]
-  return lines.filter((x) => x != null && String(x).length > 0).join('\n')
+  const detailRows = rows.map((row) => ({
+    type: 'box' as const,
+    layout: 'baseline' as const,
+    spacing: 'sm' as const,
+    contents: [
+      { type: 'text' as const, text: row.label, size: 'sm' as const, color: '#7A7A7A', wrap: false, flex: labelFlex },
+      {
+        type: 'text' as const,
+        text: row.value,
+        size: 'sm' as const,
+        wrap: true,
+        color: '#1F1F1F',
+        flex: 5,
+        weight: 'bold' as const,
+      },
+    ],
+  }))
+
+  const altText = [
+    'レシート解析（同日重複の確認）',
+    receipt.storeName,
+    receipt.grossSales,
+    `${receiptDateIso}は登録済み`,
+  ]
+    .filter((x) => x && String(x).length > 0)
+    .join(' / ')
+    .slice(0, 400)
+
+  return [
+    {
+      type: 'flex',
+      altText: altText || 'レシート解析（同日重複の確認）',
+      contents: {
+        type: 'bubble',
+        header: {
+          type: 'box',
+          layout: 'vertical',
+          paddingAll: '14dp',
+          backgroundColor: '#006c3a',
+          contents: [
+            { type: 'text', text: '🧾 レシート解析', size: 'lg', weight: 'bold', color: '#FFFFFF' },
+            {
+              type: 'text',
+              text: '同日のデータがすでに登録されています',
+              size: 'xs',
+              color: '#CCFFDD',
+              margin: 'sm',
+              wrap: true,
+            },
+          ],
+        },
+        body: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'md',
+          paddingAll: '14dp',
+          contents: [
+            { type: 'box', layout: 'vertical', spacing: 'xs', contents: detailRows },
+            { type: 'separator', margin: 'md' },
+            {
+              type: 'text',
+              text: `同じ店舗・同じレシート日（${receiptDateIso}）のデータがすでに登録されています。`,
+              size: 'sm',
+              color: '#B45309',
+              weight: 'bold',
+              wrap: true,
+            },
+            {
+              type: 'text',
+              text: '次のボタンから選ぶか、テキストで「加算」「中止」「置き換え」、または番号 1／2／3 を送ってください。',
+              size: 'xs',
+              color: '#555555',
+              wrap: true,
+              margin: 'sm',
+            },
+            {
+              type: 'box',
+              layout: 'vertical',
+              spacing: 'xs',
+              margin: 'md',
+              contents: [
+                {
+                  type: 'text',
+                  text: '1・加算 … 既存のまま残し、今回も追加（同日に複数レシート）。',
+                  size: 'xs',
+                  color: '#333333',
+                  wrap: true,
+                },
+                {
+                  type: 'text',
+                  text: '2・中止 … 今回は登録しない（送信画像の保存も取り消し）。',
+                  size: 'xs',
+                  color: '#333333',
+                  wrap: true,
+                },
+                {
+                  type: 'text',
+                  text: '3・置き換え … 同日の既存をすべて削除し、今回の結果だけにする。',
+                  size: 'xs',
+                  color: '#333333',
+                  wrap: true,
+                },
+              ],
+            },
+            {
+              type: 'text',
+              text: '※「はい」は加算、「いいえ」は中止と同じ扱いです。',
+              size: 'xs',
+              color: '#888888',
+              wrap: true,
+            },
+          ],
+        },
+        footer: {
+          type: 'box',
+          layout: 'vertical',
+          spacing: 'sm',
+          paddingAll: '12dp',
+          contents: [
+            {
+              type: 'button',
+              style: 'primary',
+              color: '#006c3a',
+              height: 'sm',
+              action: { type: 'message', label: '1 ・ 加算', text: '加算' },
+            },
+            {
+              type: 'button',
+              style: 'secondary',
+              height: 'sm',
+              action: { type: 'message', label: '2 ・ 中止', text: '中止' },
+            },
+            {
+              type: 'button',
+              style: 'secondary',
+              height: 'sm',
+              action: { type: 'message', label: '3 ・ 置き換え', text: '置き換え' },
+            },
+          ],
+        },
+      },
+    },
+  ]
 }
 
 /** 同日の既存レシート行を削除（メディア・line_messages ごと）。exclude は今回送った画像の message id */
