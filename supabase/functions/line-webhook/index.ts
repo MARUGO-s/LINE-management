@@ -3964,10 +3964,43 @@ function buildReceiptDuplicateConfirmationPrompt(
     receipt.guestCount ? `客数: ${receipt.guestCount}` : null,
     '',
     `同じ店舗・同じレシート日（${receiptDateIso}）のデータがすでに登録されています。`,
-    'この内容を追加で登録してよいですか？',
-    '「はい」または「いいえ」で返信してください。',
+    '次のいずれかで返信してください（番号 1／2／3 でも構いません）。',
+    '',
+    '1・加算 … 既存のまま残し、今回の分も追加登録します（同日に複数レシートになります）。',
+    '2・中止 … 今回は登録しません（送信した画像の保存も取り消します）。',
+    '3・置き換え … 同日の既存データをすべて削除し、今回の解析結果だけにします。',
+    '',
+    '※「はい」は加算、「いいえ」は中止と同じ扱いです。',
   ]
   return lines.filter((x) => x != null && String(x).length > 0).join('\n')
+}
+
+/** 同日の既存レシート行を削除（メディア・line_messages ごと）。exclude は今回送った画像の message id */
+async function deleteExistingReceiptEntriesForStoreAndDateExcluding(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  receiptDateIso: string,
+  excludeLineMessagesId: string,
+): Promise<void> {
+  if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(receiptDateIso ?? '').trim())) return
+  const { data: rows, error } = await supabase
+    .from('line_receipt_entries')
+    .select('message_id, line_message_id')
+    .eq('store_partition_key', storePartitionKey)
+    .eq('receipt_date', receiptDateIso.trim())
+  if (error) {
+    console.error('deleteExistingReceiptEntriesForStoreAndDateExcluding: select failed:', error.message)
+    return
+  }
+  const list = Array.isArray(rows) ? rows : []
+  for (const row of list) {
+    const mid = String((row as Record<string, unknown>).message_id ?? '').trim()
+    const lmid = String((row as Record<string, unknown>).line_message_id ?? '').trim()
+    if (!mid || !lmid) continue
+    if (mid === excludeLineMessagesId) continue
+    await rollbackPendingDuplicateReceiptUpload(supabase, lmid, mid)
+  }
 }
 
 async function rollbackPendingDuplicateReceiptUpload(
@@ -4118,24 +4151,11 @@ async function clearPendingReceiptDuplicate(
   }
 }
 
-async function tryHandlePendingReceiptDuplicateConfirmation(
-  text: string,
+async function completePendingReceiptDuplicateAndReply(
   supabase: ReturnType<typeof createClient>,
-  roomId: string,
-  userId: string | null,
+  pending: PendingReceiptDuplicate,
   receiptMidreportEnabled: boolean,
-): Promise<LineReplyPayload | null> {
-  const pending = await loadPendingReceiptDuplicate(supabase, roomId, userId)
-  if (!pending) return null
-  const decision = normalizeConfirmationDecision(text)
-  if (decision == null) {
-    return '「はい」または「いいえ」で返信してください。'
-  }
-  if (decision === 'no') {
-    await rollbackPendingDuplicateReceiptUpload(supabase, pending.line_message_id, pending.line_messages_id)
-    await clearPendingReceiptDuplicate(supabase, roomId, userId)
-    return '登録を中止しました。送信した画像の保存も取り消しました。'
-  }
+): Promise<LineReplyPayload> {
   const now = new Date()
   await saveLineReceiptEntry(supabase, {
     messageId: pending.line_messages_id,
@@ -4152,9 +4172,9 @@ async function tryHandlePendingReceiptDuplicateConfirmation(
     .eq('line_message_id', pending.line_message_id)
     .maybeSingle()
   if (!insertedRow) {
-    return 'レシートの登録に失敗しました。しばらくしてから「はい」を再度送ってください。'
+    return 'レシートの登録に失敗しました。しばらくしてから、もう一度「加算」または「置き換え」を送ってください。'
   }
-  await clearPendingReceiptDuplicate(supabase, roomId, userId)
+  await clearPendingReceiptDuplicate(supabase, pending.room_id, pending.user_id)
   const receiptMonthStr = pending.receipt_date.slice(0, 7)
   const monthCumulativeTotals = await loadMonthCumulativeTotalsForStoreMonth(
     supabase,
@@ -4187,6 +4207,58 @@ async function tryHandlePendingReceiptDuplicateConfirmation(
     return [...baseReply, ...midMonthReportReply]
   }
   return baseReply
+}
+
+async function tryHandlePendingReceiptDuplicateConfirmation(
+  text: string,
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  userId: string | null,
+  receiptMidreportEnabled: boolean,
+): Promise<LineReplyPayload | null> {
+  const pending = await loadPendingReceiptDuplicate(supabase, roomId, userId)
+  if (!pending) return null
+  const choice = normalizeReceiptDuplicateDecision(text)
+  if (choice == null) {
+    return '「加算」「中止」「置き換え」のいずれかで返信してください。番号（1／2／3）でも構いません。'
+  }
+  if (choice === 'cancel') {
+    await rollbackPendingDuplicateReceiptUpload(supabase, pending.line_message_id, pending.line_messages_id)
+    await clearPendingReceiptDuplicate(supabase, roomId, userId)
+    return '登録を中止しました。送信した画像の保存も取り消しました。'
+  }
+  if (choice === 'replace') {
+    await deleteExistingReceiptEntriesForStoreAndDateExcluding(
+      supabase,
+      pending.store_partition_key,
+      pending.receipt_date,
+      pending.line_messages_id,
+    )
+  }
+  return await completePendingReceiptDuplicateAndReply(supabase, pending, receiptMidreportEnabled)
+}
+
+function normalizeReceiptDuplicateDecision(rawText: string): 'add' | 'cancel' | 'replace' | null {
+  const compact = normalizeForRuleParsing(rawText)
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[。．.!！?？、,]/g, '')
+  if (!compact) return null
+
+  if (/^(置換|置き換え|上書き|差し替え|入れ替え|3|３|replace|overwrite)$/.test(compact)) {
+    return 'replace'
+  }
+  if (/^(中止|キャンセル|やめる|不要|登録しない|しない|いいえ|no|n|2|２)$/.test(compact)) {
+    return 'cancel'
+  }
+  if (
+    /^(加算|重複登録|重複|追加|累積|複数|1|１|add|はい|ok|okay|yes|y|登録|登録して|お願いします|おねがいします|お願い|おねがい)$/.test(
+      compact,
+    )
+  ) {
+    return 'add'
+  }
+  return null
 }
 
 function resolveHaccpBulkConversationKey(roomId: string, userId: string | null): string {
