@@ -332,6 +332,14 @@ type LineReplyFlexMessage = { type: 'flex'; altText: string; contents: Record<st
 type LineReplyMessage = LineReplyTextMessage | LineReplyFlexMessage
 type LineReplyPayload = string | string[] | LineReplyMessage | LineReplyMessage[]
 
+/** レシート Flex の key-value 行（日次予算差のみ valueColor で赤字など） */
+type ReceiptFlexBaselineKvRow = {
+  label: string
+  value: string
+  margin?: 'md'
+  valueColor?: string
+}
+
 type LineImageReceiptAnalysis = {
   storeName: string | null
   date: string | null
@@ -3966,8 +3974,8 @@ function buildReceiptDuplicateConfirmationFlexReply(
   receipt: LineImageReceiptAnalysis,
   receiptDateIso: string,
 ): LineReplyMessage[] {
-  const labelFlex = 7
-  const valueFlex = 5
+  const labelFlex = 6
+  const valueFlex = 10
   const cap = (raw: string | null | undefined, max: number) => {
     const s = String(raw ?? '').trim()
     if (!s) return '-'
@@ -3996,7 +4004,6 @@ function buildReceiptDuplicateConfirmationFlexReply(
         color: '#1F1F1F',
         flex: valueFlex,
         weight: 'bold',
-        adjustMode: 'shrink-to-fit',
       },
     ],
   }))
@@ -6386,7 +6393,7 @@ async function buildReceiptBudgetComparisonRows(
   receiptDateIso: string,
   receiptMonthYyyyMm: string,
   monthTotals: MonthCumulativeTotals,
-): Promise<Array<{ label: string; value: string; margin?: 'md' }> | null> {
+): Promise<ReceiptFlexBaselineKvRow[] | null> {
   if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return null
   const row = await fetchSalesBudgetRowForWebhook(supabase, storePartitionKey, receiptMonthYyyyMm)
   if (!row) return null
@@ -6422,11 +6429,18 @@ async function buildReceiptBudgetComparisonRows(
     dailyBudgetDiffStr = formatYenSignedDiff(dayActual - dailyTarget)
   }
 
+  const canStyleDayDiff = !isStoreClosed && !receiptDateIsAfterTodayJst(receiptDateIso)
+  const dailyDiffYen = canStyleDayDiff ? (dayActual - dailyTarget) : null
+
   return [
     { label: '月次目標', value: formatYenAmount(row.budget_yen), margin: 'md' },
     { label: '月次実績', value: `${formatYenAmount(monthActual)}（${monthPct}%）` },
     { label: '当日目標', value: formatYenAmount(dailyTarget) },
-    { label: '日次予算差', value: dailyBudgetDiffStr },
+    {
+      label: '日次予算差',
+      value: dailyBudgetDiffStr,
+      ...(dailyDiffYen != null && dailyDiffYen < 0 ? { valueColor: '#C62828' } : {}),
+    },
   ]
 }
 
@@ -6835,12 +6849,25 @@ function buildLineImageAnalysisReply(preview: string): string {
   return ['画像を保存しました。解析結果は次のとおりです。', capped].join('\n')
 }
 
+/** Flex 段落区切り（公式に破線がないため BOX DRAWINGS の点線で表現） */
+function buildReceiptFlexDashedSectionDivider(): Record<string, unknown> {
+  return {
+    type: 'text',
+    text: '\u2508'.repeat(28),
+    size: 'xxs',
+    color: '#AAAAAA',
+    wrap: false,
+    margin: 'md',
+  }
+}
+
 function buildReceiptFlexBaselineRows(
-  rows: Array<{ label: string; value: string; margin?: 'md' }>,
+  rows: ReceiptFlexBaselineKvRow[],
   labelFlex: number,
   valueFlex = 5,
 ): Array<Record<string, unknown>> {
   return rows.map((row) => {
+    const valueColor = row.valueColor ?? '#1F1F1F'
     const payload: Record<string, unknown> = {
       type: 'box',
       layout: 'baseline',
@@ -6848,15 +6875,14 @@ function buildReceiptFlexBaselineRows(
       contents: [
         // ラベルは折り返さない（「総売上（税込）」が「税」と「込）」で分断されないようにする）
         { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
-        // 金額＋（％）などを1行に収める（列幅が狭いときは文字を縮小）
+        // 値列を広めに取り、金額＋（％）を1行・フォントサイズはそのまま（shrink-to-fit は使わない）
         {
           type: 'text',
           text: lineSafeFlexText(row.value, 240),
           size: 'sm',
           wrap: false,
-          color: '#1F1F1F',
+          color: valueColor,
           flex: valueFlex,
-          adjustMode: 'shrink-to-fit',
         },
       ],
     }
@@ -6868,14 +6894,14 @@ function buildReceiptFlexBaselineRows(
 function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
   monthCumulativeTotals: MonthCumulativeTotals | null = null,
-  options?: { correctionCommandText?: string; budgetRows?: Array<{ label: string; value: string; margin?: 'md' }> },
+  options?: { correctionCommandText?: string; budgetRows?: ReceiptFlexBaselineKvRow[] },
 ): LineReplyMessage[] {
-  const labelFlex = 7
-  const valueFlex = 5
+  const labelFlex = 6
+  const valueFlex = 10
   const parsedDateIso = parseReceiptDateToIso(receipt.date)
   const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? receipt.date
   const cum = monthCumulativeTotals ?? { grossSalesYen: null, partyCount: null, guestCount: null }
-  const baseRows: Array<{ label: string; value: string; margin?: 'md' }> = [
+  const baseRows: ReceiptFlexBaselineKvRow[] = [
     { label: '店名', value: lineSafeFlexText(receipt.storeName, 120) },
     { label: '日付', value: lineSafeFlexText(displayDate || '-', 80) },
     { label: '消費税', value: lineSafeFlexText(receipt.taxAmount, 40) },
@@ -6885,7 +6911,7 @@ function buildLineReceiptImageAnalysisReply(
     { label: '客単価', value: lineSafeFlexText(receipt.unitPrice, 40) },
   ]
   const budgetRows = Array.isArray(options?.budgetRows) ? options!.budgetRows! : []
-  const monthRows: Array<{ label: string; value: string; margin?: 'md' }> = [
+  const monthRows: ReceiptFlexBaselineKvRow[] = [
     {
       label: '月間総売上',
       value: cum.grossSalesYen == null ? '-' : formatYenAmount(cum.grossSalesYen),
@@ -6922,6 +6948,7 @@ function buildLineReceiptImageAnalysisReply(
   }
 
   if (budgetRows.length > 0) {
+    bodyContents.push(buildReceiptFlexDashedSectionDivider())
     bodyContents.push({
       type: 'text',
       text: '【予算】',
@@ -6941,11 +6968,11 @@ function buildLineReceiptImageAnalysisReply(
 
   const monthDetailRows = buildReceiptFlexBaselineRows(monthRows, labelFlex, valueFlex)
   if (monthDetailRows.length > 0) {
+    bodyContents.push(buildReceiptFlexDashedSectionDivider())
     bodyContents.push({
       type: 'box',
       layout: 'vertical',
       spacing: 'xs',
-      margin: 'md',
       contents: monthDetailRows,
     })
   }
