@@ -5055,6 +5055,22 @@ function formatYenAmount(value: number): string {
   return `¥${Math.round(value).toLocaleString('ja-JP')}`
 }
 
+/** analytics の日次「差額」と同じ符号付き表記（+¥n / -¥n / ¥0） */
+function formatYenSignedDiff(value: number): string {
+  const x = Math.round(value)
+  const absStr = `¥${Math.abs(x).toLocaleString('ja-JP')}`
+  if (x > 0) return `+${absStr}`
+  if (x < 0) return `-${absStr}`
+  return '¥0'
+}
+
+/** JST の「今日」より後の暦日なら true（将来日は日次予算差を 0 扱い） */
+function receiptDateIsAfterTodayJst(dateKey: string): boolean {
+  if (!dateKey || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false
+  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })
+  return dateKey > today
+}
+
 function extractPartyGuestCountsFromText(raw: string | null): { party: number | null; guest: number | null } {
   if (!raw) return { party: null, guest: null }
   const text = decodeEscapedUnicodeSequences(raw)
@@ -5811,11 +5827,22 @@ async function buildReceiptBudgetComparisonRows(
   const dayActual = await loadStoreDayGrossSumForDate(supabase, storePartitionKey, receiptDateIso)
   const dayPct = dailyTarget > 0 ? ((dayActual / dailyTarget) * 100).toFixed(1) : '-'
 
+  const isStoreClosed = storeClosed.has(receiptDateIso)
+  let dailyBudgetDiffStr: string
+  if (isStoreClosed) {
+    dailyBudgetDiffStr = dayActual === 0 ? '-' : formatYenSignedDiff(dayActual)
+  } else if (receiptDateIsAfterTodayJst(receiptDateIso)) {
+    dailyBudgetDiffStr = formatYenSignedDiff(0)
+  } else {
+    dailyBudgetDiffStr = formatYenSignedDiff(dayActual - dailyTarget)
+  }
+
   return [
     { label: '【予算】月次目標', value: formatYenAmount(row.budget_yen), margin: 'md' },
     { label: '【予算】月次実績', value: `${formatYenAmount(monthActual)}（${monthPct}%）` },
     { label: '【予算】当日目標', value: formatYenAmount(dailyTarget) },
     { label: '【予算】当日実績', value: `${formatYenAmount(dayActual)}（${dayPct}%）` },
+    { label: '【予算】日次予算差', value: dailyBudgetDiffStr },
   ]
 }
 
