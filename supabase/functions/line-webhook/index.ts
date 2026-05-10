@@ -3988,7 +3988,16 @@ function buildReceiptDuplicateConfirmationFlexReply(
     spacing: 'sm',
     contents: [
       { type: 'text', text: row.label, size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
-      { type: 'text', text: row.value, size: 'sm', wrap: true, color: '#1F1F1F', flex: valueFlex, weight: 'bold' },
+      {
+        type: 'text',
+        text: row.value,
+        size: 'sm',
+        wrap: false,
+        color: '#1F1F1F',
+        flex: valueFlex,
+        weight: 'bold',
+        adjustMode: 'shrink-to-fit',
+      },
     ],
   }))
 
@@ -6839,7 +6848,16 @@ function buildReceiptFlexBaselineRows(
       contents: [
         // ラベルは折り返さない（「総売上（税込）」が「税」と「込）」で分断されないようにする）
         { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
-        { type: 'text', text: lineSafeFlexText(row.value, 240), size: 'sm', wrap: true, color: '#1F1F1F', flex: valueFlex },
+        // 金額＋（％）などを1行に収める（列幅が狭いときは文字を縮小）
+        {
+          type: 'text',
+          text: lineSafeFlexText(row.value, 240),
+          size: 'sm',
+          wrap: false,
+          color: '#1F1F1F',
+          flex: valueFlex,
+          adjustMode: 'shrink-to-fit',
+        },
       ],
     }
     if (row.margin) payload.margin = row.margin
