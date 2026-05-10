@@ -275,14 +275,17 @@
     body[data-theme='light'] .receipt-daily #receiptDailyTable th {
       background: color-mix(in srgb, var(--card) 95%, #fff);
     }
-    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable { min-width: 26rem; }
-    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable { min-width: 38rem; }
-    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable { min-width: 50rem; }
+    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable { min-width: 28rem; }
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable { min-width: 40rem; }
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable { min-width: 52rem; }
     .receipt-daily #receiptDailyTable th:nth-child(4n+1),
     .receipt-daily #receiptDailyTable td:nth-child(4n+1) {
       width: 10%;
       white-space: nowrap;
     }
+    .receipt-daily .receipt-daily-wd { font-weight: 600; }
+    .receipt-daily .receipt-daily-wd-sun { color: var(--bad); }
+    .receipt-daily .receipt-daily-wd-sat { color: var(--c-rain); }
     .receipt-daily #receiptDailyTable th:nth-child(4n+2),
     .receipt-daily #receiptDailyTable td:nth-child(4n+2) { width: 15%; }
     .receipt-daily #receiptDailyTable th:nth-child(4n+3),
@@ -443,6 +446,15 @@
       </div>
       <button id="reloadBtn" class="btn primary">再読み込み</button>
     </div>
+    <div class="controls budget-row" style="margin-top:10px;flex-wrap:wrap;align-items:flex-end;gap:8px">
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:0.85rem;color:var(--sub);min-width:0">
+        <span>月間予算（円）<small style="font-weight:400"> — 表示月・選択店舗（ブラウザに保存）</small></span>
+        <input id="monthBudgetInput" class="input" type="number" min="0" step="1000" inputmode="numeric" placeholder="未設定" style="max-width:14rem">
+      </label>
+      <button id="monthBudgetSaveBtn" type="button" class="btn primary">保存</button>
+      <button id="monthBudgetClearBtn" type="button" class="btn">クリア</button>
+      <span id="monthBudgetHint" class="meta" style="flex:1;min-width:10rem"></span>
+    </div>
     <div id="filterMeta" class="meta">未取得</div>
   </section>
 
@@ -456,6 +468,8 @@
       <div class="kpi-card"><div class="kpi-label">月間客数</div><div class="kpi-value" id="kpiGuest">-</div><div class="kpi-sub" id="kpiGuestAvg"></div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeGuestMom"></span><span class="kpi-badge flat" id="kpiBadgeGuestYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">客単価（平均）</div><div class="kpi-value" id="kpiUnit">-</div><div class="kpi-badges"><span class="kpi-badge flat" id="kpiBadgeUnitMom"></span><span class="kpi-badge flat" id="kpiBadgeUnitYoy"></span></div></div>
       <div class="kpi-card"><div class="kpi-label">営業日数</div><div class="kpi-value" id="kpiDays">-</div><div class="kpi-sub" id="kpiReceipts"></div></div>
+      <div class="kpi-card"><div class="kpi-label">月間予算（設定）</div><div class="kpi-value" id="kpiBudget">-</div><div class="kpi-sub" id="kpiBudgetSub"></div></div>
+      <div class="kpi-card"><div class="kpi-label">予算達成率</div><div class="kpi-value" id="kpiBudgetAchieve">-</div><div class="kpi-sub" id="kpiBudgetDiff"></div></div>
     </div>
   </section>
 
@@ -572,6 +586,7 @@
 
 const TOKEN_KEY = 'line_summary_admin_token';
 const THEME_KEY = 'line_reservation_calendar_theme';
+const BUDGET_STORAGE_KEY = 'line_analytics_month_budget_v1';
 const PROJECT_URL = 'https://jhpmzqxqvapdkyvvhyra.supabase.co';
 
 /* ── store coordinates for weather (store_partition_key → {lat,lon}) ── */
@@ -732,6 +747,7 @@ const state = {
   weather: {},        // date → {temp, rain}
   charts: {},
   weekdayMetric: 'gross',
+  lastGrossYen: null,
 };
 
 /* ── dom refs ── */
@@ -747,6 +763,10 @@ const dom = {
   kpiParty: $('kpiParty'), kpiPartyAvg: $('kpiPartyAvg'),
   kpiGuest: $('kpiGuest'), kpiGuestAvg: $('kpiGuestAvg'),
   kpiUnit: $('kpiUnit'), kpiDays: $('kpiDays'), kpiReceipts: $('kpiReceipts'),
+  kpiBudget: $('kpiBudget'), kpiBudgetSub: $('kpiBudgetSub'),
+  kpiBudgetAchieve: $('kpiBudgetAchieve'), kpiBudgetDiff: $('kpiBudgetDiff'),
+  monthBudgetInput: $('monthBudgetInput'), monthBudgetSaveBtn: $('monthBudgetSaveBtn'),
+  monthBudgetClearBtn: $('monthBudgetClearBtn'), monthBudgetHint: $('monthBudgetHint'),
   kpiBadgeGrossMom: $('kpiBadgeGrossMom'), kpiBadgeGrossYoy: $('kpiBadgeGrossYoy'),
   kpiBadgePartyMom: $('kpiBadgePartyMom'), kpiBadgePartyYoy: $('kpiBadgePartyYoy'),
   kpiBadgeGuestMom: $('kpiBadgeGuestMom'), kpiBadgeGuestYoy: $('kpiBadgeGuestYoy'),
@@ -790,18 +810,34 @@ function formatYenReceiptInt(n) {
   return '¥' + Math.round(x).toLocaleString('ja-JP');
 }
 
-function formatReceiptDailyDateNoYear(raw) {
+/** 日付列: M/D + 曜（Asia/Tokyo）。曜部分のみ色分け（祝日・日曜は同一色、土曜は別色） */
+function receiptDailyDateCellInnerHtml(raw) {
   const s = String(raw || '').trim();
-  if (!s || s === '-') return '-';
+  if (!s || s === '-') return escapeHtml('-');
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-  if (m) return `${Number(m[2])}/${Number(m[3])}`;
-  return s;
+  if (!m) return escapeHtml(s);
+  const iso = `${m[1]}-${m[2]}-${m[3]}T12:00:00+09:00`;
+  const d = new Date(iso);
+  const md = `${Number(m[2])}/${Number(m[3])}`;
+  if (Number.isNaN(d.getTime())) return escapeHtml(md);
+  const dateStr = `${m[1]}-${m[2]}-${m[3]}`;
+  const isHoliday = JAPANESE_HOLIDAYS.has(dateStr);
+  const day = d.getDay();
+  const wd = ['日', '月', '火', '水', '木', '金', '土'][day];
+  const wdPart = `(${wd})`;
+  if (isHoliday || day === 0) {
+    return `${escapeHtml(md)}<span class="receipt-daily-wd receipt-daily-wd-sun">${escapeHtml(wdPart)}</span>`;
+  }
+  if (day === 6) {
+    return `${escapeHtml(md)}<span class="receipt-daily-wd receipt-daily-wd-sat">${escapeHtml(wdPart)}</span>`;
+  }
+  return escapeHtml(`${md}${wdPart}`);
 }
 
 function receiptDailyCellsForDay(r) {
   if (!r) return '<td></td><td></td><td></td><td></td>';
   return (
-    `<td>${escapeHtml(formatReceiptDailyDateNoYear(r.date))}</td>` +
+    `<td>${receiptDailyDateCellInnerHtml(r.date)}</td>` +
     `<td style="text-align:right">${formatYenReceiptInt(r.gross_sales_yen)}</td>` +
     `<td style="text-align:right">${Number(r.party_count || 0)}</td>` +
     `<td style="text-align:right">${Number(r.guest_count || 0)}</td>`
@@ -942,6 +978,7 @@ function buildReceiptDailyTablePayload(salesData, displayMonth, isSingleMonth) {
 
 function resetReceiptDailyDisconnected() {
   lastReceiptDailyData = null;
+  resetBudgetKpis({ clearInput: true });
   if (dom.receiptDailyMeta) dom.receiptDailyMeta.textContent = 'トークンを保存すると表示できます。';
   receiptDailySyncLayoutChrome();
   if (dom.receiptDailyTableBody) {
@@ -955,6 +992,88 @@ function yen(v) {
   return '¥' + Number(v).toLocaleString('ja-JP');
 }
 function num(v) { return v == null ? '-' : Number(v).toLocaleString('ja-JP'); }
+
+function loadBudgetMap() {
+  try {
+    const raw = localStorage.getItem(BUDGET_STORAGE_KEY);
+    if (!raw) return {};
+    const o = JSON.parse(raw);
+    return o && typeof o === 'object' ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveBudgetMap(map) {
+  try {
+    localStorage.setItem(BUDGET_STORAGE_KEY, JSON.stringify(map));
+  } catch { /* quota */ }
+}
+
+function budgetStorageKey(storeKey) {
+  return String(storeKey || '').trim() || '__all__';
+}
+
+function getBudgetForMonth(storeKey, month) {
+  const mo = String(month || '').trim();
+  if (!mo) return null;
+  const v = loadBudgetMap()[budgetStorageKey(storeKey)]?.[mo];
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+}
+
+function setBudgetForMonth(storeKey, month, yenVal) {
+  const mo = String(month || '').trim();
+  if (!mo) return;
+  const map = loadBudgetMap();
+  const sk = budgetStorageKey(storeKey);
+  if (!map[sk]) map[sk] = {};
+  const numVal = Number(yenVal);
+  if (!Number.isFinite(numVal) || numVal <= 0) {
+    delete map[sk][mo];
+  } else {
+    map[sk][mo] = Math.round(numVal);
+  }
+  if (Object.keys(map[sk]).length === 0) delete map[sk];
+  saveBudgetMap(map);
+}
+
+function syncBudgetInput(storeKey, month) {
+  if (!dom.monthBudgetInput) return;
+  const b = getBudgetForMonth(storeKey, month);
+  dom.monthBudgetInput.value = b != null ? String(b) : '';
+}
+
+function updateBudgetKpis(storeKey, month, grossYen) {
+  if (!dom.kpiBudget) return;
+  const mo = String(month || '').trim();
+  const b = getBudgetForMonth(storeKey, mo);
+  const gross = Number(grossYen);
+  const gOk = Number.isFinite(gross);
+  dom.kpiBudget.textContent = b != null ? yen(b) : '未設定';
+  dom.kpiBudgetSub.textContent = mo ? `${mo}・この端末に保存` : '';
+  if (b != null && b > 0 && gOk) {
+    const pct = (gross / b) * 100;
+    dom.kpiBudgetAchieve.textContent = pct.toFixed(1) + '%';
+    const diff = gross - b;
+    const sign = diff >= 0 ? '+' : '-';
+    dom.kpiBudgetDiff.textContent = `差額 ${sign}${yen(Math.abs(diff))}`;
+  } else {
+    dom.kpiBudgetAchieve.textContent = '-';
+    dom.kpiBudgetDiff.textContent = '';
+  }
+}
+
+function resetBudgetKpis(opts) {
+  const clearInput = opts && opts.clearInput;
+  if (dom.kpiBudget) dom.kpiBudget.textContent = '-';
+  if (dom.kpiBudgetSub) dom.kpiBudgetSub.textContent = '';
+  if (dom.kpiBudgetAchieve) dom.kpiBudgetAchieve.textContent = '-';
+  if (dom.kpiBudgetDiff) dom.kpiBudgetDiff.textContent = '';
+  if (clearInput && dom.monthBudgetInput) dom.monthBudgetInput.value = '';
+  if (dom.monthBudgetHint) dom.monthBudgetHint.textContent = '';
+  state.lastGrossYen = null;
+}
 
 function setBadge(el, cur, prev, label) {
   if (!el) return;
@@ -1017,6 +1136,11 @@ function periodToMonths(period) {
     result.push(`${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, '0')}`);
   }
   return result;
+}
+
+function displayMonthFromPeriod() {
+  const months = periodToMonths(state.period);
+  return months[months.length - 1] || '';
 }
 
 function isValidMonthString(value) {
@@ -1099,6 +1223,33 @@ dom.clearToken.addEventListener('click', () => {
   updateAuthBadge();
   resetReceiptDailyDisconnected();
 });
+
+if (dom.monthBudgetSaveBtn && dom.monthBudgetClearBtn) {
+  dom.monthBudgetSaveBtn.addEventListener('click', () => {
+    const dm = displayMonthFromPeriod();
+    const raw = dom.monthBudgetInput?.value?.trim() ?? '';
+    if (raw !== '') {
+      const n = Number(raw.replace(/,/g, ''));
+      if (!Number.isFinite(n) || n < 0) {
+        dom.monthBudgetHint.textContent = '0以上の数値を入力してください';
+        return;
+      }
+      setBudgetForMonth(state.storeKey, dm, n);
+    } else {
+      setBudgetForMonth(state.storeKey, dm, NaN);
+    }
+    syncBudgetInput(state.storeKey, dm);
+    updateBudgetKpis(state.storeKey, dm, state.lastGrossYen);
+    dom.monthBudgetHint.textContent = dm ? `保存しました（${dm}）` : '保存しました';
+  });
+  dom.monthBudgetClearBtn.addEventListener('click', () => {
+    const dm = displayMonthFromPeriod();
+    setBudgetForMonth(state.storeKey, dm, NaN);
+    syncBudgetInput(state.storeKey, dm);
+    updateBudgetKpis(state.storeKey, dm, state.lastGrossYen);
+    dom.monthBudgetHint.textContent = '予算をクリアしました';
+  });
+}
 
 /* ── theme ── */
 function applyTheme(t) {
@@ -1388,6 +1539,10 @@ async function loadAll() {
     dom.kpiDays.textContent = activeDays + ' 日';
     dom.kpiReceipts.textContent = totals?.receipt_count ? `レシート ${totals.receipt_count} 件` : '';
 
+    state.lastGrossYen = totals?.total_gross_sales_yen ?? null;
+    syncBudgetInput(state.storeKey, displayMonth);
+    updateBudgetKpis(state.storeKey, displayMonth, totals?.total_gross_sales_yen);
+
     if (isSingleMonth) applyKpiBadges(displayMonth, state.monthlySeries);
     else applyKpiBadges(null, state.monthlySeries);
 
@@ -1412,6 +1567,7 @@ async function loadAll() {
     renderAllCharts();
   } catch (e) {
     dom.filterMeta.textContent = 'エラー: ' + e.message;
+    resetBudgetKpis();
     lastReceiptDailyData = null;
     if (dom.receiptDailyMeta) dom.receiptDailyMeta.textContent = '取得失敗: ' + e.message;
     receiptDailySyncLayoutChrome();
