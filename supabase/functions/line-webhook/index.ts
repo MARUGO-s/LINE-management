@@ -4004,7 +4004,7 @@ function buildReceiptDuplicateConfirmationFlexReply(
   const bodyContents: Array<Record<string, unknown>> = [
     {
       type: 'text',
-      text: '同日のレシートが既に登録されています。',
+      text: '同日のレシートが既に登録されています。次のいずれかを選んでください。',
       size: 'sm',
       weight: 'bold',
       color: '#1F1F1F',
@@ -4019,11 +4019,34 @@ function buildReceiptDuplicateConfirmationFlexReply(
     },
     {
       type: 'text',
-      text: '以下を選択してクリックしてください',
+      text: `同じ店舗・同じレシート日（${receiptDateIso}）のデータがあります。`,
+      size: 'xs',
+      color: '#B45309',
+      weight: 'bold',
+      wrap: true,
+      margin: 'md',
+    },
+    {
+      type: 'text',
+      text: 'ボタンまたは「加算」「中止」「置き換え」、番号 1／2／3 で返信できます。',
       size: 'xs',
       color: '#555555',
       wrap: true,
+    },
+    {
+      type: 'text',
+      text: '1・加算 … 既存のまま今回も追加。2・中止 … 登録しない（画像保存も取り消し）。3・置き換え … 同日分を削除して今回のみ。',
+      size: 'xs',
+      color: '#333333',
+      wrap: true,
       margin: 'md',
+    },
+    {
+      type: 'text',
+      text: '※「はい」＝加算、「いいえ」＝中止',
+      size: 'xs',
+      color: '#888888',
+      wrap: true,
     },
   ]
 
