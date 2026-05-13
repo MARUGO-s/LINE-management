@@ -6,12 +6,18 @@ import {
 } from '../_shared/line_media_content_preview.ts'
 import { inferLineMediaFilePurposeLabel } from '../_shared/line_media_file_purpose_infer.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.44.0'
-import { MARUGO_GROUP_STORE_OPTIONS } from '../_shared/marugo_group_stores.ts'
+import {
+  findBestStoreNameInText,
+  normalizeStoreToken,
+  resolveBestStoreName,
+} from '../_shared/receipt_store_name_resolve.ts'
 import {
   allocateDailyBudgetsForMonth,
   enumerateMonthDates,
   getDefaultJapaneseHolidaySet,
+  getJstBusinessDateForReceiptBudget,
   mergeStoreClosedDateLists,
+  shouldDeferDailyBudgetUntilJstOpen,
   type SalesBudgetAllocationWeights,
 } from '../_shared/sales_budget_allocation.ts'
 
@@ -338,6 +344,9 @@ type ReceiptFlexBaselineKvRow = {
   value: string
   margin?: 'md'
   valueColor?: string
+  valueUnit?: string | null
+  /** 値の下に続ける行。左列は「1日平均」、右列はこの文字列 */
+  avgLineValue?: string | null
 }
 
 type LineImageReceiptAnalysis = {
@@ -355,6 +364,8 @@ type LineImageReceiptAnalysis = {
 type LineImageAnalysisResult = {
   summary: string
   receipt: LineImageReceiptAnalysis | null
+  /** Groq が任意で返す 0〜1。無い場合はヒューリスティックのみ。 */
+  receiptModelConfidence?: number | null
 }
 
 type LineImageVisionFailure = {
@@ -543,6 +554,8 @@ const DEFAULT_MEDIA_UPLOAD_MAX_MB = 10
 const MAX_MEDIA_UPLOAD_MAX_MB = 20
 const RECEIPT_MID_REPORT_TITLE = '中間報告'
 const RECEIPT_STORE_PARTITION_UNKNOWN = 'unknown_store'
+/** 未満ならレシート行・メディア保存を取りやめ、撮り直しを促す（0〜1） */
+const RECEIPT_ANALYSIS_CONFIDENCE_MIN = 0.52
 const WEBHOOK_REQUEST_WINDOW_MS = 60 * 1000
 const WEBHOOK_REQUEST_MAX_PER_IP = 120
 const WEBHOOK_EVENT_WINDOW_MS = 60 * 1000
@@ -937,6 +950,72 @@ Deno.serve(async (req) => {
           )
           if (!startReply.ok) {
             console.error('Failed to reply receipt correction start prompt:', startReply.error)
+          }
+          continue
+        }
+
+        const receiptAnalysisDelete = parseReceiptAnalysisDeleteDirective(text)
+        if (receiptAnalysisDelete.matched) {
+          if (roomReplyPolicy.botReplyHardMuteEnabled) {
+            continue
+          }
+          if (!lineAccessToken || !replyToken) {
+            if (!lineAccessToken) {
+              console.error('LINE_CHANNEL_ACCESS_TOKEN is missing. Cannot reply receipt analysis delete command.')
+            }
+            if (!replyToken) {
+              console.error('Missing replyToken for receipt analysis delete command.')
+            }
+            continue
+          }
+          if (!canUseMedia) {
+            const denyReply = await replyLineMessage(
+              replyToken,
+              'レシート解析の削除には、このルームでメディア保存が有効で、かつあなたのユーザー権限でメディアが許可されている必要があります。',
+              lineAccessToken,
+              webhookDeliveryLog('receipt_analysis_delete_media_denied'),
+            )
+            if (!denyReply.ok) {
+              console.error('Failed to reply receipt analysis delete permission status:', denyReply.error)
+            }
+            continue
+          }
+          const targetLmid = receiptAnalysisDelete.targetLineMessageId
+          if (!targetLmid) {
+            const hintReply = await replyLineMessage(
+              replyToken,
+              '解析結果カードの「この解析結果を削除」ボタンから送るか、「レシート解析削除 ID:（LINEのメッセージID）」の形式で送ってください。',
+              lineAccessToken,
+              webhookDeliveryLog('receipt_analysis_delete_missing_id'),
+            )
+            if (!hintReply.ok) {
+              console.error('Failed to reply receipt analysis delete hint:', hintReply.error)
+            }
+            continue
+          }
+          const delResult = await executeReceiptAnalysisDeletionForRoom(supabase, roomId, targetLmid)
+          if (!delResult.ok) {
+            const errReply = await replyLineMessage(
+              replyToken,
+              delResult.message,
+              lineAccessToken,
+              webhookDeliveryLog('receipt_analysis_delete_failed'),
+            )
+            if (!errReply.ok) {
+              console.error('Failed to reply receipt analysis delete error:', errReply.error)
+            }
+            continue
+          }
+          await clearPendingReceiptCorrection(supabase, roomId, userId)
+          await clearPendingReceiptDuplicate(supabase, roomId, userId)
+          const okReply = await replyLineMessage(
+            replyToken,
+            'レシート画像と解析データを削除しました（このルームの保存から取り除きました）。',
+            lineAccessToken,
+            webhookDeliveryLog('receipt_analysis_delete_ok'),
+          )
+          if (!okReply.ok) {
+            console.error('Failed to reply receipt analysis delete ok:', okReply.error)
           }
           continue
         }
@@ -2232,6 +2311,33 @@ async function trySaveLineMediaContent(
     }
   }
 
+  if (mediaType === 'image' && imageAnalysis?.receipt) {
+    const merged = mergeReceiptConfidence(
+      computeReceiptHeuristicConfidence(imageAnalysis.receipt),
+      imageAnalysis.receiptModelConfidence ?? null,
+    )
+    if (merged < RECEIPT_ANALYSIS_CONFIDENCE_MIN) {
+      const rm = await supabase.storage.from(LINE_MEDIA_BUCKET).remove([storagePath])
+      if (rm.error) {
+        console.error(
+          `Low-confidence receipt rollback: storage remove failed (lineMessageId=${lineMessageId}):`,
+          rm.error.message,
+        )
+      }
+      const delMsg = await supabase.from('line_messages').delete().eq('id', lineMessageRowId)
+      if (delMsg.error) {
+        console.error(
+          `Low-confidence receipt rollback: line_messages delete failed (id=${lineMessageRowId}):`,
+          delMsg.error.message,
+        )
+      }
+      return [
+        'レシートの自動解析の確信度が低いため、この画像は保存していません（売上登録にも使いません）。',
+        '影・反射を避け、金額・日付・店名がはっきり読める距離でもう一度撮影してください。',
+      ].join('\n')
+    }
+  }
+
   const { error: insertError } = await supabase.from('line_message_media').insert({
     message_id: lineMessageRowId,
     line_message_id: lineMessageId,
@@ -2297,7 +2403,7 @@ async function trySaveLineMediaContent(
   if (mediaType === 'image' && imageAnalysis?.receipt) {
     const now = new Date()
     const canonicalStoreName = imageAnalysis.receipt.storeName
-      ? (resolveBestStoreName(imageAnalysis.receipt.storeName) ?? imageAnalysis.receipt.storeName)
+      ? resolveBestStoreName(imageAnalysis.receipt.storeName)
       : null
     const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
     const receiptDateIsoForTotals =
@@ -2377,12 +2483,22 @@ async function trySaveLineMediaContent(
       return receiptDuplicateConfirmationReply
     }
     if (imageAnalysis?.receipt) {
+      const canonicalForAvg = imageAnalysis.receipt.storeName
+        ? resolveBestStoreName(imageAnalysis.receipt.storeName)
+        : null
+      const storeKeyForAvg = toReceiptStorePartitionKey(canonicalForAvg)
+      const receiptIsoForAvg =
+        parseReceiptDateToIso(imageAnalysis.receipt.date) ?? resolveReceiptDateIsoForPersist(imageAnalysis.receipt.date)
+      const monthStrForAvg = receiptIsoForAvg.slice(0, 7)
+      const monthAvgBizDays = await resolveReceiptMonthDailyAvgDivisor(supabase, storeKeyForAvg, monthStrForAvg)
       const baseReply = buildLineReceiptImageAnalysisReply(
         imageAnalysis.receipt,
         monthCumulativeTotals,
         {
           correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(lineMessageId),
+          deletionCommandText: buildReceiptAnalysisDeletionCommandTextForLineMessageId(lineMessageId),
           budgetRows: receiptBudgetFlexRows ?? undefined,
+          monthAvgBusinessDayDivisor: monthAvgBizDays ?? undefined,
         },
       )
       if (midMonthReportReply) {
@@ -2577,55 +2693,10 @@ function extractDatesFromText(value: string, defaultYear?: number): string[] {
   return Array.from(new Set(out))
 }
 
-function normalizeStoreToken(value: string): string {
-  return String(value || '')
-    .toLowerCase()
-    .replace(/株式会社ワルツ/g, '')
-    .replace(/[^0-9a-zぁ-んァ-ヶ一-龠々]/g, '')
-    .trim()
-}
-
 function toReceiptStorePartitionKey(storeName: string | null): string {
   const normalized = normalizeStoreToken(String(storeName ?? ''))
   if (!normalized) return RECEIPT_STORE_PARTITION_UNKNOWN
   return normalized.slice(0, 120)
-}
-
-const STORE_ALIAS_MAP: Record<string, string> = {
-  'cavacava': 'BISTRO CAVA CAVA',
-  'cava': 'BISTRO CAVA CAVA',
-  // OCR が語順を入れ替えることがある（例: CAVA BISTRO）
-  'cavabistro': 'BISTRO CAVA CAVA',
-  'marugod': 'マルゴ D',
-  'marugo d': 'マルゴ D',
-  'sobaju': 'ソバージュ',
-  'soba-ju': 'ソバージュ',
-  '371bar': 'サンナナイチ バル',
-  'バルペロタ': 'バルぺロタ',
-  'どないや新宿三丁目店': '元祖どないや 新宿三丁目店',
-  'マルゴオット': 'マルゴ オット',
-  'マルゴグランデ': 'マルゴ グランデ',
-  'マルゴセカンド': 'マルゴ セカンド',
-  'マルゴ四谷': 'マルゴ 四谷',
-  'マルゴ新橋': 'マルゴ 新橋',
-}
-
-function resolveBestStoreName(rawName: string): string | null {
-  const normalized = normalizeStoreToken(rawName)
-  if (!normalized) return null
-  const aliasHit = STORE_ALIAS_MAP[normalized]
-  if (aliasHit) return aliasHit
-  const candidates = [...MARUGO_GROUP_STORE_OPTIONS]
-    .map((store) => ({ store, norm: normalizeStoreToken(store) }))
-    .filter((row) => row.norm.length > 0)
-    .sort((a, b) => b.norm.length - a.norm.length)
-
-  for (const candidate of candidates) {
-    if (normalized.includes(candidate.norm) || candidate.norm.includes(normalized)) {
-      return candidate.store
-    }
-  }
-  return String(rawName || '').trim() || null
 }
 
 function parseDateCellToYmd(value: string, defaultYear?: number): string | null {
@@ -2676,25 +2747,6 @@ function parseTimeCellToHm(value: string): string {
 }
 
 type HaccpScheduleResolvedEntry = HaccpScheduleEntry & { time: string }
-
-function findBestStoreNameInText(text: string): string | null {
-  const normalized = normalizeStoreToken(text)
-  if (!normalized) return null
-  const aliasKeys = Object.keys(STORE_ALIAS_MAP).sort((a, b) => b.length - a.length)
-  for (const key of aliasKeys) {
-    if (normalized.includes(key)) return STORE_ALIAS_MAP[key]
-  }
-  const candidates = [...MARUGO_GROUP_STORE_OPTIONS]
-    .map((store) => ({ store, norm: normalizeStoreToken(store) }))
-    .filter((row) => row.norm.length > 0)
-    .sort((a, b) => b.norm.length - a.norm.length)
-  for (const candidate of candidates) {
-    if (normalized.includes(candidate.norm) || candidate.norm.includes(normalized)) {
-      return candidate.store
-    }
-  }
-  return null
-}
 
 function parseTimeFromLooseText(text: string): string {
   const match = /(^|[^\d])([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)/.exec(String(text || ''))
@@ -3083,6 +3135,37 @@ function buildReceiptCorrectionCommandTextForLineMessageId(lineMessageId: string
   return `レシート修正 ID:${normalized}`
 }
 
+function buildReceiptAnalysisDeletionCommandTextForLineMessageId(lineMessageId: string | null | undefined): string {
+  const normalized = String(lineMessageId ?? '').trim()
+  if (!normalized) return 'レシート解析削除'
+  return `レシート解析削除 ID:${normalized}`
+}
+
+function parseReceiptAnalysisDeleteDirective(
+  rawText: string,
+): { matched: boolean; targetLineMessageId: string | null } {
+  const normalized = normalizeForRuleParsing(String(rawText ?? '')).trim()
+  if (!normalized) return { matched: false, targetLineMessageId: null }
+  const idTagged = normalized.match(
+    /^レシート(?:画像)?解析削除\s*(?:id[:：]|#)\s*([A-Za-z0-9_-]{8,128})$/iu,
+  )
+  if (idTagged?.[1]) return { matched: true, targetLineMessageId: String(idTagged[1]).trim() }
+  const idTagged2 = normalized.match(/^レシート削除\s*(?:id[:：]|#)\s*([A-Za-z0-9_-]{8,128})$/iu)
+  if (idTagged2?.[1]) return { matched: true, targetLineMessageId: String(idTagged2[1]).trim() }
+  const idPlain = normalized.match(/^レシート(?:画像)?解析削除\s+([A-Za-z0-9_-]{8,128})$/iu)
+  if (idPlain?.[1]) return { matched: true, targetLineMessageId: String(idPlain[1]).trim() }
+  const idPlain2 = normalized.match(/^レシート削除\s+([A-Za-z0-9_-]{8,128})$/iu)
+  if (idPlain2?.[1]) return { matched: true, targetLineMessageId: String(idPlain2[1]).trim() }
+  const compact = normalized.replace(/\s+/g, '')
+  if (compact === 'レシート解析削除' || compact === 'レシート削除') {
+    return { matched: true, targetLineMessageId: null }
+  }
+  if (/^レシート(?:画像)?解析削除(\s|$)/u.test(normalized) || /^レシート削除(\s|$)/u.test(normalized)) {
+    return { matched: true, targetLineMessageId: null }
+  }
+  return { matched: false, targetLineMessageId: null }
+}
+
 function normalizeReceiptCorrectionFieldKey(raw: unknown): ReceiptCorrectionFieldKey | null {
   const normalized = String(raw ?? '').trim()
   if (!normalized) return null
@@ -3189,27 +3272,106 @@ function setReceiptCorrectionFieldValue(
   return next
 }
 
+function buildReceiptCorrectionFlexBubbleHeader(title: string, subtitle: string): Record<string, unknown> {
+  return {
+    type: 'box',
+    layout: 'vertical',
+    backgroundColor: '#1E4FB1',
+    paddingTop: 'md',
+    paddingBottom: 'md',
+    paddingStart: 'md',
+    paddingEnd: 'md',
+    contents: [
+      { type: 'text', text: lineSafeFlexText(title, 80), size: 'lg', weight: 'bold', color: '#FFFFFF' },
+      {
+        type: 'text',
+        text: lineSafeFlexText(subtitle, 200),
+        size: 'sm',
+        color: '#D7E6FF',
+        margin: 'sm',
+        wrap: true,
+      },
+    ],
+  }
+}
+
+/** レシート修正・項目一覧（レシート解析 Flex と同様の baseline 6:10） */
 function buildReceiptCorrectionFieldSelectionPrompt(
   draft: LineImageReceiptAnalysis,
   note?: string,
-): string {
-  const lines: string[] = ['レシート修正中です。修正する項目番号を返信してください。']
-  if (note) lines.push(note)
-  for (let idx = 0; idx < RECEIPT_CORRECTION_FIELDS.length; idx += 1) {
-    const field = RECEIPT_CORRECTION_FIELDS[idx]
-    const value = getReceiptCorrectionFieldValue(draft, field.key) || '-'
-    lines.push(`${idx + 1}) ${field.label}: ${value}`)
+): LineReplyMessage[] {
+  const labelFlex = 6
+  const valueFlex = 10
+  const fieldRows: ReceiptFlexBaselineKvRow[] = RECEIPT_CORRECTION_FIELDS.map((field, idx) => ({
+    label: `${idx + 1}. ${field.label}`,
+    value: lineSafeFlexText(getReceiptCorrectionFieldValue(draft, field.key) || '-', 120),
+  }))
+  const detailRows = buildReceiptFlexBaselineRows(fieldRows, labelFlex, valueFlex)
+  const bodyContents: Array<Record<string, unknown>> = [
+    {
+      type: 'text',
+      text: 'レシート修正中です。修正する項目番号を返信してください。',
+      size: 'sm',
+      color: '#1F1F1F',
+      wrap: true,
+    },
+  ]
+  if (note) {
+    bodyContents.push({
+      type: 'text',
+      text: lineSafeFlexText(note, 500),
+      size: 'xs',
+      color: '#666666',
+      wrap: true,
+      margin: 'sm',
+    })
   }
-  lines.push('操作: 番号で項目選択 / 確定 / キャンセル')
-  return lines.join('\n')
+  bodyContents.push({
+    type: 'box',
+    layout: 'vertical',
+    spacing: 'xs',
+    margin: 'md',
+    contents: detailRows,
+  })
+  bodyContents.push({
+    type: 'text',
+    text: [
+      '以下をこのトークへ送って操作できます。',
+      '・1〜8 の数字…その項目の修正へ進む',
+      '・「確定」「保存」「反映」「完了」「OK」など…変更を保存して終了',
+      '・「キャンセル」「中止」「終了」など…修正をやめる（未保存の内容は破棄）',
+    ].join('\n'),
+    size: 'xxs',
+    color: '#888888',
+    wrap: true,
+    margin: 'md',
+  })
+  const altHead = draft.storeName ? lineSafeFlexText(draft.storeName, 40) : 'レシート'
+  const altText = `レシート修正 ${altHead} 番号で項目を選んでください`.slice(0, 400)
+  return [{
+    type: 'flex',
+    altText,
+    contents: {
+      type: 'bubble',
+      header: buildReceiptCorrectionFlexBubbleHeader('レシート修正', '番号を返信して項目を選んでください'),
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: bodyContents,
+      },
+    },
+  }]
 }
 
 function buildReceiptCorrectionValueInputPrompt(
   fieldKey: ReceiptCorrectionFieldKey,
   draft: LineImageReceiptAnalysis,
-): string {
+): LineReplyMessage[] {
   const field = getReceiptCorrectionFieldConfig(fieldKey)
-  if (!field) return '修正項目を認識できませんでした。番号で選び直してください。'
+  if (!field) {
+    return [{ type: 'text', text: '修正項目を認識できませんでした。番号で選び直してください。' }]
+  }
   const currentValue = getReceiptCorrectionFieldValue(draft, fieldKey) || '-'
   const kindHint = field.valueKind === 'currency'
     ? '例: 46200 / ¥46,200'
@@ -3218,13 +3380,73 @@ function buildReceiptCorrectionValueInputPrompt(
       : field.valueKind === 'date'
         ? '例: 2026-04-19 / 2026年4月19日'
         : '例: BISTRO CAVA CAVA'
-  return [
-    `${field.label}の新しい値を送ってください。`,
-    `現在値: ${currentValue}`,
-    kindHint,
-    '未設定にする場合は「-」または「なし」と入力してください。',
-    '「戻る」で項目選択に戻れます。',
-  ].join('\n')
+  const bodyContents: Array<Record<string, unknown>> = [
+    {
+      type: 'text',
+      text: `${field.label}の新しい値を送ってください。`,
+      size: 'sm',
+      color: '#1F1F1F',
+      wrap: true,
+    },
+    {
+      type: 'box',
+      layout: 'baseline',
+      spacing: 'sm',
+      margin: 'md',
+      contents: [
+        { type: 'text', text: '現在値', size: 'sm', color: '#7A7A7A', flex: 6, wrap: false },
+        {
+          type: 'text',
+          text: lineSafeFlexText(currentValue, 200),
+          size: 'sm',
+          color: '#1F1F1F',
+          flex: 10,
+          wrap: false,
+        },
+      ],
+    },
+    {
+      type: 'text',
+      text: `入力のヒント: ${kindHint}`,
+      size: 'xs',
+      color: '#666666',
+      wrap: true,
+      margin: 'sm',
+    },
+    {
+      type: 'text',
+      text: '未設定にする場合は「-」または「なし」と入力してください。',
+      size: 'xxs',
+      color: '#888888',
+      wrap: true,
+    },
+    {
+      type: 'text',
+      text: '「戻る」「back」「項目選択」などを送ると、一覧に戻れます。',
+      size: 'xxs',
+      color: '#888888',
+      wrap: true,
+      margin: 'xs',
+    },
+  ]
+  const altText = `レシート修正 ${field.label}の値を入力`.slice(0, 400)
+  return [{
+    type: 'flex',
+    altText,
+    contents: {
+      type: 'bubble',
+      header: buildReceiptCorrectionFlexBubbleHeader(
+        lineSafeFlexText(field.label, 40),
+        '新しい値をテキストで送ってください',
+      ),
+      body: {
+        type: 'box',
+        layout: 'vertical',
+        spacing: 'sm',
+        contents: bodyContents,
+      },
+    },
+  }]
 }
 
 function normalizeReceiptCorrectionDraft(raw: unknown): LineImageReceiptAnalysis {
@@ -3786,7 +4008,7 @@ async function startReceiptCorrectionSession(
   roomId: string,
   userId: string | null,
   options?: { targetLineMessageId?: string | null },
-): Promise<string> {
+): Promise<LineReplyPayload> {
   const targetLineMessageId = String(options?.targetLineMessageId ?? '').trim()
   const target = targetLineMessageId
     ? await loadLineReceiptEntryForRoomByLineMessageId(supabase, roomId, targetLineMessageId)
@@ -3866,7 +4088,7 @@ async function tryHandlePendingReceiptCorrection(
       const rm = iso.slice(0, 7)
       const sk = toReceiptStorePartitionKey(
         applied.receipt.storeName
-          ? (resolveBestStoreName(applied.receipt.storeName) ?? applied.receipt.storeName)
+          ? resolveBestStoreName(applied.receipt.storeName)
           : null,
       )
       const budgetRows = await buildReceiptBudgetComparisonRows(
@@ -3876,8 +4098,18 @@ async function tryHandlePendingReceiptCorrection(
         rm,
         applied.monthCumulativeTotals,
       )
+      const monthAvgBizDays = await resolveReceiptMonthDailyAvgDivisor(supabase, sk, rm)
+      const { data: entryMeta } = await supabase
+        .from('line_receipt_entries')
+        .select('line_message_id')
+        .eq('id', pending.receipt_entry_id)
+        .maybeSingle()
+      const lmid = String((entryMeta as Record<string, unknown> | null)?.line_message_id ?? '').trim()
       return buildLineReceiptImageAnalysisReply(applied.receipt, applied.monthCumulativeTotals, {
+        correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(lmid),
+        deletionCommandText: buildReceiptAnalysisDeletionCommandTextForLineMessageId(lmid),
         budgetRows: budgetRows ?? undefined,
+        monthAvgBusinessDayDivisor: monthAvgBizDays ?? undefined,
       })
     }
     const field = parseReceiptCorrectionFieldChoice(text)
@@ -3921,9 +4153,9 @@ async function tryHandlePendingReceiptCorrection(
   const normalizedValue = normalizeReceiptCorrectionInputValue(currentFieldKey, text)
   if (!normalizedValue.ok) {
     return [
-      normalizedValue.error,
-      buildReceiptCorrectionValueInputPrompt(currentFieldKey, pending.draft),
-    ].join('\n')
+      { type: 'text', text: normalizedValue.error },
+      ...buildReceiptCorrectionValueInputPrompt(currentFieldKey, pending.draft),
+    ]
   }
   const nextDraft = setReceiptCorrectionFieldValue(pending.draft, currentFieldKey, normalizedValue.value)
   const normalizedDraft = normalizeReceiptCorrectionDraftForPersist(nextDraft)
@@ -4161,6 +4393,39 @@ async function rollbackPendingDuplicateReceiptUpload(
   }
 }
 
+async function executeReceiptAnalysisDeletionForRoom(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  lineMessageId: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const lmid = String(lineMessageId ?? '').trim()
+  if (!lmid) return { ok: false, message: 'LINEメッセージIDが空です。' }
+
+  const { data: row, error } = await supabase
+    .from('line_receipt_entries')
+    .select('id, message_id, line_message_id')
+    .eq('room_id', roomId)
+    .eq('line_message_id', lmid)
+    .maybeSingle()
+  if (error) {
+    console.error('executeReceiptAnalysisDeletionForRoom: select failed:', error.message)
+    return { ok: false, message: '解析結果の照会に失敗しました。少し時間を置いてお試しください。' }
+  }
+  if (!row) {
+    return { ok: false, message: 'このルームで該当のレシート解析が見つかりませんでした。' }
+  }
+  const lineMessagesUuid = String((row as Record<string, unknown>).message_id ?? '').trim()
+  if (!lineMessagesUuid) {
+    return { ok: false, message: '内部データの参照に失敗しました。' }
+  }
+  await rollbackPendingDuplicateReceiptUpload(supabase, lmid, lineMessagesUuid)
+  const { error: dupErr } = await supabase.from(RECEIPT_DUPLICATE_PENDING_TABLE).delete().eq('line_message_id', lmid)
+  if (dupErr) {
+    console.error('executeReceiptAnalysisDeletionForRoom: duplicate pending delete:', dupErr.message)
+  }
+  return { ok: true }
+}
+
 async function savePendingReceiptDuplicate(
   supabase: ReturnType<typeof createClient>,
   payload: {
@@ -4322,6 +4587,11 @@ async function completePendingReceiptDuplicateAndReply(
     receiptMonthStr,
     monthCumulativeTotals,
   )
+  const monthAvgBizDays = await resolveReceiptMonthDailyAvgDivisor(
+    supabase,
+    pending.store_partition_key,
+    receiptMonthStr,
+  )
   const midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
     supabase,
     pending.room_id,
@@ -4334,7 +4604,9 @@ async function completePendingReceiptDuplicateAndReply(
     monthCumulativeTotals,
     {
       correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(pending.line_message_id),
+      deletionCommandText: buildReceiptAnalysisDeletionCommandTextForLineMessageId(pending.line_message_id),
       budgetRows: receiptBudgetFlexRows ?? undefined,
+      monthAvgBusinessDayDivisor: monthAvgBizDays ?? undefined,
     },
   )
   if (midMonthReportReply) {
@@ -5472,8 +5744,9 @@ async function analyzeLineImageWithGroqScout(
             '画像がレシート/領収書なら kind を receipt にし、主要項目を抽出してください。',
             'レシートでない場合は kind を general にし、summary に1文（80文字以内）で内容を入れてください。',
             'JSONスキーマ:',
-            '{"kind":"receipt|general","summary":"string","receipt":{"store_name":"string|null","date":"string|null","net_sales":"string|null","tax_amount":"string|null","gross_sales":"string|null","party_count":"string|null","guest_count":"string|null","unit_price":"string|null","items":["string"]}}',
+            '{"kind":"receipt|general","summary":"string","receipt_confidence":0.0,"receipt":{"store_name":"string|null","date":"string|null","net_sales":"string|null","tax_amount":"string|null","gross_sales":"string|null","party_count":"string|null","guest_count":"string|null","unit_price":"string|null","items":["string"]}}',
             'receipt は kind=general の時は null でも可。items は最大5件まで。読めない項目は null。',
+            'kind=receipt のときは receipt_confidence に 0.0〜1.0 の数値を必ず入れる（読み取りの自信。影・かすれ・不明瞭なら低め）。',
             '金額は可能なら「¥7,700」の形式。会計組数・客数は数値として抽出。summary は必須。',
             'ラベル対応ルール（重要）:',
             '- party_count は「会計組数」「合計組数」「組数」に対応（例: 5組 -> "5"）。',
@@ -5537,6 +5810,7 @@ async function analyzeLineImageWithGroqScout(
     analysis: {
       summary: fallbackSummary,
       receipt: null,
+      receiptModelConfidence: null,
     },
     failure: null,
   }
@@ -5546,6 +5820,9 @@ function normalizeLineImageAnalysisResult(raw: Record<string, unknown>): LineIma
   const summary = normalizeInlineText(String(raw.summary ?? '')).slice(0, 240)
   const kind = String(raw.kind ?? '').trim().toLowerCase()
   const receipt = normalizeLineImageReceiptAnalysis(raw.receipt)
+  const receiptModelConfidence = parseModelReceiptConfidence(
+    raw.receipt_confidence ?? raw.receiptConfidence ?? raw.confidence,
+  )
 
   if (!summary) {
     if (!receipt) return null
@@ -5558,18 +5835,20 @@ function normalizeLineImageAnalysisResult(raw: Record<string, unknown>): LineIma
     return {
       summary: syntheticSummary.slice(0, 240),
       receipt: kind === 'general' ? null : receipt,
+      receiptModelConfidence,
     }
   }
 
   if (kind === 'receipt') {
-    return { summary, receipt }
+    return { summary, receipt, receiptModelConfidence }
   }
   if (kind === 'general') {
-    return { summary, receipt: null }
+    return { summary, receipt: null, receiptModelConfidence }
   }
   return {
     summary,
     receipt,
+    receiptModelConfidence,
   }
 }
 
@@ -5626,11 +5905,11 @@ function formatYenSignedDiff(value: number): string {
   return '¥0'
 }
 
-/** JST の「今日」より後の暦日なら true（将来日は日次予算差を 0 扱い） */
-function receiptDateIsAfterTodayJst(dateKey: string): boolean {
+/** JST の「進行日」より後の暦日なら true（将来日は日次予算差を 0 扱い）。進行日は 5 時切り替え。 */
+function receiptDateIsAfterTodayJst(dateKey: string, now: Date = new Date()): boolean {
   if (!dateKey || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false
-  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' })
-  return dateKey > today
+  const asOf = getJstBusinessDateForReceiptBudget(now)
+  return dateKey > asOf
 }
 
 function extractPartyGuestCountsFromText(raw: string | null): { party: number | null; guest: number | null } {
@@ -5669,13 +5948,53 @@ function salvageOverreadTaxAmount(rawTax: string | null, grossAmount: number): n
   return null
 }
 
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(1, value))
+}
+
+function parseModelReceiptConfidence(raw: unknown): number | null {
+  if (raw == null) return null
+  const n = typeof raw === 'number' ? raw : Number(String(raw).trim().replace(',', '.'))
+  if (!Number.isFinite(n)) return null
+  if (n > 1 && n <= 100) return clamp01(n / 100)
+  return clamp01(n)
+}
+
+function computeReceiptHeuristicConfidence(receipt: LineImageReceiptAnalysis): number {
+  let s = 0
+  const gross = parseCurrencyAmount(receipt.grossSales)
+  const tax = parseCurrencyAmount(receipt.taxAmount)
+  const net = parseCurrencyAmount(receipt.netSales)
+  const dateIso = parseReceiptDateToIso(receipt.date)
+  const partyN = parseIntegerCount(receipt.partyCount)
+  const guestN = parseIntegerCount(receipt.guestCount)
+  const storeOk = !!(receipt.storeName && String(receipt.storeName).trim())
+  if (storeOk) s += 0.2
+  if (dateIso) s += 0.22
+  if (gross != null && gross > 0) s += 0.26
+  if (tax != null && tax >= 0 && gross != null && gross > 0 && tax <= gross * 0.22) s += 0.16
+  if (net != null && net >= 0 && gross != null && gross > 0) {
+    const taxOrZero = tax != null && tax >= 0 ? tax : 0
+    if (Math.abs(net + taxOrZero - gross) <= Math.max(3, gross * 0.02)) s += 0.1
+  }
+  if (guestN != null && guestN > 0 && gross != null && gross > 0) s += 0.1
+  if (partyN != null && partyN >= 0 && guestN != null && guestN > 0) s += 0.06
+  return clamp01(s)
+}
+
+function mergeReceiptConfidence(heuristic: number, model: number | null): number {
+  if (model == null || !Number.isFinite(model)) return clamp01(heuristic)
+  return clamp01(0.45 * heuristic + 0.55 * model)
+}
+
 function normalizeLineImageReceiptAnalysis(raw: unknown): LineImageReceiptAnalysis | null {
   if (!raw || typeof raw !== 'object') return null
   const data = raw as Record<string, unknown>
 
   const rawStoreName =
     normalizeReceiptFieldText(data.store_name ?? data.store ?? data.shop_name, 80)
-  const storeName = rawStoreName ? (resolveBestStoreName(rawStoreName) ?? rawStoreName) : null
+  const storeName = rawStoreName ? resolveBestStoreName(rawStoreName) : null
   let date =
     normalizeReceiptFieldText(data.date ?? data.issued_at ?? data.issued_date, 80)
   let netSales =
@@ -5814,6 +6133,32 @@ function parseReceiptDateToIso(raw: string | null): string | null {
   if (!raw) return null
   const normalized = decodeEscapedUnicodeSequences(raw).trim()
   if (!normalized) return null
+
+  // OCR が「月」を落とす例: 「2026年513日」→ 5月13日（中3桁・4桁を先に解釈し、従来の緩い正規表現の誤読を防ぐ）
+  const jaNoMonth = normalized.match(/^(\d{4})年([0-9]{3,4})日?$/)
+  if (jaNoMonth) {
+    const year = Number(jaNoMonth[1])
+    const digits = jaNoMonth[2]
+    if (digits.length === 4) {
+      const iso = toIsoDateStringSafe(year, Number(digits.slice(0, 2)), Number(digits.slice(2, 4)))
+      if (iso) return iso
+    }
+    if (digits.length === 3) {
+      const mo2 = Number(digits.slice(0, 2))
+      const d1 = Number(digits[2])
+      const mo1 = Number(digits[0])
+      const d2 = Number(digits.slice(1))
+      if (mo2 >= 10 && mo2 <= 12) {
+        const iso21 = toIsoDateStringSafe(year, mo2, d1)
+        if (iso21) return iso21
+      }
+      const iso12 = toIsoDateStringSafe(year, mo1, d2)
+      if (iso12) return iso12
+      const iso21b = toIsoDateStringSafe(year, mo2, d1)
+      if (iso21b) return iso21b
+    }
+  }
+
   const m = normalized.match(/(\d{4})\D{0,6}(\d{1,2})\D{0,6}(\d{1,2})/)
   if (!m) return null
   const year = Number(m[1])
@@ -5825,8 +6170,8 @@ function parseReceiptDateToIso(raw: string | null): string | null {
 function resolveReceiptDateIsoForPersist(raw: string | null): string {
   const parsed = parseReceiptDateToIso(raw)
   if (parsed) return parsed
-  const parts = getJstDateParts(new Date())
-  return toJstDateString(parts.year, parts.month, parts.day)
+  // 暦日ではなく「進行営業日」（JST 0〜4:59 は前日）に合わせる。深夜投稿で翌暦日にズレないようにする。
+  return getJstBusinessDateForReceiptBudget(new Date())
 }
 
 function formatJapaneseReceiptDateFromIso(iso: string | null): string | null {
@@ -6067,7 +6412,7 @@ async function updateLineReceiptEntryFromCorrectionDraft(
   if (!Number.isFinite(receiptEntryId) || receiptEntryId <= 0) return null
   const normalizedDraft = normalizeReceiptCorrectionDraftForPersist(draft)
   const canonicalStoreName = normalizedDraft.storeName
-    ? (resolveBestStoreName(normalizedDraft.storeName) ?? normalizedDraft.storeName)
+    ? resolveBestStoreName(normalizedDraft.storeName)
     : null
   const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
   const receiptDateIso = resolveReceiptDateIsoForPersist(normalizedDraft.date)
@@ -6154,7 +6499,7 @@ async function saveLineReceiptEntry(
   },
 ): Promise<void> {
   const canonicalStoreName = params.receipt.storeName
-    ? (resolveBestStoreName(params.receipt.storeName) ?? params.receipt.storeName)
+    ? resolveBestStoreName(params.receipt.storeName)
     : null
   const storePartitionKey = toReceiptStorePartitionKey(canonicalStoreName)
   const receiptDateIso = resolveReceiptDateIsoForPersist(params.receipt.date)
@@ -6368,6 +6713,53 @@ async function fetchSalesBudgetRowForWebhook(
   }
 }
 
+/**
+ * analytics.html の営業日数 KPI と同じ: 対象月内で `receipt_count > 0` の日数
+ * （= `line_receipt_entries` が1件以上ある distinct receipt_date の個数）
+ */
+async function countReceiptActiveDaysInStoreMonth(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  targetMonthYyyyMm: string,
+): Promise<number> {
+  if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return 0
+  const ym = String(targetMonthYyyyMm ?? '').trim()
+  if (!/^(\d{4})-(\d{2})$/.test(ym)) return 0
+  const dates = enumerateMonthDates(ym)
+  if (dates.length === 0) return 0
+  const start = dates[0]
+  const end = dates[dates.length - 1]
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .select('receipt_date')
+    .eq('store_partition_key', storePartitionKey)
+    .gte('receipt_date', start)
+    .lte('receipt_date', end)
+    .limit(20000)
+  if (error || !Array.isArray(data)) {
+    console.error('countReceiptActiveDaysInStoreMonth:', error?.message)
+    return 0
+  }
+  const seen = new Set<string>()
+  for (const row of data) {
+    const raw = (row as Record<string, unknown>).receipt_date
+    const dk = String(raw ?? '').trim().slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dk)) continue
+    seen.add(dk)
+  }
+  return seen.size
+}
+
+async function resolveReceiptMonthDailyAvgDivisor(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  receiptMonthYyyyMm: string,
+): Promise<number | null> {
+  const n = await countReceiptActiveDaysInStoreMonth(supabase, storePartitionKey, receiptMonthYyyyMm)
+  if (n <= 0) return null
+  return n
+}
+
 async function loadStoreDayGrossSumForDate(
   supabase: ReturnType<typeof createClient>,
   storePartitionKey: string,
@@ -6385,6 +6777,76 @@ async function loadStoreDayGrossSumForDate(
     if (Number.isFinite(g) && g >= 0) sum += Math.round(g)
   }
   return sum
+}
+
+/** 対象月の各日の総売上（analytics の日次 series と同様に日付キーで合算） */
+async function loadStoreGrossSumsByMonthDates(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  receiptMonthYyyyMm: string,
+): Promise<Map<string, number>> {
+  const dates = enumerateMonthDates(receiptMonthYyyyMm)
+  const sums = new Map<string, number>()
+  for (const d of dates) sums.set(d, 0)
+  if (dates.length === 0) return sums
+  const start = dates[0]
+  const end = dates[dates.length - 1]
+  const { data, error } = await supabase
+    .from('line_receipt_entries')
+    .select('receipt_date, gross_sales_yen')
+    .eq('store_partition_key', storePartitionKey)
+    .gte('receipt_date', start)
+    .lte('receipt_date', end)
+  if (error || !Array.isArray(data)) return sums
+  for (const row of data) {
+    const raw = (row as Record<string, unknown>).receipt_date
+    const dk = String(raw ?? '').slice(0, 10)
+    if (!sums.has(dk)) continue
+    const g = Number((row as Record<string, unknown>).gross_sales_yen)
+    if (Number.isFinite(g) && g >= 0) sums.set(dk, (sums.get(dk) ?? 0) + Math.round(g))
+  }
+  return sums
+}
+
+/**
+ * analytics.html の receiptDailyFooterBudgets（KPI「日次予算差（累計）」）と同じ差額合計。
+ * 店舗休日はフッタ集計から差分を除外（同ファイル 1265 行付近と同じ）。
+ */
+function computeReceiptDailyDiffTotalLikeAnalyticsFooter(
+  dailyMap: Map<string, number>,
+  storeClosed: Set<string>,
+  receiptMonthYyyyMm: string,
+  grossByDate: Map<string, number>,
+  todayJst: string,
+  now: Date = new Date(),
+): number | null {
+  let diffTotal = 0
+  let anyB = false
+  for (const dk of enumerateMonthDates(receiptMonthYyyyMm)) {
+    let b: number
+    if (storeClosed.has(dk)) {
+      b = 0
+    } else {
+      const lb = dailyMap.get(dk)
+      if (lb == null || !Number.isFinite(lb) || lb < 0) continue
+      b = lb
+    }
+    anyB = true
+    if (storeClosed.has(dk)) continue
+    if (dk > todayJst) continue
+    const g = grossByDate.get(dk) ?? 0
+    if (shouldDeferDailyBudgetUntilJstOpen({
+      receiptDateIso: dk,
+      storeClosed,
+      now,
+    })) {
+      diffTotal += Math.round(g - 0)
+      continue
+    }
+    diffTotal += Math.round(g - b)
+  }
+  if (!anyB) return null
+  return diffTotal
 }
 
 async function buildReceiptBudgetComparisonRows(
@@ -6417,31 +6879,67 @@ async function buildReceiptBudgetComparisonRows(
 
   const monthActual = monthTotals.grossSalesYen ?? 0
   const monthPct = row.budget_yen > 0 ? ((monthActual / row.budget_yen) * 100).toFixed(1) : '-'
-  const dayActual = await loadStoreDayGrossSumForDate(supabase, storePartitionKey, receiptDateIso)
+  const now = new Date()
+  const [dayActual, grossByMonth] = await Promise.all([
+    loadStoreDayGrossSumForDate(supabase, storePartitionKey, receiptDateIso),
+    loadStoreGrossSumsByMonthDates(supabase, storePartitionKey, receiptMonthYyyyMm),
+  ])
 
   const isStoreClosed = storeClosed.has(receiptDateIso)
+  const deferBudget =
+    !isStoreClosed &&
+    shouldDeferDailyBudgetUntilJstOpen({
+      receiptDateIso,
+      storeClosed,
+      now,
+    })
+
   let dailyBudgetDiffStr: string
   if (isStoreClosed) {
     dailyBudgetDiffStr = dayActual === 0 ? '-' : formatYenSignedDiff(dayActual)
-  } else if (receiptDateIsAfterTodayJst(receiptDateIso)) {
+  } else if (deferBudget) {
+    dailyBudgetDiffStr = formatYenSignedDiff(0)
+  } else if (receiptDateIsAfterTodayJst(receiptDateIso, now)) {
     dailyBudgetDiffStr = formatYenSignedDiff(0)
   } else {
     dailyBudgetDiffStr = formatYenSignedDiff(dayActual - dailyTarget)
   }
 
-  const canStyleDayDiff = !isStoreClosed && !receiptDateIsAfterTodayJst(receiptDateIso)
+  const displayDailyTarget = deferBudget ? 0 : dailyTarget
+  const canStyleDayDiff =
+    !isStoreClosed && !deferBudget && !receiptDateIsAfterTodayJst(receiptDateIso, now)
   const dailyDiffYen = canStyleDayDiff ? (dayActual - dailyTarget) : null
 
-  return [
+  const todayJst = getJstBusinessDateForReceiptBudget(now)
+  const cumDiffYen = computeReceiptDailyDiffTotalLikeAnalyticsFooter(
+    dailyMap,
+    storeClosed,
+    receiptMonthYyyyMm,
+    grossByMonth,
+    todayJst,
+    now,
+  )
+  const cumStr = cumDiffYen == null ? null : formatYenSignedDiff(cumDiffYen)
+
+  const out: ReceiptFlexBaselineKvRow[] = [
     { label: '月次目標', value: formatYenAmount(row.budget_yen), margin: 'md' },
     { label: '月次実績', value: `${formatYenAmount(monthActual)}（${monthPct}%）` },
-    { label: '当日目標', value: formatYenAmount(dailyTarget) },
+    { label: '当日目標', value: formatYenAmount(displayDailyTarget) },
     {
       label: '日次予算差',
       value: dailyBudgetDiffStr,
       ...(dailyDiffYen != null && dailyDiffYen < 0 ? { valueColor: '#C62828' } : {}),
     },
   ]
+  /** 日次予算差（累計）は別行（1行に詰めると Flex で省略されるため） */
+  if (cumStr != null && cumDiffYen != null) {
+    out.push({
+      label: '日次予算累計',
+      value: cumStr,
+      ...(cumDiffYen < 0 ? { valueColor: '#C62828' } : {}),
+    })
+  }
+  return out
 }
 
 async function maybeCreateMidMonthReceiptReportOnPost(
@@ -6868,68 +7366,170 @@ function buildReceiptFlexBaselineRows(
 ): Array<Record<string, unknown>> {
   return rows.map((row) => {
     const valueColor = row.valueColor ?? '#1F1F1F'
-    const payload: Record<string, unknown> = {
+    const labelCell = {
+      type: 'text',
+      text: lineSafeFlexText(row.label, 40),
+      size: 'sm',
+      color: '#7A7A7A',
+      wrap: false,
+      flex: labelFlex,
+    }
+    const valueUnit = row.valueUnit != null ? String(row.valueUnit).trim() : ''
+    const mainBaseline: Record<string, unknown> = valueUnit.length > 0
+      ? {
+        type: 'box',
+        layout: 'baseline',
+        spacing: 'sm',
+        contents: [
+          labelCell,
+          {
+            type: 'text',
+            size: 'sm',
+            wrap: false,
+            flex: valueFlex,
+            contents: [
+              { type: 'span', text: `${lineSafeFlexText(row.value, 220)} `, color: valueColor },
+              { type: 'span', text: lineSafeFlexText(valueUnit, 8), color: '#7A7A7A' },
+            ],
+          },
+        ],
+      }
+      : {
+        type: 'box',
+        layout: 'baseline',
+        spacing: 'sm',
+        contents: [
+          labelCell,
+          {
+            type: 'text',
+            text: lineSafeFlexText(row.value, 240),
+            size: 'sm',
+            wrap: false,
+            color: valueColor,
+            flex: valueFlex,
+          },
+        ],
+      }
+    const avgVal = row.avgLineValue != null && String(row.avgLineValue).trim().length > 0
+      ? String(row.avgLineValue).trim()
+      : null
+    if (!avgVal) {
+      const payload: Record<string, unknown> = { ...mainBaseline }
+      if (row.margin) payload.margin = row.margin
+      return payload
+    }
+    const subBaseline: Record<string, unknown> = {
       type: 'box',
       layout: 'baseline',
       spacing: 'sm',
       contents: [
-        // ラベルは折り返さない（「総売上（税込）」が「税」と「込）」で分断されないようにする）
-        { type: 'text', text: lineSafeFlexText(row.label, 40), size: 'sm', color: '#7A7A7A', wrap: false, flex: labelFlex },
-        // 値列を広めに取り、金額＋（％）を1行・フォントサイズはそのまま（shrink-to-fit は使わない）
+        { type: 'text', text: '1日平均', size: 'xs', color: '#888888', wrap: false, flex: labelFlex },
         {
           type: 'text',
-          text: lineSafeFlexText(row.value, 240),
-          size: 'sm',
+          text: lineSafeFlexText(avgVal, 240),
+          size: 'xs',
           wrap: false,
-          color: valueColor,
+          color: '#666666',
           flex: valueFlex,
         },
       ],
+    }
+    const payload: Record<string, unknown> = {
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      contents: [mainBaseline, subBaseline],
     }
     if (row.margin) payload.margin = row.margin
     return payload
   })
 }
 
+/** 月間 KPI の 1 日平均（右列のみ）。analytics の営業日数分母と一致 */
+function formatMonthAvgPartyGuestCount(total: number | null, days: number, showAvg: boolean): string | null {
+  if (total == null || !showAvg || days < 1) return null
+  const x = total / days
+  const rounded = Math.round(x * 10) / 10
+  const n = Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1)
+  return n
+}
+
+function formatReceiptCountValueWithUnit(value: string | null, unit: '組' | '人'): string {
+  const base = lineSafeFlexText(value, 20)
+  if (base === '-') return base
+  if (/[組人名]$/.test(base)) return base.replace(/\s*([組人名])$/, '')
+  const n = parseIntegerCount(base)
+  if (n != null && Number.isFinite(n) && n >= 0) return String(n)
+  return base
+}
+
 function buildLineReceiptImageAnalysisReply(
   receipt: LineImageReceiptAnalysis,
   monthCumulativeTotals: MonthCumulativeTotals | null = null,
-  options?: { correctionCommandText?: string; budgetRows?: ReceiptFlexBaselineKvRow[] },
+  options?: {
+    correctionCommandText?: string
+    deletionCommandText?: string
+    budgetRows?: ReceiptFlexBaselineKvRow[]
+    /** analytics 営業日数と同じ分母（レシートがある日数）。未指定時は 1 日平均を付けない */
+    monthAvgBusinessDayDivisor?: number | null
+  },
 ): LineReplyMessage[] {
   const labelFlex = 6
   const valueFlex = 10
   const parsedDateIso = parseReceiptDateToIso(receipt.date)
-  const displayDate = formatJapaneseReceiptDateFromIso(parsedDateIso) ?? receipt.date
   const cum = monthCumulativeTotals ?? { grossSalesYen: null, partyCount: null, guestCount: null }
+  const receiptIso = parsedDateIso ?? resolveReceiptDateIsoForPersist(receipt.date)
+  const displayDate =
+    formatJapaneseReceiptDateFromIso(parsedDateIso) ??
+    formatJapaneseReceiptDateFromIso(receiptIso) ??
+    receipt.date
+  const receiptMonthYm = /^\d{4}-\d{2}-\d{2}$/.test(receiptIso) ? receiptIso.slice(0, 7) : ''
+  const avgDenomRaw = options?.monthAvgBusinessDayDivisor
+  const avgDenomDays = typeof avgDenomRaw === 'number' && avgDenomRaw >= 1 ? avgDenomRaw : 0
+  const showMonthDailyAvg = receiptMonthYm.length > 0 && avgDenomDays >= 1
+  const storeDisplay =
+    receipt.storeName && String(receipt.storeName).trim()
+      ? lineSafeFlexText(receipt.storeName, 120)
+      : '（店舗一覧に一致せず未登録）'
   const baseRows: ReceiptFlexBaselineKvRow[] = [
-    { label: '店名', value: lineSafeFlexText(receipt.storeName, 120) },
+    { label: '店名', value: storeDisplay },
     { label: '日付', value: lineSafeFlexText(displayDate || '-', 80) },
     { label: '消費税', value: lineSafeFlexText(receipt.taxAmount, 40) },
     { label: '総売上（税込）', value: lineSafeFlexText(receipt.grossSales, 40) },
-    { label: '会計組数', value: lineSafeFlexText(receipt.partyCount, 20) },
-    { label: '客数', value: lineSafeFlexText(receipt.guestCount, 20) },
+    { label: '会計組数', value: formatReceiptCountValueWithUnit(receipt.partyCount, '組'), valueUnit: '組' },
+    { label: '客数', value: formatReceiptCountValueWithUnit(receipt.guestCount, '人'), valueUnit: '人' },
     { label: '客単価', value: lineSafeFlexText(receipt.unitPrice, 40) },
   ]
   const budgetRows = Array.isArray(options?.budgetRows) ? options!.budgetRows! : []
+  const grossAvgStr = showMonthDailyAvg && cum.grossSalesYen != null && avgDenomDays >= 1
+    ? formatYenAmount(Math.round(cum.grossSalesYen / avgDenomDays))
+    : null
+  const partyAvgStr = formatMonthAvgPartyGuestCount(cum.partyCount, avgDenomDays, showMonthDailyAvg)
+  const guestAvgStr = formatMonthAvgPartyGuestCount(cum.guestCount, avgDenomDays, showMonthDailyAvg)
   const monthRows: ReceiptFlexBaselineKvRow[] = [
     {
       label: '月間総売上',
-      value: cum.grossSalesYen == null ? '-' : formatYenAmount(cum.grossSalesYen),
+      value: lineSafeFlexText(cum.grossSalesYen == null ? '-' : formatYenAmount(cum.grossSalesYen), 240),
+      avgLineValue: grossAvgStr,
       margin: 'md',
     },
     {
       label: '月間会計組数',
-      value: cum.partyCount == null ? '-' : String(cum.partyCount),
+      value: lineSafeFlexText(cum.partyCount == null ? '-' : String(cum.partyCount), 240),
+      valueUnit: '組',
+      avgLineValue: partyAvgStr != null ? `${partyAvgStr} 組` : null,
     },
     {
       label: '月間客数',
-      value: cum.guestCount == null ? '-' : String(cum.guestCount),
+      value: lineSafeFlexText(cum.guestCount == null ? '-' : String(cum.guestCount), 240),
+      valueUnit: '人',
+      avgLineValue: guestAvgStr != null ? `${guestAvgStr} 名` : null,
     },
   ]
 
   const altTextParts = [
     'レシート解析',
-    receipt.storeName ? `店名:${receipt.storeName}` : '',
+    receipt.storeName ? `店名:${receipt.storeName}` : '店名:未登録',
     receipt.grossSales ? `総売上:${receipt.grossSales}` : '',
   ].filter((value) => value.length > 0)
   const altText = altTextParts.join(' / ').slice(0, 400) || 'レシート解析'
@@ -6977,6 +7577,42 @@ function buildLineReceiptImageAnalysisReply(
     })
   }
 
+  const footerButtons: Array<Record<string, unknown>> = [
+    {
+      type: 'button',
+      style: 'secondary',
+      height: 'sm',
+      action: {
+        type: 'message',
+        label: 'この結果を修正',
+        text: clampLineMessageActionText(options?.correctionCommandText || 'レシート修正'),
+      },
+    },
+  ]
+  const deletionCmd = String(options?.deletionCommandText ?? '').trim()
+  if (deletionCmd) {
+    footerButtons.push({
+      type: 'button',
+      style: 'secondary',
+      height: 'sm',
+      action: {
+        type: 'message',
+        label: 'この解析結果を削除',
+        text: clampLineMessageActionText(deletionCmd),
+      },
+    })
+  }
+  footerButtons.push({
+    type: 'button',
+    style: 'secondary',
+    height: 'sm',
+    action: {
+      type: 'uri',
+      label: '売上推移を見る',
+      uri: buildReceiptAnalyticsDashboardUri(),
+    },
+  })
+
   return [
     {
       type: 'flex',
@@ -6993,28 +7629,7 @@ function buildLineReceiptImageAnalysisReply(
           type: 'box',
           layout: 'vertical',
           spacing: 'sm',
-          contents: [
-            {
-              type: 'button',
-              style: 'secondary',
-              height: 'sm',
-              action: {
-                type: 'message',
-                label: 'この結果を修正',
-                text: clampLineMessageActionText(options?.correctionCommandText || 'レシート修正'),
-              },
-            },
-            {
-              type: 'button',
-              style: 'secondary',
-              height: 'sm',
-              action: {
-                type: 'uri',
-                label: '売上推移を見る',
-                uri: buildReceiptAnalyticsDashboardUri(),
-              },
-            },
-          ],
+          contents: footerButtons,
         },
       },
     },

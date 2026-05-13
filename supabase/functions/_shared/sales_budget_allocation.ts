@@ -23,6 +23,93 @@ export function addCalendarDaysIso(isoDate: string, deltaDays: number): string {
   return `${yy}-${mm}-${dd}`
 }
 
+/**
+ * 日次予算・差額の「進行日」（JST）。
+ * 暦日の 0〜(startHour-1) 時はまだ前日扱い（店舗の営業日切り替えを 5 時に合わせる想定）。
+ * analytics / line-webhook の「今日より後は差 0」「累計差の締め日」と揃える。
+ */
+export const RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST = 5
+
+export function getJstBusinessDateForReceiptBudget(
+  now: Date = new Date(),
+  startHourJst: number = RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST,
+): string {
+  // sv-SE + hourCycle: ブラウザ／ランタイム差で hour が欠ける・12h 扱いになるのを避ける
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+  }).formatToParts(now)
+  const y = Number(parts.find((p) => p.type === "year")?.value)
+  const mo = Number(parts.find((p) => p.type === "month")?.value)
+  const d = Number(parts.find((p) => p.type === "day")?.value)
+  const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0)
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) {
+    return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" })
+  }
+  let iso = `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`
+  if (Number.isFinite(h) && h < startHourJst) {
+    iso = addCalendarDaysIso(iso, -1)
+  }
+  return iso
+}
+
+/** 東京の暦日 YYYY-MM-DD（営業日の 5 時シフトはしない） */
+export function getJstCalendarDateIsoTokyo(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+  }).formatToParts(now)
+  const y = Number(parts.find((p) => p.type === "year")?.value)
+  const mo = Number(parts.find((p) => p.type === "month")?.value)
+  const d = Number(parts.find((p) => p.type === "day")?.value)
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) {
+    return new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" }).slice(0, 10)
+  }
+  return `${String(y).padStart(4, "0")}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`
+}
+
+export function getJstHourInTokyo(now: Date = new Date()): number {
+  const parts = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+  }).formatToParts(now)
+  const h = Number(parts.find((p) => p.type === "hour")?.value ?? 0)
+  return Number.isFinite(h) ? h : 0
+}
+
+/**
+ * 暦の当日で JST 5 時前かつ店休でないとき、当日按分予算をまだ「立てない」（当日目標・日次差・累計では按分 0 扱い）。
+ * 0〜4 時台は暦が切り替わっても「その暦日の営業」はまだ始まっていないため、DB の receipt_date が新暦日に付いていても按分は待つ。5 時以降に按分を適用。
+ */
+export function shouldDeferDailyBudgetUntilJstOpen(params: {
+  receiptDateIso: string
+  storeClosed: Set<string>
+  now?: Date
+  startHourJst?: number
+}): boolean {
+  const now = params.now ?? new Date()
+  const start = params.startHourJst ?? RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST
+  const iso = String(params.receiptDateIso ?? "").trim().slice(0, 10)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return false
+  if (params.storeClosed.has(iso)) return false
+  if (getJstCalendarDateIsoTokyo(now) !== iso) return false
+  const h = getJstHourInTokyo(now)
+  if (!Number.isFinite(h) || h >= start) return false
+  return true
+}
+
 export function isHolidayLikeDay(isoDate: string, holidayDates: Set<string>): boolean {
   const dt = new Date(`${isoDate}T12:00:00+09:00`)
   if (Number.isNaN(dt.getTime())) return false

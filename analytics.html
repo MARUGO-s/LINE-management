@@ -938,6 +938,60 @@ function addCalendarDaysIsoJs(isoDate, deltaDays) {
   return `${yy}-${mm}-${dd}`;
 }
 
+/** 日次予算・差額の「進行日」（JST）。暦 0〜4 時は前日扱い（営業日切り替え 5:00）。`sales_budget_allocation.ts` と同一定義。 */
+const RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST = 5;
+
+function getJstBusinessDateStringForReceiptBudgetJs(now) {
+  const base = now || new Date();
+  const parts = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false,
+    hourCycle: 'h23',
+  }).formatToParts(base);
+  const y = Number(parts.find((p) => p.type === 'year')?.value);
+  const mo = Number(parts.find((p) => p.type === 'month')?.value);
+  const d = Number(parts.find((p) => p.type === 'day')?.value);
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) {
+    return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  }
+  let iso = `${String(y).padStart(4, '0')}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  if (Number.isFinite(h) && h < RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST) {
+    iso = addCalendarDaysIsoJs(iso, -1);
+  }
+  return iso;
+}
+
+/** 暦の当日で JST 5 時前・店休でないときは按分待ち（0〜4 時は新暦日の receipt に寄っていても当日按分はまだ立てない）。5 時以降に按分表示。 */
+function receiptDailyDeferDailyBudgetJs(dateKey, r, storeClosedSet, nowRef) {
+  const closed = storeClosedSet instanceof Set ? storeClosedSet : new Set(storeClosedSet || []);
+  const dk = String(dateKey || '').trim().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dk) || closed.has(dk)) return false;
+  const base = nowRef || new Date();
+  const parts = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hour12: false,
+    hourCycle: 'h23',
+  }).formatToParts(base);
+  const y = Number(parts.find((p) => p.type === 'year')?.value);
+  const mo = Number(parts.find((p) => p.type === 'month')?.value);
+  const d = Number(parts.find((p) => p.type === 'day')?.value);
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
+  if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return false;
+  const cal = `${String(y).padStart(4, '0')}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  if (dk !== cal) return false;
+  if (!Number.isFinite(h) || h >= RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST) return false;
+  return true;
+}
+
 function isHolidayLikeDayJs(isoDate) {
   if (JAPANESE_HOLIDAYS.has(isoDate)) return true;
   const dt = new Date(`${isoDate}T12:00:00+09:00`);
@@ -1180,11 +1234,15 @@ function receiptDailyDateKey(raw) {
   return m ? m[1] : s.slice(0, 10);
 }
 
-/** 進行状況用: 本日（JST）より後の暦日なら true（差額は 0 扱い） */
-function receiptDailyIsAfterTodayJst(dateKey) {
+/**
+ * 進行日（JST・5 時切り替え）より後の暦日なら true（差額は ¥0 扱い）。
+ * asOf は表の1描画で固定すること（行ループ中に日付が跨がないようにする）。
+ */
+function receiptDailyIsAfterProgressDay(dateKey, asOf) {
   if (!dateKey || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false;
-  const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-  return dateKey > today;
+  const p = String(asOf || getJstBusinessDateStringForReceiptBudgetJs()).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(p)) return false;
+  return dateKey > p;
 }
 
 function receiptDailyBudgetLookup(budgetByDate, r) {
@@ -1197,7 +1255,7 @@ function receiptDailyBudgetLookup(budgetByDate, r) {
   return null;
 }
 
-function receiptDailyCellsForDay(r, budgetByDate, storeClosedSet) {
+function receiptDailyCellsForDay(r, budgetByDate, storeClosedSet, asOfJst, nowRef) {
   const empty6 = '<td></td><td></td><td></td><td></td><td></td><td></td>';
   if (!r) return empty6;
   const closed =
@@ -1218,15 +1276,21 @@ function receiptDailyCellsForDay(r, budgetByDate, storeClosedSet) {
   } else if (budgetByDate && typeof budgetByDate === 'object' && r.date != null) {
     const b = receiptDailyBudgetLookup(budgetByDate, r);
     if (b != null && Number.isFinite(b) && b >= 0) {
-      budgetCell = formatYenReceiptInt(b);
-      if (receiptDailyIsAfterTodayJst(dateKey)) {
+      if (receiptDailyDeferDailyBudgetJs(dateKey, r, storeClosedSet, nowRef)) {
+        budgetCell = formatYenReceiptInt(0);
         diffCell = formatYenSignedReceiptDiff(0);
         diffClass = '';
       } else {
-        const gOp = Number.isFinite(gross) ? gross : 0;
-        const d = Math.round(gOp - b);
-        diffCell = formatYenSignedReceiptDiff(d);
-        diffClass = d < 0 ? 'receipt-daily-diff-neg' : d > 0 ? 'receipt-daily-diff-pos' : '';
+        budgetCell = formatYenReceiptInt(b);
+        if (receiptDailyIsAfterProgressDay(dateKey, asOfJst)) {
+          diffCell = formatYenSignedReceiptDiff(0);
+          diffClass = '';
+        } else {
+          const gOp = Number.isFinite(gross) ? gross : 0;
+          const d = Math.round(gOp - b);
+          diffCell = formatYenSignedReceiptDiff(d);
+          diffClass = d < 0 ? 'receipt-daily-diff-neg' : d > 0 ? 'receipt-daily-diff-pos' : '';
+        }
       }
     }
   }
@@ -1241,7 +1305,7 @@ function receiptDailyCellsForDay(r, budgetByDate, storeClosedSet) {
   );
 }
 
-function receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet) {
+function receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet, asOfJst, nowRef) {
   const closed =
     storeClosedSet instanceof Set ? storeClosedSet : new Set(storeClosedSet || []);
   if (!budgetByDate || typeof budgetByDate !== 'object' || !Array.isArray(series)) {
@@ -1250,7 +1314,8 @@ function receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet) {
   let budgetTotal = 0;
   let diffTotal = 0;
   let anyB = false;
-  const todayJst = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+  const todayJst = String(asOfJst || getJstBusinessDateStringForReceiptBudgetJs(nowRef)).trim();
+  const tRef = nowRef || new Date();
   for (const r of series) {
     const dk = receiptDailyDateKey(r.date);
     let b;
@@ -1260,6 +1325,7 @@ function receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet) {
       if (lb == null || !Number.isFinite(lb) || lb < 0) continue;
       b = lb;
     }
+    if (receiptDailyDeferDailyBudgetJs(dk, r, closed, tRef)) b = 0;
     anyB = true;
     budgetTotal += b;
     if (dk && closed.has(dk)) continue;
@@ -1284,7 +1350,9 @@ function updateReceiptDailyDiffKpi(payload) {
   const storeClosedSet = new Set(
     Array.isArray(rawClosed) ? rawClosed.map((x) => receiptDailyDateKey(x)) : [],
   );
-  const { diffTotal } = receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet);
+  const nowRef = new Date();
+  const asOfJst = getJstBusinessDateStringForReceiptBudgetJs(nowRef);
+  const { diffTotal } = receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet, asOfJst, nowRef);
   dom.kpiReceiptDailyDiff.classList.remove('kpi-yoy-up', 'kpi-yoy-down', 'kpi-yoy-neutral');
   if (diffTotal == null) {
     dom.kpiReceiptDailyDiff.textContent = '-';
@@ -1357,8 +1425,10 @@ function renderReceiptDailyTable(data) {
   let storeHead = data?.selected_store_name ? String(data.selected_store_name) : '';
   if (!storeHead && data?.selected_store_key) storeHead = String(data.selected_store_key);
   if (!storeHead) storeHead = '-';
+  const nowRef = new Date();
+  const asOfJst = getJstBusinessDateStringForReceiptBudgetJs(nowRef);
   dom.receiptDailyMeta.textContent =
-    `対象: ${storeHead} / ${month} — 更新: ${formatReceiptDailyUpdatedAt(data?.generated_at)}`;
+    `対象: ${storeHead} / ${month} — 更新: ${formatReceiptDailyUpdatedAt(data?.generated_at)} · 進行日(JST): ${asOfJst}（5:00 切替。暦当日 5:00 前は当日按分 ¥0（0〜4 時のレシートは新暦日に付いても前営業の扱い）。進行日より後は差 ¥0）`;
   const series = Array.isArray(data?.series) ? data.series : [];
   const budgetByDate =
     data?.daily_budget_yen_by_date && typeof data.daily_budget_yen_by_date === 'object'
@@ -1391,13 +1461,13 @@ function renderReceiptDailyTable(data) {
     }
     let rowHtml = '';
     for (let bi = 0; bi < numBlocks; bi++) {
-      rowHtml += receiptDailyCellsForDay(chunks[bi][ri], budgetByDate, storeClosedSet);
+      rowHtml += receiptDailyCellsForDay(chunks[bi][ri], budgetByDate, storeClosedSet, asOfJst, nowRef);
     }
     tr.innerHTML = rowHtml;
     tb.appendChild(tr);
   }
   const t = data?.totals ?? {};
-  const { budgetTotal, diffTotal } = receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet);
+  const { budgetTotal, diffTotal } = receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet, asOfJst, nowRef);
   const bCell = budgetTotal == null ? '-' : formatYenReceiptInt(budgetTotal);
   const dCell = diffTotal == null ? '-' : formatYenSignedReceiptDiff(diffTotal);
   const diffSumCls =
