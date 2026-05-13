@@ -19,6 +19,7 @@ LINEグループ/ルームの会話を蓄積し、AI（Groq）を活用して以
 ## 2. コア機能（現行仕様）
 
 ### 2.1 LINE Webhook（`line-webhook`）
+- レシート解析の【予算】表示では、**進行日が JST 5:00 切り替え**（`getJstBusinessDateForReceiptBudget`、analytics と同定義）に加え、**暦当日 5:00 前は按分待ち**（差のみ遅延・予算・当日目標は按分表示）。詳細は **`docs/RECEIPT_ANALYSIS_POLICY.md` 8.0**。
 - LINE署名検証（`LINE_CHANNEL_SECRET`）を実施。
 - AI意図判定と明示コマンドの併用で、予定登録/一覧/変更・会話検索を処理。
 - **会話検索**: 第1段は `MESSAGE_SEARCH_NORMAL_MAX_DAYS`（180 日）相当を一括検索。0 件かつ保持がより長い場合は **同一応答内で** フル相当の段階検索に進む。明示 **`会話検索フル`**（`detectFullRetentionSearchRequest`）は第1段を省略。詳細は `README.md` §8.0 / §8.1。

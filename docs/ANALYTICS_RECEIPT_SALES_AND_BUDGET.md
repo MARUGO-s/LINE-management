@@ -1,6 +1,23 @@
 # 売上分析（analytics）：日次売上・月間予算・按分・店舗休日
 
+最終更新: 2026-05-14 (JST) — 按分待ち（5:00 前の差と予算表示）、日付列表示、時刻分解（Intl）を追記
+
 レシート集計（`line_receipt_entries`）をもとに、**店舗・月**単位で売上を表示し、**月間予算**を**平日／休日前日／休日**の比率で**日別に自動按分**する機能の説明です。フロントは主に **`analytics.html`**、API は **`admin-api`** Edge Function、按分ロジックは **`supabase/functions/_shared/sales_budget_allocation.ts`** で共有されています。LINE 上のレシート報告文面でも同じ按分結果を参照する場合は **`line-webhook`** が同モジュールを利用します。
+
+### 運用・問い合わせで必ず押さえること（日次予算の進行日と按分待ち）
+
+**日次表の「差額」列と KPI「日次予算差（累計）」は、暦の 0 時ではなく JST 5:00 を境界に含めます。**  
+深夜〜早朝に「まだ売上がないのに当日分の予算がマイナス差に乗る」のを避けるためです（0〜4 時は前日が進行日）。
+
+加えて、**暦の当日でまだ JST 5:00 前**のときは **按分待ち**（`shouldDeferDailyBudgetUntilJstOpen`）となり、**差額・累計差の按分負担だけ**をまだ立てません（実績 − 0）。**予算列の按分額と LINE「当日目標」は営業日として表示**します（詳細は **`docs/RECEIPT_ANALYSIS_POLICY.md` 8.0**）。
+
+- 定数: `RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST`（既定 `5`）
+- 進行日: `getJstBusinessDateForReceiptBudget`（TS）／`getJstBusinessDateStringForReceiptBudgetJs`（`analytics.html`）
+- 按分待ち: `shouldDeferDailyBudgetUntilJstOpen`（TS）／`receiptDailyDeferDailyBudgetJs`（`analytics.html`）
+
+時刻の分解は **`Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo', hour12: false, hourCycle: 'h23' })`** に統一し、ランタイム差で hour が欠ける・12 時間表記になる問題を避けています。
+
+LINE の【予算】ブロックも同じ進行日・按分待ちで計算します。方針の正本は **`docs/RECEIPT_ANALYSIS_POLICY.md` 8.0**。
 
 ---
 
@@ -12,7 +29,8 @@
 | 月間予算 | 店舗×月ごとに金額を保存（DB）。未設定時は予算列・差額は `-` など |
 | 按分 | 月額を「平日・休日前日・休日」の**重み**に応じて各日へ分配（**端数は最大剰余法**で1円単位） |
 | 店舗休日 | 指定した日は按分から**除外**（重み0）。その分は**他の営業日**へ再配分。日別予算は **0円** |
-| 進行日 | **JST の「今日」より後**の日は、差額を **0円** として扱い、累計差額にも含めない |
+| 進行日 | **JST の暦日 0〜4 時は前日扱い**、**5 時以降がその日の開始**（`getJstBusinessDateForReceiptBudget` と同一定義）。**進行日より後**の暦日は差額を **0円** とし、累計差額にも含めない |
+| 按分待ち | **暦の当日**かつ店休でなく **JST 5:00 前** … **予算列は按分を表示**、**差額は実績 − 0**（未計上なら ¥0）。累計差も **`g − 0`** で寄与。5:00 以降は通常の **実績 − 按分** |
 | 前年比 | **比較西暦**と**同じ月番号**の売上と比較。**手入力**があればレシート集計より手入力を優先 |
 
 ---
@@ -29,7 +47,7 @@
 
 ### 3.1 列
 
-1. **日付** — `M/D` と **曜日（JST 基準）**。祝日・日曜は強調色、土曜は別色（クライアント側 `JAPANESE_HOLIDAYS` と曜日判定）。
+1. **日付** — `M/D` と **曜日（JST 基準）**。祝日・日曜は強調色、土曜は別色（クライアント側 `JAPANESE_HOLIDAYS` と曜日判定）。**曜日まで省略しない**（テーブルは `text-overflow: ellipsis` を使わず、日付列に十分な `min-width` を確保して横スクロールで閲覧）。
 2. **総売上** — その日のレシート合計（円）。
 3. **組数** — `party_count` 合計。
 4. **客数** — `guest_count` 合計。
@@ -47,12 +65,17 @@
   - 売上が **0** のときは差額 `-`（実績ゼロで比較しない表示）。  
   - 売上が **0 以外** のときは **実績 − 0 = 実績** を差額表示（休日に売上が載ったケース用）。
 - **店舗休日でない日** で日別予算がある場合  
-  - **JST 今日より後**の日: 差額は **¥0**（将来日は進捗に含めない）。  
-  - **今日以前**: **実績 − 予算**（実績が未計上でも 0 として計算し、例えば **−予算** になり得る）。
+  - **進行日より後**の暦日: 差額は **¥0**（将来日は進捗に含めない）。  
+  - **按分待ち**（暦の当日・5:00 前・店休でない）: 差額は **¥0**（実績 − 0。按分は予算列のみ表示）。  
+  - **進行日以前**かつ按分待ちでない日: **実績 − 予算**（実績が未計上でも 0 として計算し、例えば **−予算** になり得る）。進行日は **JST 5:00** で切り替え（0〜4 時はまだ前日）。
 
 ### 3.4 月間合計行の差額
 
-フッタの **差額合計** は、上記ルールで**日ごとの差額を足し込んだ値**と一致する。KPI **「日次予算差（累計）」** もこの合計と同じ。
+フッタの **差額合計** は、上記ルールで**日ごとの差額を足し込んだ値**と一致する。按分待ちの日は **`g − 0`** が寄与する。KPI **「日次予算差（累計）」** もこの合計と同じ。
+
+### 3.5 予算列と按分待ち
+
+**按分待ち**中でも **予算列には按分後の日別予算を表示**する（営業日の目標として可視化）。**差額列だけ**按分を差し引かない（3.3 参照）。フッタの **予算合計** は按分額をそのまま足す（按分待ちで予算を 0 にしない）。
 
 ---
 
@@ -192,11 +215,21 @@ RLS は **service_role** による運用を想定したポリシーが付与さ�
 
 レシート関連メッセージで日別予算や休日を表示する処理では、`line_sales_month_budgets` と `line_sales_month_store_closed_days` を読み、`mergeStoreClosedDateLists` と **`allocateDailyBudgetsForMonth`** で **admin-api と同じ按分**を再現する。
 
+### 9.1 解析 Flex の「日次予算差」と「日次予算累計」
+
+- **日次予算差** … レシート日の総売上と、その日の日別目標との差（当日スナップショット）。**按分待ち**中は **¥0**（実績 − 0）。**当日目標**は按分額を表示。  
+- **日次予算累計** … 対象月の各日について、**analytics.html** の `receiptDailyFooterBudgets`（日次表フッタ・KPI「日次予算差（累計）」）と**同じループ条件**で合算した値。店舗休日・**進行日（JST 5:00 切り替え）**より後の日・**按分待ち**（`g − 0`）もフッタと揃える。  
+- LINE 上では **ラベルを分けた2行**で表示する（1行に併記すると Flex 上で省略されやすいため）。
+
+実装では、月内の `line_receipt_entries` を日付で集計したマップ（`loadStoreGrossSumsByMonthDates`）と按分マップから `computeReceiptDailyDiffTotalLikeAnalyticsFooter` で累計を算出し、`buildReceiptBudgetComparisonRows` が Flex 行を組み立てる。
+
+**月間 KPI の 1日平均（LINE 解析カード）**: ダッシュボードの **営業日数**（`receipt_count > 0` の日数）を分母に、総売上・組数・客数の平均を **analytics と同じ式**で LINE 側にも表示する。レイアウト・型の説明は **`docs/RECEIPT_ANALYSIS_POLICY.md` 8.2** を参照。
+
 ---
 
 ## 10. タイムゾーンと祝日の注意
 
-- **営業日・「今日」判定**（差額の将来日除外、日次表の曜日表示など）は **JST（Asia/Tokyo）** を基準にしている。
+- **営業日・進行日判定**（差額の将来日除外など）は **JST（Asia/Tokyo）** を基準にし、**日次予算の締めは 5:00**（`RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST` / `getJstBusinessDateForReceiptBudget`）。**按分待ち**（暦当日・5:00 前）は `shouldDeferDailyBudgetUntilJstOpen`（予算表示は維持、差のみ遅延）。曜日表示など他ロジックは従来どおり暦日ベースの箇所もある。
 - **按分上の休日**は **共有の祝日カレンダー＋日曜**。**振替休日**などは実装の祝日セットに依存するため、境界日はコード／データ更新時に確認するとよい。
 
 ---
@@ -206,10 +239,10 @@ RLS は **service_role** による運用を想定したポリシーが付与さ�
 | 種別 | パス |
 |------|------|
 | UI | `analytics.html` |
-| 按分・休日マージ共通 | `supabase/functions/_shared/sales_budget_allocation.ts` |
+| 按分・休日マージ・**進行日（5:00）**・**按分待ち** | `supabase/functions/_shared/sales_budget_allocation.ts`（`getJstBusinessDateForReceiptBudget`、`shouldDeferDailyBudgetUntilJstOpen`） |
 | 祝日データ | `supabase/functions/_shared/japanese_holidays.ts` |
 | 売上・予算 API | `supabase/functions/admin-api/index.ts`（`fetchReceiptSalesState`, `upsertReceiptSalesBudget` 等） |
-| LINE | `supabase/functions/line-webhook/index.ts`（按分参照箇所） |
+| LINE | `supabase/functions/line-webhook/index.ts`（按分・**進行日** `receiptDateIsAfterTodayJst`、**按分待ち**・累計 `computeReceiptDailyDiffTotalLikeAnalyticsFooter`、`parseReceiptDateToIso` / `resolveReceiptDateIsoForPersist`） |
 | DB | `supabase/migrations/*line_sales*`, `*sales_budget*`, `*store_closed*` など |
 
 ---

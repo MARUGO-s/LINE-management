@@ -9,6 +9,10 @@
 2. `Project URL` は固定（`https://jhpmzqxqvapdkyvvhyra.supabase.co`）  
 3. `ADMIN_DASHBOARD_TOKEN` を入力して接続
 
+## 関連（売上・予算の画面）
+
+売上分析（日次表・月間予算・**日次予算差の進行日は JST 5:00**、**按分待ち**は 8.0 参照）は **`analytics.html`**。運用説明は **`docs/RECEIPT_ANALYSIS_POLICY.md` 8.0** と **`docs/ANALYTICS_RECEIPT_SALES_AND_BUDGET.md`** を参照。
+
 ## 対応機能
 
 - 全体配信設定（ON/OFF、配信時刻）

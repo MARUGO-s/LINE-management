@@ -6905,7 +6905,8 @@ async function buildReceiptBudgetComparisonRows(
     dailyBudgetDiffStr = formatYenSignedDiff(dayActual - dailyTarget)
   }
 
-  const displayDailyTarget = deferBudget ? 0 : dailyTarget
+  /** 按分待ち中も営業日の目標額は表示する（差のみ 0 扱い） */
+  const displayDailyTarget = dailyTarget
   const canStyleDayDiff =
     !isStoreClosed && !deferBudget && !receiptDateIsAfterTodayJst(receiptDateIso, now)
   const dailyDiffYen = canStyleDayDiff ? (dayActual - dailyTarget) : null

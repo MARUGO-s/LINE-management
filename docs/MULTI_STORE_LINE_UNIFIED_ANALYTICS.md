@@ -52,6 +52,8 @@
 - 店舗名ではなく `store_id` で統一管理する（表記ゆれ対策）
 - `receipt_date` の欠損を防ぐ（欠損は集計ズレの原因）
 - タイムゾーンをJSTで統一する
+
+**補足（予算表示）**: レシート日付の保存は JST 基準で欠損させないのに対し、**日次予算の「進行日」（差額・累計に当日を含めるか）は JST 5:00 切り替え**（`getJstBusinessDateForReceiptBudget`）。**按分待ち**（暦当日 5:00 前の差の扱い・予算列の表示）は **`docs/RECEIPT_ANALYSIS_POLICY.md` 8.0**。日次表の列仕様は **`docs/ANALYTICS_RECEIPT_SALES_AND_BUDGET.md`**。
 - webhook受信と返信ログに `store_id` / `channel_id` を残す
 
 ## 運用上の留意点

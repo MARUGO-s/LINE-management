@@ -90,8 +90,8 @@ export function getJstHourInTokyo(now: Date = new Date()): number {
 }
 
 /**
- * 暦の当日で JST 5 時前かつ店休でないとき、当日按分予算をまだ「立てない」（当日目標・日次差・累計では按分 0 扱い）。
- * 0〜4 時台は暦が切り替わっても「その暦日の営業」はまだ始まっていないため、DB の receipt_date が新暦日に付いていても按分は待つ。5 時以降に按分を適用。
+ * 暦の当日で JST 5 時前かつ店休でないとき、当日按分による「日次予算差」だけをまだ立てない（差は g−0）。
+ * 按分目標額そのものは営業日として表示する（analytics の予算列・LINE の当日目標は按分を出す）。
  */
 export function shouldDeferDailyBudgetUntilJstOpen(params: {
   receiptDateIso: string

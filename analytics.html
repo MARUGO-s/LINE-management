@@ -264,8 +264,8 @@
       font-size: 0.68rem;
       line-height: 1.25;
       border-bottom: 1px solid var(--line);
-      overflow: hidden;
-      text-overflow: ellipsis;
+      overflow: visible;
+      white-space: nowrap;
     }
     .receipt-daily #receiptDailyTable th {
       position: sticky;
@@ -282,13 +282,14 @@
     body[data-theme='light'] .receipt-daily #receiptDailyTable th {
       background: color-mix(in srgb, var(--card) 95%, #fff);
     }
-    .receipt-daily.receipt-daily--blocks-1 #receiptDailyTable { min-width: min(100%, 22rem); }
-    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable { min-width: 42rem; }
-    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable { min-width: 62rem; }
-    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable { min-width: 82rem; }
+    .receipt-daily.receipt-daily--blocks-1 #receiptDailyTable { min-width: min(100%, 28rem); }
+    .receipt-daily.receipt-daily--blocks-2 #receiptDailyTable { min-width: 46rem; }
+    .receipt-daily.receipt-daily--blocks-3 #receiptDailyTable { min-width: 66rem; }
+    .receipt-daily.receipt-daily--blocks-4 #receiptDailyTable { min-width: 86rem; }
     .receipt-daily #receiptDailyTable th:nth-child(6n+1),
     .receipt-daily #receiptDailyTable td:nth-child(6n+1) {
-      width: 9%;
+      width: 12%;
+      min-width: 5.75rem;
       white-space: nowrap;
     }
     .receipt-daily .receipt-daily-wd { font-weight: 600; }
@@ -1277,7 +1278,7 @@ function receiptDailyCellsForDay(r, budgetByDate, storeClosedSet, asOfJst, nowRe
     const b = receiptDailyBudgetLookup(budgetByDate, r);
     if (b != null && Number.isFinite(b) && b >= 0) {
       if (receiptDailyDeferDailyBudgetJs(dateKey, r, storeClosedSet, nowRef)) {
-        budgetCell = formatYenReceiptInt(0);
+        budgetCell = formatYenReceiptInt(b);
         diffCell = formatYenSignedReceiptDiff(0);
         diffClass = '';
       } else {
@@ -1325,14 +1326,17 @@ function receiptDailyFooterBudgets(series, budgetByDate, storeClosedSet, asOfJst
       if (lb == null || !Number.isFinite(lb) || lb < 0) continue;
       b = lb;
     }
-    if (receiptDailyDeferDailyBudgetJs(dk, r, closed, tRef)) b = 0;
     anyB = true;
     budgetTotal += b;
     if (dk && closed.has(dk)) continue;
     if (dk && dk > todayJst) continue;
     const g = Number(r.gross_sales_yen);
     const gOp = Number.isFinite(g) ? g : 0;
-    diffTotal += Math.round(gOp - b);
+    if (receiptDailyDeferDailyBudgetJs(dk, r, closed, tRef)) {
+      diffTotal += Math.round(gOp - 0);
+    } else {
+      diffTotal += Math.round(gOp - b);
+    }
   }
   if (!anyB) return { budgetTotal: null, diffTotal: null };
   return { budgetTotal, diffTotal };
@@ -1428,7 +1432,7 @@ function renderReceiptDailyTable(data) {
   const nowRef = new Date();
   const asOfJst = getJstBusinessDateStringForReceiptBudgetJs(nowRef);
   dom.receiptDailyMeta.textContent =
-    `対象: ${storeHead} / ${month} — 更新: ${formatReceiptDailyUpdatedAt(data?.generated_at)} · 進行日(JST): ${asOfJst}（5:00 切替。暦当日 5:00 前は当日按分 ¥0（0〜4 時のレシートは新暦日に付いても前営業の扱い）。進行日より後は差 ¥0）`;
+    `対象: ${storeHead} / ${month} — 更新: ${formatReceiptDailyUpdatedAt(data?.generated_at)} · 進行日(JST): ${asOfJst}（5:00 切替。暦当日 5:00 前は差のみ ¥0・予算は按分表示。進行日より後は差 ¥0）`;
   const series = Array.isArray(data?.series) ? data.series : [];
   const budgetByDate =
     data?.daily_budget_yen_by_date && typeof data.daily_budget_yen_by_date === 'object'
