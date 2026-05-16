@@ -519,6 +519,7 @@ supabase functions deploy summary-cron --project-ref <project-ref>
 supabase functions deploy gmail-alert-cron --project-ref <project-ref>
 supabase functions deploy calendar-pending-cron --project-ref <project-ref>
 supabase functions deploy receipt-midreport-cron --project-ref <project-ref>
+supabase functions deploy receipt-sheets-sync-cron --project-ref <project-ref>
 supabase functions deploy admin-api --project-ref <project-ref>
 supabase functions deploy admin-ui --project-ref <project-ref>
 supabase functions deploy check-cron --project-ref <project-ref>
@@ -537,7 +538,7 @@ https://<project-ref>.supabase.co/functions/v1/line-webhook
 ```bash
 supabase db push
 PROJECT_REF=<project-ref>
-for fn in line-webhook summary-cron gmail-alert-cron calendar-pending-cron receipt-midreport-cron admin-api admin-ui check-cron; do
+for fn in line-webhook summary-cron gmail-alert-cron calendar-pending-cron receipt-midreport-cron receipt-sheets-sync-cron admin-api admin-ui check-cron; do
   supabase functions deploy "$fn" --project-ref "$PROJECT_REF"
 done
 ```
@@ -552,6 +553,7 @@ done
 | `gmail-alert-cron-job` | 毎分 `* * * * *` | `invoke_gmail_alert_cron()` |
 | `calendar-pending-cron-job` | 毎分 `* * * * *` | `invoke_calendar_pending_cron()` |
 | `receipt-midreport-cron-job` | 毎分 `* * * * *` | `receipt-midreport-cron`（**16 日・翌月 1 日の 10:00 JST** のみ Push） |
+| `receipt-sheets-sync-cron-job` | 毎時 `15 * * * *`（UTC） | `receipt-sheets-sync-cron`（手動は GAS **売上連携** を推奨） |
 | `security-rate-limit-cleanup-job` | 毎日 `17 3 * * *`（UTC） | `cleanup_security_rate_limits(interval '2 days')` |
 
 ---
