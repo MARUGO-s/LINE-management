@@ -20,6 +20,8 @@ function onOpen() {
     .addItem('双方向同期（予算・過去売上を取込＋日次を書出）', 'syncBoth')
     .addItem('取込のみ（予算・過去売上 → DB）', 'syncPull')
     .addItem('書出のみ（日次売上 → シート）', 'syncPush')
+    .addSeparator()
+    .addItem('日次売上：マイナスを赤文字にする', 'applyDailySalesNegativeRedOnly')
     .addToUi();
 }
 
@@ -48,7 +50,7 @@ function runSyncViaGas_(direction) {
   var payload = { direction: direction, via_gas: true };
   if (direction === 'pull' || direction === 'both') {
     payload.monthly_budget_rows = readSheetData_(TAB_BUDGETS, 2, 1, 500, 9);
-    payload.past_sales_rows = readSheetData_(TAB_PAST, 2, 1, 500, 4);
+    payload.past_sales_rows = readSheetData_(TAB_PAST, 2, 1, 500, 6);
   } else if (direction === 'push') {
     // 書出のみでも休業日は月間予算の行位置が必要
     payload.monthly_budget_rows = readSheetData_(TAB_BUDGETS, 2, 1, 500, 9);
@@ -144,15 +146,35 @@ function rowHasContent_(row) {
   return false;
 }
 
+function applyDailySalesNegativeRedOnly() {
+  var dailySheet = findSheetByName_(TAB_DAILY);
+  var lastRow = dailySheet.getLastRow();
+  if (lastRow < 2) {
+    SpreadsheetApp.getUi().alert('日次売上にデータ行がありません。');
+    return;
+  }
+  var numDataRows = lastRow - 1;
+  coerceDailySalesNumericColumnsInSheet_(dailySheet, 2, lastRow);
+  paintNegativeCellsRed_(dailySheet, 2, numDataRows, 4, 8);
+  applyNegativeRedFormatting_(dailySheet, 2, Math.max(numDataRows, 499), 4, 8);
+  SpreadsheetApp.getUi().alert('マイナスを赤文字にしました（D〜H列）。');
+}
+
 function applySheetExport_(sheetExport, storePartitionKey) {
   if (sheetExport.daily_sales) {
     var daily = sheetExport.daily_sales;
     var dailySheet = findSheetByName_(TAB_DAILY);
     var dailyData = [daily.header].concat(daily.rows);
     if (dailyData.length > 0 && dailyData[0].length > 0) {
+      coerceDailySalesNumericColumnsInArray_(dailyData);
       dailySheet
         .getRange(1, 1, dailyData.length, dailyData[0].length)
         .setValues(dailyData);
+      var numDataRows = dailyData.length - 1;
+      if (numDataRows > 0) {
+        paintNegativeCellsRed_(dailySheet, 2, numDataRows, 4, 8);
+        applyNegativeRedFormatting_(dailySheet, 2, Math.max(numDataRows, 499), 4, 8);
+      }
     }
   }
 
@@ -165,6 +187,133 @@ function applySheetExport_(sheetExport, storePartitionKey) {
   if (Object.keys(closedByMonth).length > 0) {
     applyClosedDatesToBudgetSheet_(closedByMonth, storePartitionKey);
   }
+}
+
+/** 文字列の "-40000" などを数値に（条件付き書式・色付け用） */
+function coerceSheetNumber_(value) {
+  if (typeof value === 'number' && !isNaN(value)) {
+    return value;
+  }
+  if (value === '' || value === null || value === undefined) {
+    return null;
+  }
+  var s = String(value).replace(/,/g, '').trim();
+  if (s === '' || s === '-') {
+    return null;
+  }
+  var n = Number(s);
+  return isFinite(n) ? n : null;
+}
+
+/** 日次売上の数値列（D〜I）を数値型で書き込む */
+var DAILY_SALES_NUMERIC_COL_INDEXES = [3, 4, 5, 6, 7, 8];
+
+function coerceDailySalesNumericColumnsInArray_(dailyData) {
+  for (var r = 1; r < dailyData.length; r++) {
+    var row = dailyData[r];
+    for (var i = 0; i < DAILY_SALES_NUMERIC_COL_INDEXES.length; i++) {
+      var ci = DAILY_SALES_NUMERIC_COL_INDEXES[i];
+      if (ci >= row.length) {
+        continue;
+      }
+      var n = coerceSheetNumber_(row[ci]);
+      if (n !== null) {
+        row[ci] = n;
+      }
+    }
+  }
+}
+
+function coerceDailySalesNumericColumnsInSheet_(sheet, startRow, endRow) {
+  var numRows = endRow - startRow + 1;
+  var numCols = DAILY_SALES_NUMERIC_COL_INDEXES.length;
+  var startCol = DAILY_SALES_NUMERIC_COL_INDEXES[0] + 1;
+  var range = sheet.getRange(startRow, startCol, numRows, numCols);
+  var values = range.getValues();
+  var changed = false;
+  for (var r = 0; r < values.length; r++) {
+    for (var c = 0; c < values[r].length; c++) {
+      var n = coerceSheetNumber_(values[r][c]);
+      if (n !== null && values[r][c] !== n) {
+        values[r][c] = n;
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    range.setValues(values);
+  }
+}
+
+/** 書込直後にマイナスセルを赤文字（文字列のマイナスにも対応） */
+function paintNegativeCellsRed_(sheet, startRow, numRows, startCol, endCol) {
+  var numCols = endCol - startCol + 1;
+  var range = sheet.getRange(startRow, startCol, numRows, numCols);
+  var values = range.getValues();
+  var colors = [];
+  for (var r = 0; r < values.length; r++) {
+    var rowColors = [];
+    for (var c = 0; c < values[r].length; c++) {
+      var n = coerceSheetNumber_(values[r][c]);
+      rowColors.push(n !== null && n < 0 ? '#c62828' : '#000000');
+    }
+    colors.push(rowColors);
+  }
+  range.setFontColors(colors);
+}
+
+/**
+ * 条件付き書式（数値・文字列どちらのマイナスも拾う）。書出のたびに差し替え。
+ */
+function applyNegativeRedFormatting_(sheet, startRow, numRows, startCol, endCol) {
+  var numCols = endCol - startCol + 1;
+  var range = sheet.getRange(startRow, startCol, numRows, numCols);
+  var colLetter = columnToLetter_(startCol);
+  var formula = '=' + colLetter + startRow + '<0';
+  var rules = sheet.getConditionalFormatRules();
+  var kept = [];
+  for (var i = 0; i < rules.length; i++) {
+    var cond = rules[i].getBooleanCondition();
+    if (cond) {
+      var type = cond.getCriteriaType();
+      if (
+        type === SpreadsheetApp.BooleanCriteria.NUMBER_LESS ||
+        type === SpreadsheetApp.BooleanCriteria.CUSTOM_FORMULA
+      ) {
+        var rs = rules[i].getRanges();
+        var onThisSheet = false;
+        for (var j = 0; j < rs.length; j++) {
+          if (rs[j].getSheet().getName() === sheet.getName()) {
+            onThisSheet = true;
+            break;
+          }
+        }
+        if (onThisSheet) {
+          continue;
+        }
+      }
+    }
+    kept.push(rules[i]);
+  }
+  kept.push(
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(formula)
+      .setFontColor('#c62828')
+      .setRanges([range])
+      .build(),
+  );
+  sheet.setConditionalFormatRules(kept);
+}
+
+function columnToLetter_(column) {
+  var temp = '';
+  var col = column;
+  while (col > 0) {
+    var mod = (col - 1) % 26;
+    temp = String.fromCharCode(65 + mod) + temp;
+    col = Math.floor((col - 1) / 26);
+  }
+  return temp;
 }
 
 function applyClosedDatesUpdates_(updates) {

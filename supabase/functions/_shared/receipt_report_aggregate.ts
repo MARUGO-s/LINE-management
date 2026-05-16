@@ -23,6 +23,32 @@ export function toReceiptStorePartitionKey(storeName: string | null): string {
   return normalized.slice(0, 120)
 }
 
+/** YYYY-MM-DD を年単位でずらす（2/29 → 2/28 など暦日に合わせる） */
+export function shiftIsoDateByYears(isoDate: string, deltaYears: number): string | null {
+  const matched = isoDate.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!matched) return null
+  const year = Number(matched[1])
+  const month = Number(matched[2])
+  const day = Number(matched[3])
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null
+  const targetYear = year + deltaYears
+  const lastDay = new Date(Date.UTC(targetYear, month, 0)).getUTCDate()
+  const clampedDay = Math.min(day, lastDay)
+  return `${String(targetYear).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(clampedDay).padStart(2, "0")}`
+}
+
+/** 期間が暦月 1 日〜末日（YYYY-MM）か */
+export function isFullCalendarMonthPeriod(periodStartDate: string, periodEndDate: string): boolean {
+  const matched = periodStartDate.match(/^(\d{4})-(\d{2})-01$/)
+  if (!matched) return false
+  const year = Number(matched[1])
+  const month = Number(matched[2])
+  if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) return false
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate()
+  const expectedEnd = `${matched[1]}-${matched[2]}-${String(lastDay).padStart(2, "0")}`
+  return periodEndDate === expectedEnd
+}
+
 /** PostgREST の date 列（文字列 / ISO どちらも）を YYYY-MM-DD に正規化 */
 export function receiptDateIsoFromValue(value: unknown): string | null {
   if (value == null) return null

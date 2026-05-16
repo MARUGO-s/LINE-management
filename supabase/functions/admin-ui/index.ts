@@ -1099,6 +1099,7 @@ const html = String.raw`<!doctype html>
         <span class="pill">API: <strong>/functions/v1/admin-api</strong></span>
         <span id="lastRefresh" class="pill">最終更新: なし</span>
         <a class="pill link" href="https://marugo-s.github.io/LINE-management/media.html" target="_blank" rel="noopener noreferrer">LINEメディアビューアー</a>
+        <a id="receiptSheetsPilotHeaderLink" class="pill link" href="#" target="_blank" rel="noopener noreferrer" style="display:none">売上シート</a>
       </div>
     </header>
 
@@ -1117,10 +1118,10 @@ const html = String.raw`<!doctype html>
               <button id="reloadBtn" class="button">再読み込み</button>
               <button id="runNowBtn" class="button warn">今すぐ要約実行</button>
               <a class="button media-highlight" href="https://marugo-s.github.io/LINE-management/media.html" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
+              <a id="receiptSheetsPilotActionLink" class="button media-highlight" href="#" target="_blank" rel="noopener noreferrer" style="display:none;align-items:center;text-decoration:none;">売上シート</a>
             </div>
           </div>
           <div class="setting-block">
-            <p class="setting-block-title">連携アカウント</p>
             <div class="controls">
               <button id="checkGmailAccountBtn" class="button">Gmail連携先を確認</button>
               <span id="gmailAccountMeta" class="pill">Gmail連携先: 未確認</span>
@@ -3176,6 +3177,58 @@ const html = String.raw`<!doctype html>
       renderGmailAccountState(response && response.gmail_account ? response.gmail_account : null);
     }
 
+    function setReceiptSheetsPilotLinkVisible(visible, url, title) {
+      const links = [
+        document.getElementById('receiptSheetsPilotHeaderLink'),
+        document.getElementById('receiptSheetsPilotActionLink'),
+      ];
+      links.forEach(function(el) {
+        if (!el) return;
+        if (visible && url) {
+          el.href = url;
+          el.title = title || '';
+          el.style.display = el.classList.contains('pill') ? '' : 'inline-flex';
+        } else {
+          el.removeAttribute('href');
+          el.style.display = 'none';
+        }
+      });
+    }
+
+    async function refreshReceiptSheetsPilotLink() {
+      if (!token()) {
+        setReceiptSheetsPilotLinkVisible(false);
+        return;
+      }
+      try {
+        const r = await api('/receipts/sheets-pilot-link');
+        const url = r && r.configured && r.spreadsheet_url ? String(r.spreadsheet_url) : '';
+        if (!url) {
+          setReceiptSheetsPilotLinkVisible(false);
+          return;
+        }
+        const parts = [];
+        if (r.access_note) parts.push(String(r.access_note));
+        if (r.suggested_google_user) {
+          parts.push('推奨Googleアカウント: ' + String(r.suggested_google_user));
+        }
+        setReceiptSheetsPilotLinkVisible(true, url, parts.join(' '));
+      } catch (e) {
+        setReceiptSheetsPilotLinkVisible(false);
+        console.error(e);
+      }
+    }
+
+    async function safeRefreshReceiptSheetsPilotLink(options) {
+      const opts = options || {};
+      try {
+        await refreshReceiptSheetsPilotLink();
+      } catch (e) {
+        if (!opts.silent) throw e;
+        console.error(e);
+      }
+    }
+
     async function loadState() {
       const state = await api('/state?logs_limit=30');
       currentState = state;
@@ -3604,6 +3657,7 @@ const html = String.raw`<!doctype html>
       try {
         await safeLoadState();
         await safeCheckGmailAccount({ silent: true });
+        await safeRefreshReceiptSheetsPilotLink({ silent: true });
         scheduleAutoRefresh();
       } catch (e) {
         stopAutoRefresh();
@@ -3613,6 +3667,7 @@ const html = String.raw`<!doctype html>
 
     dom.clearTokenBtn.addEventListener('click', function() {
       setToken('');
+      setReceiptSheetsPilotLinkVisible(false);
       stopAutoRefresh();
       deliveryLogTab = 'summary';
       if (dom.logTableHead) {
@@ -4202,10 +4257,12 @@ const html = String.raw`<!doctype html>
     syncAuthState();
     applyNewRoomDefaultCheckboxes();
     renderGmailAccountState(null);
+    setReceiptSheetsPilotLinkVisible(false);
     if (token()) {
       safeLoadState().then(function() {
         scheduleAutoRefresh();
         safeCheckGmailAccount({ silent: true });
+        safeRefreshReceiptSheetsPilotLink({ silent: true });
       }).catch(function(e) {
         stopAutoRefresh();
         alert(e.message || String(e));

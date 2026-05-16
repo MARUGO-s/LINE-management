@@ -1,5 +1,10 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0"
 import {
+  parseManualMonthPartyGuestFromUnknown,
+  upsertManualMonthSalesEntries,
+  type ManualMonthSalesUpsertEntry,
+} from "./manual_month_sales.ts"
+import {
   allocateDailyBudgetsForMonth,
   getDefaultJapaneseHolidaySet,
   parseStoreClosedDatesForMonth,
@@ -393,13 +398,14 @@ async function processPullRowsToDb(
     }
   }
 
-  const pastEntries: Array<{ sales_month: string; gross_sales_yen: number | null }> = []
+  const pastEntries: ManualMonthSalesUpsertEntry[] = []
   for (let i = 0; i < pastRows.length; i += 1) {
     const row = pastRows[i]
     const rowNum = i + 2
     const salesMonth = normalizeMonthCell(row[0])
     const storeKey = String(row[1] ?? "").trim().toLowerCase()
-    const enabled = parseEnabledCell(row[3])
+    const enabledCol = row.length >= 6 ? 5 : 3
+    const enabled = parseEnabledCell(row[enabledCol])
     if (!enabled || storeKey !== config.storePartitionKey) {
       pastSkipped += 1
       continue
@@ -415,14 +421,22 @@ async function processPullRowsToDb(
       pastApplied += 1
     } else {
       const gross = parseNonNegativeInt(rawGross)
-      pastEntries.push({ sales_month: salesMonth, gross_sales_yen: gross })
+      const counts = row.length >= 6
+        ? parseManualMonthPartyGuestFromUnknown(row[3], row[4])
+        : { party_count: null, guest_count: null }
+      pastEntries.push({
+        sales_month: salesMonth,
+        gross_sales_yen: gross,
+        party_count: counts.party_count,
+        guest_count: counts.guest_count,
+      })
       pastApplied += 1
     }
   }
 
   if (pastEntries.length > 0) {
     try {
-      await upsertManualMonthEntries(supabase, config.storePartitionKey, pastEntries)
+      await upsertManualMonthSalesEntries(supabase, config.storePartitionKey, pastEntries)
     } catch (e) {
       errors.push(`${SHEET_PAST_SALES}: ${String(e)}`)
     }
@@ -489,12 +503,12 @@ async function buildDailySalesExportRows(
         day.date,
         config.storePartitionKey,
         config.storeDisplayName,
-        String(day.gross_sales_yen),
-        String(day.party_count),
-        String(day.guest_count),
-        String(budgetYen),
-        String(variance),
-        String(day.receipt_count),
+        day.gross_sales_yen,
+        day.party_count,
+        day.guest_count,
+        budgetYen,
+        variance,
+        day.receipt_count,
         updatedAt,
       ])
     }
@@ -944,37 +958,6 @@ async function upsertBudgetRow(
     const { error: insErr } = await supabase.from("line_sales_month_store_closed_days").insert(rows)
     if (insErr) {
       throw new Error(insErr.message)
-    }
-  }
-}
-
-async function upsertManualMonthEntries(
-  supabase: ReturnType<typeof createClient>,
-  storePartitionKey: string,
-  entries: Array<{ sales_month: string; gross_sales_yen: number | null }>,
-): Promise<void> {
-  const updatedAt = new Date().toISOString()
-  for (const entry of entries) {
-    if (entry.gross_sales_yen === null) {
-      const { error } = await supabase
-        .from("line_sales_manual_month_gross")
-        .delete()
-        .eq("store_partition_key", storePartitionKey)
-        .eq("sales_month", entry.sales_month)
-      if (error) throw new Error(error.message)
-    } else {
-      const { error } = await supabase
-        .from("line_sales_manual_month_gross")
-        .upsert(
-          {
-            store_partition_key: storePartitionKey,
-            sales_month: entry.sales_month,
-            gross_sales_yen: entry.gross_sales_yen,
-            updated_at: updatedAt,
-          },
-          { onConflict: "store_partition_key,sales_month" },
-        )
-      if (error) throw new Error(error.message)
     }
   }
 }

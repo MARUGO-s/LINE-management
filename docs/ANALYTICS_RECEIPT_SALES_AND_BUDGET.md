@@ -190,9 +190,11 @@ LINE の【予算】ブロックも同じ進行日・按分待ちで計算しま
 ### 7.3 手入力前年売上
 
 - `GET /receipts/sales-manual-months?year=&store_key=`
-- `PUT /receipts/sales-manual-months` — 西暦×月の総売上を店舗ごとに登録。
+- `PUT /receipts/sales-manual-months` — 西暦×月の **総売上・会計組数・客数** を店舗ごとに登録（組数・客数は省略可）。
 
-`GET /receipts/sales` では、比較月の手入力があれば前年比計算に利用。
+`GET /receipts/sales` では、比較月の手入力があれば前年比計算に利用（組数・客数は手入力があれば優先、なければレシート集計）。
+
+`GET /analytics/monthly` でも、手入力がある月は月次シリーズへマージされる（KPI の前月比・前年比バッジに反映）。
 
 ---
 
@@ -202,7 +204,7 @@ LINE の【予算】ブロックも同じ進行日・按分待ちで計算しま
 |----------|------|
 | `line_sales_month_budgets` | 店舗×月の `budget_yen`、按分重み、`store_closed_dates`（jsonb） |
 | `line_sales_month_store_closed_days` | 店舗休日の **正規化行**（`store_partition_key`, `target_month`, `closed_on`） |
-| `line_sales_manual_month_gross` | 任意西暦の月次総売上（前年比用・手入力） |
+| `line_sales_manual_month_gross` | 任意西暦の月次総売上・会計組数・客数（前年比用・手入力） |
 | `line_receipt_entries` | レシート明細（集計ソース） |
 
 マイグレーションは `supabase/migrations` 内の `line_sales_month_budgets`、按分重み追加、`store_closed_dates`、専用テーブル作成などのファイルを参照。

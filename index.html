@@ -1883,6 +1883,7 @@
         <a href="./media.html" class="pill link">LINEメディアビューアー</a>
         <a href="./reservation.html" class="pill link">予約表</a>
         <a href="./analytics.html" class="pill link">売上分析</a>
+        <a id="receiptSheetsPilotHeaderLink" href="#" class="pill link" target="_blank" rel="noopener noreferrer" style="display:none">売上シート</a>
         <button id="themeToggleBtn" type="button" class="pill theme-toggle" aria-pressed="false">ライトモード</button>
       </div>
     </header>
@@ -1905,6 +1906,7 @@
               <a href="./media.html" class="button media-highlight" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
               <a href="./reservation.html" class="button media-highlight" style="display:inline-flex;align-items:center;text-decoration:none;">予約表</a>
               <a href="./analytics.html" class="button media-highlight" style="display:inline-flex;align-items:center;text-decoration:none;">売上分析</a>
+              <a id="receiptSheetsPilotActionLink" href="#" class="button media-highlight" target="_blank" rel="noopener noreferrer" style="display:none;align-items:center;text-decoration:none;">売上シート</a>
             </div>
           </div>
           <div class="setting-block">
@@ -3092,6 +3094,58 @@
     async function checkGmailAccount() {
       const response = await api('/gmail/account');
       renderGmailAccountState(response && response.gmail_account ? response.gmail_account : null);
+    }
+
+    function setReceiptSheetsPilotLinkVisible(visible, url, title) {
+      const links = [
+        document.getElementById('receiptSheetsPilotHeaderLink'),
+        document.getElementById('receiptSheetsPilotActionLink'),
+      ];
+      links.forEach(function(el) {
+        if (!el) return;
+        if (visible && url) {
+          el.href = url;
+          el.title = title || '';
+          el.style.display = el.classList.contains('pill') ? '' : 'inline-flex';
+        } else {
+          el.removeAttribute('href');
+          el.style.display = 'none';
+        }
+      });
+    }
+
+    async function refreshReceiptSheetsPilotLink() {
+      if (!getToken()) {
+        setReceiptSheetsPilotLinkVisible(false);
+        return;
+      }
+      try {
+        const r = await api('/receipts/sheets-pilot-link');
+        const url = r && r.configured && r.spreadsheet_url ? String(r.spreadsheet_url) : '';
+        if (!url) {
+          setReceiptSheetsPilotLinkVisible(false);
+          return;
+        }
+        const parts = [];
+        if (r.access_note) parts.push(String(r.access_note));
+        if (r.suggested_google_user) {
+          parts.push('推奨Googleアカウント: ' + String(r.suggested_google_user));
+        }
+        setReceiptSheetsPilotLinkVisible(true, url, parts.join(' '));
+      } catch (e) {
+        setReceiptSheetsPilotLinkVisible(false);
+        console.error(e);
+      }
+    }
+
+    async function safeRefreshReceiptSheetsPilotLink(options) {
+      const opts = options || {};
+      try {
+        await refreshReceiptSheetsPilotLink();
+      } catch (e) {
+        if (!opts.silent) throw e;
+        console.error(e);
+      }
     }
 
     function tagClass(status) {
@@ -4977,6 +5031,7 @@
       try {
         await safeLoadState();
         await safeCheckGmailAccount({ silent: true });
+        await safeRefreshReceiptSheetsPilotLink({ silent: true });
         scheduleAutoRefresh();
       } catch (e) {
         stopAutoRefresh();
@@ -4986,6 +5041,7 @@
 
     dom.clearTokenBtn.addEventListener('click', function() {
       setToken('');
+      setReceiptSheetsPilotLinkVisible(false);
       stopAutoRefresh();
       deliveryLogTab = 'summary';
       if (dom.logTableHead) {
@@ -5691,10 +5747,12 @@
       }, 0);
       updateAuthPill();
       renderGmailAccountState(null);
+      setReceiptSheetsPilotLinkVisible(false);
       if (getToken()) {
         safeLoadState().then(function() {
           scheduleAutoRefresh();
           safeCheckGmailAccount({ silent: true });
+          safeRefreshReceiptSheetsPilotLink({ silent: true });
         }).catch(function(e) {
           stopAutoRefresh();
           alert(e.message || String(e));

@@ -400,14 +400,27 @@
     .budget-modal-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; align-items: center; }
     .manual-month-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(7.25rem, 1fr));
-      gap: 8px 10px;
+      grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr));
+      gap: 10px 12px;
       margin-top: 8px;
       max-height: min(52vh, 28rem);
       overflow-y: auto;
       padding-right: 4px;
     }
-    .manual-month-grid label span { display: block; font-size: 0.72rem; color: var(--sub); margin-bottom: 4px; }
+    .manual-month-grid .manual-month-block {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .manual-month-grid .manual-month-block-title {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .manual-month-grid label span { display: block; font-size: 0.68rem; color: var(--sub); margin-bottom: 3px; }
     .budget-preview-wrap { margin-top: 12px; max-height: min(40vh, 280px); overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
     .budget-preview-table { width: 100%; border-collapse: collapse; font-size: 0.72rem; }
     .budget-preview-table th, .budget-preview-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; }
@@ -742,9 +755,9 @@
   <div class="budget-modal" role="dialog" aria-modal="true" aria-labelledby="priorYearModalTitle" style="max-width:min(40rem,96vw)">
     <h3 id="priorYearModalTitle">月別売上の手入力（西暦）</h3>
     <p class="meta" style="margin:0 0 12px;font-size:0.82rem;line-height:1.45">
-      <strong>店舗</strong>ごとに、任意の<strong>西暦</strong>の<strong>1〜12月</strong>の総売上（円）を登録できます。複数の年を順に選んで入力してください。
+      <strong>店舗</strong>ごとに、任意の<strong>西暦</strong>の<strong>1〜12月</strong>の<strong>総売上・会計組数・客数</strong>を登録できます。複数の年を順に選んで入力してください。
       ダッシュボードの「比較西暦」で選んだ年の<strong>同じ月番号</strong>と突き合わせて前年比を計算します（前年固定ではありません）。
-      手入力がある月は<strong>レシート集計より手入力が優先</strong>されます。
+      手入力がある項目は<strong>レシート集計より手入力が優先</strong>されます（組数・客数は未入力ならレシート集計を使用）。
     </p>
     <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:8px">
       <label>
@@ -1601,24 +1614,38 @@ function initCompareYearSelect() {
   sel.value = state.compareYear != null ? String(state.compareYear) : '';
 }
 
+function appendManualMonthField(parent, labelText, id, step) {
+  const lab = document.createElement('label');
+  const sp = document.createElement('span');
+  sp.textContent = labelText;
+  const inp = document.createElement('input');
+  inp.type = 'number';
+  inp.min = '0';
+  inp.step = step;
+  inp.className = 'input';
+  inp.id = id;
+  inp.setAttribute('inputmode', 'numeric');
+  lab.appendChild(sp);
+  lab.appendChild(inp);
+  parent.appendChild(lab);
+}
+
 function ensureManualMonthGridBuilt() {
   const grid = dom.manualMonthGrid;
   if (!grid || grid.dataset.built === '1') return;
   grid.dataset.built = '1';
   for (let mi = 1; mi <= 12; mi++) {
-    const lab = document.createElement('label');
-    const sp = document.createElement('span');
-    sp.textContent = `${mi}月（円）`;
-    const inp = document.createElement('input');
-    inp.type = 'number';
-    inp.min = '0';
-    inp.step = '1000';
-    inp.className = 'input';
-    inp.id = 'manualM' + String(mi).padStart(2, '0');
-    inp.setAttribute('inputmode', 'numeric');
-    lab.appendChild(sp);
-    lab.appendChild(inp);
-    grid.appendChild(lab);
+    const suffix = String(mi).padStart(2, '0');
+    const block = document.createElement('div');
+    block.className = 'manual-month-block';
+    const title = document.createElement('div');
+    title.className = 'manual-month-block-title';
+    title.textContent = `${mi}月`;
+    block.appendChild(title);
+    appendManualMonthField(block, '総売上（円）', 'manualG' + suffix, '1000');
+    appendManualMonthField(block, '会計組数', 'manualP' + suffix, '1');
+    appendManualMonthField(block, '客数', 'manualC' + suffix, '1');
+    grid.appendChild(block);
   }
 }
 
@@ -1643,12 +1670,34 @@ async function refreshManualMonthForm(year) {
   );
   const months = data?.months ?? {};
   for (let mi = 1; mi <= 12; mi++) {
-    const key = `${year}-${String(mi).padStart(2, '0')}`;
-    const el = document.getElementById('manualM' + String(mi).padStart(2, '0'));
-    if (!el) continue;
-    const v = months[key];
-    el.value = v != null && Number.isFinite(Number(v)) ? String(v) : '';
+    const suffix = String(mi).padStart(2, '0');
+    const key = `${year}-${suffix}`;
+    const elG = document.getElementById('manualG' + suffix);
+    const elP = document.getElementById('manualP' + suffix);
+    const elC = document.getElementById('manualC' + suffix);
+    const raw = months[key];
+    const row = raw != null && typeof raw === 'object' ? raw : null;
+    const gross = row ? row.gross_sales_yen : raw;
+    if (elG) {
+      elG.value = gross != null && Number.isFinite(Number(gross)) ? String(gross) : '';
+    }
+    if (elP) {
+      const p = row?.party_count;
+      elP.value = p != null && Number.isFinite(Number(p)) ? String(p) : '';
+    }
+    if (elC) {
+      const g = row?.guest_count;
+      elC.value = g != null && Number.isFinite(Number(g)) ? String(g) : '';
+    }
   }
+}
+
+function parseManualMonthOptionalCount(raw) {
+  const s = String(raw ?? '').trim();
+  if (s === '') return null;
+  const n = Number(s.replace(/,/g, ''));
+  if (!Number.isFinite(n) || n < 0) return NaN;
+  return Math.round(n);
 }
 
 function syncBudgetWeekdayBulkCheckboxes(targetMonth, closed) {
@@ -2217,19 +2266,33 @@ if (dom.priorYearModalSave) {
     ensureManualMonthGridBuilt();
     const entries = [];
     for (let mi = 1; mi <= 12; mi++) {
-      const key = `${year}-${String(mi).padStart(2, '0')}`;
-      const el = document.getElementById('manualM' + String(mi).padStart(2, '0'));
-      const raw = el?.value?.trim() ?? '';
-      if (raw !== '') {
-        const n = Number(raw.replace(/,/g, ''));
+      const suffix = String(mi).padStart(2, '0');
+      const key = `${year}-${suffix}`;
+      const rawG = document.getElementById('manualG' + suffix)?.value?.trim() ?? '';
+      const rawP = document.getElementById('manualP' + suffix)?.value?.trim() ?? '';
+      const rawC = document.getElementById('manualC' + suffix)?.value?.trim() ?? '';
+      if (rawG !== '') {
+        const n = Number(rawG.replace(/,/g, ''));
         if (!Number.isFinite(n) || n < 0) {
-          if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${mi}月: 0以上の数値を入力してください`;
+          if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${mi}月・総売上: 0以上の数値を入力してください`;
           return;
         }
       }
+      const party = parseManualMonthOptionalCount(rawP);
+      if (Number.isNaN(party)) {
+        if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${mi}月・会計組数: 0以上の数値を入力してください`;
+        return;
+      }
+      const guest = parseManualMonthOptionalCount(rawC);
+      if (Number.isNaN(guest)) {
+        if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${mi}月・客数: 0以上の数値を入力してください`;
+        return;
+      }
       entries.push({
         sales_month: key,
-        gross_sales_yen: raw === '' ? null : Math.round(Number(raw.replace(/,/g, ''))),
+        gross_sales_yen: rawG === '' ? null : Math.round(Number(rawG.replace(/,/g, ''))),
+        party_count: party,
+        guest_count: guest,
       });
     }
     if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '保存中…';

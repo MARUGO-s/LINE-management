@@ -1,9 +1,76 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0"
 import type { ReceiptReportAggregate } from "./receipt_report_aggregate.ts"
+import { fetchManualMonthSales } from "./manual_month_sales.ts"
+import {
+  isFullCalendarMonthPeriod,
+  loadReceiptReportAggregateForStoreByReceiptDate,
+  shiftIsoDateByYears,
+} from "./receipt_report_aggregate.ts"
 import {
   buildReceiptBudgetComparisonRows,
   type ReceiptBudgetFlexRow,
 } from "./receipt_budget_comparison.ts"
+
+export type ReceiptReportYoyComparison = {
+  priorPeriodStartDate: string
+  priorPeriodEndDate: string
+  priorGrossSalesYen: number | null
+  priorPartyCount: number | null
+  priorGuestCount: number | null
+}
+
+function formatYoyPercentChange(current: number, prior: number): { text: string; color: string } | null {
+  if (!Number.isFinite(prior) || prior <= 0) return null
+  const pct = ((current - prior) / prior) * 100
+  const sign = pct >= 0 ? "+" : ""
+  const color = pct > 0 ? "#0a7c42" : pct < 0 ? "#c62828" : "#888888"
+  return { text: ` ${sign}${pct.toFixed(1)}%`, color }
+}
+
+/** 報告期間の前年同日付範囲を集計（暦月全体のとき手入力を優先） */
+export async function loadReceiptReportYoyComparison(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  periodStartDate: string,
+  periodEndDate: string,
+): Promise<ReceiptReportYoyComparison | null> {
+  const key = String(storePartitionKey ?? "").trim().toLowerCase()
+  if (!key) return null
+
+  const priorStart = shiftIsoDateByYears(periodStartDate, -1)
+  const priorEnd = shiftIsoDateByYears(periodEndDate, -1)
+  if (!priorStart || !priorEnd) return null
+
+  const priorAggregate = await loadReceiptReportAggregateForStoreByReceiptDate(
+    supabase,
+    key,
+    priorStart,
+    priorEnd,
+  )
+
+  let priorGrossSalesYen: number | null = priorAggregate?.totalGrossSalesYen ?? null
+  let priorPartyCount: number | null = priorAggregate?.totalPartyCount ?? null
+  let priorGuestCount: number | null = priorAggregate?.totalGuestCount ?? null
+
+  if (isFullCalendarMonthPeriod(periodStartDate, periodEndDate)) {
+    const priorMonth = periodStartDate.slice(0, 7)
+    const priorYearMonth = `${Number(priorMonth.slice(0, 4)) - 1}-${priorMonth.slice(5, 7)}`
+    const manual = await fetchManualMonthSales(supabase, key, priorYearMonth)
+    if (manual) {
+      priorGrossSalesYen = manual.gross_sales_yen
+      if (manual.party_count != null) priorPartyCount = manual.party_count
+      if (manual.guest_count != null) priorGuestCount = manual.guest_count
+    }
+  }
+
+  return {
+    priorPeriodStartDate: priorStart,
+    priorPeriodEndDate: priorEnd,
+    priorGrossSalesYen,
+    priorPartyCount,
+    priorGuestCount,
+  }
+}
 
 function formatYenAmount(value: number): string {
   return `¥${Math.round(value).toLocaleString("ja-JP")}`
@@ -11,8 +78,9 @@ function formatYenAmount(value: number): string {
 
 function formatAverageCount(value: number | null): string {
   if (value == null || !Number.isFinite(value)) return "-"
-  if (Math.abs(value - Math.round(value)) < 0.0001) return String(Math.round(value))
-  return value.toFixed(2).replace(/\.?0+$/, "")
+  const rounded = Math.round(value * 10) / 10
+  if (Math.abs(rounded - Math.round(rounded)) < 0.001) return String(Math.round(rounded))
+  return rounded.toFixed(1)
 }
 
 /** 例: 25 組（2.5 組/日） */
@@ -46,6 +114,104 @@ function flexBaselineRow(label: string, value: string, valueColor = "#1F1F1F"): 
       },
     ],
   }
+}
+
+function formatSignedYenDiffText(diffYen: number): string {
+  const x = Math.round(diffYen)
+  const absStr = `¥${Math.abs(x).toLocaleString("ja-JP")}`
+  if (x > 0) return `（+${absStr}）`
+  if (x < 0) return `（-${absStr}）`
+  return "（±¥0）"
+}
+
+function formatSignedCountDiffText(diff: number, unit: string): string {
+  const x = Math.round(diff)
+  const absStr = Math.abs(x).toLocaleString("ja-JP")
+  if (x > 0) return `（+${absStr}${unit}）`
+  if (x < 0) return `（-${absStr}${unit}）`
+  return `（±0${unit}）`
+}
+
+function flexYoyMetricRow(
+  label: string,
+  current: number,
+  prior: number | null,
+  formatAbsDiff?: (diff: number) => string,
+): Record<string, unknown> {
+  if (prior == null || prior <= 0) return flexBaselineRow(label, "—", "#888888")
+  const change = formatYoyPercentChange(current, prior)
+  if (!change) return flexBaselineRow(label, "—", "#888888")
+  const pctText = change.text.trim()
+  const absDiff = formatAbsDiff ? formatAbsDiff(Math.round(current) - Math.round(prior)) : null
+  if (!absDiff) return flexBaselineRow(label, pctText, change.color)
+  return {
+    type: "box",
+    layout: "baseline",
+    spacing: "sm",
+    contents: [
+      { type: "text", text: label, size: "sm", color: "#888888", flex: 4, wrap: false },
+      {
+        type: "text",
+        size: "sm",
+        wrap: true,
+        weight: "bold",
+        flex: 6,
+        contents: [
+          { type: "span", text: pctText, color: change.color },
+          { type: "span", text: absDiff, color: "#666666" },
+        ],
+      },
+    ],
+  }
+}
+
+function appendReceiptReportYoySection(
+  bodyContents: Array<Record<string, unknown>>,
+  aggregate: ReceiptReportAggregate,
+  yoy: ReceiptReportYoyComparison,
+): void {
+  const hasAnyPrior = (yoy.priorGrossSalesYen ?? 0) > 0
+    || (yoy.priorPartyCount ?? 0) > 0
+    || (yoy.priorGuestCount ?? 0) > 0
+  if (!hasAnyPrior) return
+
+  bodyContents.push(flexSectionDivider())
+  bodyContents.push({
+    type: "text",
+    text: "【前年同月比】",
+    size: "sm",
+    weight: "bold",
+    color: "#7A7A7A",
+    margin: "md",
+    wrap: true,
+  })
+  bodyContents.push(
+    flexBaselineRow(
+      "昨年差異日",
+      `${yoy.priorPeriodStartDate}〜${yoy.priorPeriodEndDate}`,
+      "#666666",
+    ),
+  )
+  bodyContents.push(
+    flexYoyMetricRow(
+      "売上",
+      aggregate.totalGrossSalesYen,
+      yoy.priorGrossSalesYen,
+      formatSignedYenDiffText,
+    ),
+    flexYoyMetricRow(
+      "組数",
+      aggregate.totalPartyCount,
+      yoy.priorPartyCount,
+      (d) => formatSignedCountDiffText(d, "組"),
+    ),
+    flexYoyMetricRow(
+      "客数",
+      aggregate.totalGuestCount,
+      yoy.priorGuestCount,
+      (d) => formatSignedCountDiffText(d, "名"),
+    ),
+  )
 }
 
 function flexBudgetRow(row: ReceiptBudgetFlexRow): Record<string, unknown> {
@@ -133,6 +299,14 @@ export async function buildReceiptReportFlexMessages(
 
   const storeKey = String(opts.storePartitionKey ?? "").trim().toLowerCase()
   if (supabase && storeKey) {
+    const yoy = await loadReceiptReportYoyComparison(
+      supabase,
+      storeKey,
+      opts.periodStartDate,
+      opts.periodEndDate,
+    )
+    if (yoy) appendReceiptReportYoySection(bodyContents, aggregate, yoy)
+
     const receiptMonthYyyyMm = opts.periodStartDate.slice(0, 7)
     const budgetRows = await buildReceiptBudgetComparisonRows(supabase, {
       storePartitionKey: storeKey,

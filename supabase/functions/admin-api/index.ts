@@ -13,6 +13,11 @@ import {
   type SalesBudgetAllocationWeights,
 } from "../_shared/sales_budget_allocation.ts"
 import {
+  fetchManualMonthSales,
+  fetchManualMonthSalesMapForStore,
+  upsertManualMonthSalesEntries,
+} from "../_shared/manual_month_sales.ts"
+import {
   RECEIPT_STORE_PARTITION_UNKNOWN,
   toReceiptStorePartitionKey,
 } from "../_shared/receipt_report_aggregate.ts"
@@ -278,6 +283,11 @@ Deno.serve(async (req) => {
     if (req.method === "GET" && path === "/gmail/account") {
       const gmailAccount = await fetchGmailLinkedAccountState()
       return json({ gmail_account: gmailAccount }, 200)
+    }
+
+    if (req.method === "GET" && path === "/receipts/sheets-pilot-link") {
+      const link = await fetchReceiptSheetsPilotLinkState()
+      return json(link, 200)
     }
 
     if (req.method === "GET" && path === "/media") {
@@ -1596,6 +1606,60 @@ async function fetchLineConversationNameByUrl(
   }
 }
 
+type ReceiptSheetsPilotLinkState = {
+  configured: boolean
+  spreadsheet_id: string | null
+  spreadsheet_url: string | null
+  store_partition_key: string | null
+  store_display_name: string | null
+  suggested_google_user: string | null
+  access_note: string
+}
+
+async function fetchReceiptSheetsPilotLinkState(): Promise<ReceiptSheetsPilotLinkState> {
+  const spreadsheetId = String(Deno.env.get("RECEIPT_SHEETS_PILOT_SPREADSHEET_ID") ?? "").trim()
+  const storeKey = String(Deno.env.get("RECEIPT_SHEETS_PILOT_STORE_KEY") ?? "bistrocavacava").trim().toLowerCase()
+  const storeName = String(Deno.env.get("RECEIPT_SHEETS_PILOT_STORE_NAME") ?? "").trim()
+  const accessNote =
+    "Google スプレッドシートはブラウザにログイン中の Google アカウントで開きます。編集にはシートの共有（編集者）が必要です。当画面の管理トークンは Supabase 管理 API 用で、Google へのログインには使いません。"
+
+  if (!spreadsheetId) {
+    return {
+      configured: false,
+      spreadsheet_id: null,
+      spreadsheet_url: null,
+      store_partition_key: storeKey || null,
+      store_display_name: storeName || null,
+      suggested_google_user: null,
+      access_note: "サーバーに RECEIPT_SHEETS_PILOT_SPREADSHEET_ID が未設定のため、リンクを出せません。",
+    }
+  }
+
+  let suggestedGoogleUser: string | null = null
+  try {
+    const gmail = await fetchGmailLinkedAccountState()
+    const email = String(gmail.email_address ?? "").trim()
+    if (email) suggestedGoogleUser = email
+  } catch {
+    // Gmail 未設定時は authuser なしで開く
+  }
+
+  let spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(spreadsheetId)}/edit`
+  if (suggestedGoogleUser) {
+    spreadsheetUrl += `?authuser=${encodeURIComponent(suggestedGoogleUser)}`
+  }
+
+  return {
+    configured: true,
+    spreadsheet_id: spreadsheetId,
+    spreadsheet_url: spreadsheetUrl,
+    store_partition_key: storeKey || null,
+    store_display_name: storeName || null,
+    suggested_google_user: suggestedGoogleUser,
+    access_note: accessNote,
+  }
+}
+
 async function fetchGmailLinkedAccountState(): Promise<GmailLinkedAccountState> {
   const checkedAt = new Date().toISOString()
   const clientId = String(Deno.env.get("GMAIL_CLIENT_ID") ?? "").trim()
@@ -2391,19 +2455,8 @@ async function fetchManualMonthGross(
 ): Promise<number | null> {
   const store_partition_key = normalizeBudgetStoreKey(storeKeyQueryParam)
   const sm = normalizeCalendarMonthParam(salesMonth)
-  const { data, error } = await supabase
-    .from("line_sales_manual_month_gross")
-    .select("gross_sales_yen")
-    .eq("store_partition_key", store_partition_key)
-    .eq("sales_month", sm)
-    .maybeSingle()
-
-  if (error) {
-    throw { status: 500, message: `Failed to fetch manual month gross: ${error.message}` } satisfies AppError
-  }
-  if (!data) return null
-  const row = data as { gross_sales_yen?: unknown }
-  return toNonNegativeInteger(row.gross_sales_yen)
+  const record = await fetchManualMonthSales(supabase, store_partition_key, sm)
+  return record?.gross_sales_yen ?? null
 }
 
 async function fetchManualMonthsForYearState(
@@ -2419,7 +2472,7 @@ async function fetchManualMonthsForYearState(
   const endExclusive = `${year + 1}-01`
   const { data, error } = await supabase
     .from("line_sales_manual_month_gross")
-    .select("sales_month, gross_sales_yen")
+    .select("sales_month, gross_sales_yen, party_count, guest_count")
     .eq("store_partition_key", store_partition_key)
     .gte("sales_month", start)
     .lt("sales_month", endExclusive)
@@ -2428,12 +2481,25 @@ async function fetchManualMonthsForYearState(
     throw { status: 500, message: `Failed to list manual month gross: ${error.message}` } satisfies AppError
   }
 
-  const months: Record<string, number> = {}
+  const months: Record<string, {
+    gross_sales_yen: number
+    party_count: number | null
+    guest_count: number | null
+  }> = {}
   for (const row of Array.isArray(data) ? data : []) {
     const r = row as Record<string, unknown>
     const sm = toSafeString(r.sales_month)
     if (!/^\d{4}-\d{2}$/.test(sm)) continue
-    months[sm] = toNonNegativeInteger(r.gross_sales_yen)
+    const gross = toNonNegativeInteger(r.gross_sales_yen)
+    const partyRaw = r.party_count
+    const guestRaw = r.guest_count
+    const party = partyRaw === null || partyRaw === undefined || partyRaw === ""
+      ? null
+      : toNonNegativeInteger(partyRaw)
+    const guest = guestRaw === null || guestRaw === undefined || guestRaw === ""
+      ? null
+      : toNonNegativeInteger(guestRaw)
+    months[sm] = { gross_sales_yen: gross, party_count: party, guest_count: guest }
   }
 
   return {
@@ -2454,7 +2520,12 @@ async function upsertManualMonthEntries(
     throw { status: 400, message: "entries must be an array." } satisfies AppError
   }
 
-  const updatedAt = new Date().toISOString()
+  const upsertPayload: Array<{
+    sales_month: string
+    gross_sales_yen: number | null
+    party_count?: number | null
+    guest_count?: number | null
+  }> = []
   let applied = 0
 
   for (const entry of entriesRaw) {
@@ -2463,32 +2534,34 @@ async function upsertManualMonthEntries(
     const raw = entry.gross_sales_yen
 
     if (raw === null || raw === undefined || raw === "") {
-      const { error: delErr } = await supabase
-        .from("line_sales_manual_month_gross")
-        .delete()
-        .eq("store_partition_key", store_partition_key)
-        .eq("sales_month", sales_month)
-      if (delErr) {
-        throw { status: 500, message: `Failed to clear manual month gross: ${delErr.message}` } satisfies AppError
-      }
+      upsertPayload.push({ sales_month, gross_sales_yen: null })
     } else {
       const yenVal = toNonNegativeInteger(raw)
-      const { error: upErr } = await supabase
-        .from("line_sales_manual_month_gross")
-        .upsert(
-          {
-            store_partition_key,
-            sales_month,
-            gross_sales_yen: yenVal,
-            updated_at: updatedAt,
-          },
-          { onConflict: "store_partition_key,sales_month" },
-        )
-      if (upErr) {
-        throw { status: 500, message: `Failed to save manual month gross: ${upErr.message}` } satisfies AppError
-      }
+      const partyRaw = entry.party_count
+      const guestRaw = entry.guest_count
+      const party = partyRaw === null || partyRaw === undefined || partyRaw === ""
+        ? null
+        : toNonNegativeInteger(partyRaw)
+      const guest = guestRaw === null || guestRaw === undefined || guestRaw === ""
+        ? null
+        : toNonNegativeInteger(guestRaw)
+      upsertPayload.push({
+        sales_month,
+        gross_sales_yen: yenVal,
+        party_count: party,
+        guest_count: guest,
+      })
     }
     applied += 1
+  }
+
+  try {
+    await upsertManualMonthSalesEntries(supabase, store_partition_key, upsertPayload)
+  } catch (e) {
+    throw {
+      status: 500,
+      message: `Failed to save manual month sales: ${String(e)}`,
+    } satisfies AppError
   }
 
   return {
@@ -2680,11 +2753,14 @@ async function fetchReceiptSalesState(
 
   const compareYear = parseCompareYearQueryParam(url.searchParams.get("compare_year"), month)
   const comparison_sales_month = comparisonSalesMonth(month, compareYear)
-  const manual_comparison_gross_yen = await fetchManualMonthGross(
+  const manualComparison = await fetchManualMonthSales(
     supabase,
-    selectedStoreKeyRaw,
+    normalizeBudgetStoreKey(selectedStoreKeyRaw || selectedStoreKey || ""),
     comparison_sales_month,
   )
+  const manual_comparison_gross_yen = manualComparison?.gross_sales_yen ?? null
+  const manual_comparison_party_count = manualComparison?.party_count ?? null
+  const manual_comparison_guest_count = manualComparison?.guest_count ?? null
 
   let daily_budget_yen_by_date: Record<string, number> | null = null
   if (
@@ -2719,6 +2795,8 @@ async function fetchReceiptSalesState(
     comparison_year: compareYear,
     comparison_sales_month,
     manual_comparison_gross_yen,
+    manual_comparison_party_count,
+    manual_comparison_guest_count,
     daily_budget_yen_by_date,
     month_start_iso: range.startIso,
     month_end_iso: range.endIso,
@@ -2831,6 +2909,17 @@ async function fetchAnalyticsMonthly(
     bucket.receipt_count += 1
     const sk = toSafeString(r.store_partition_key)
     if (sk && !storeSet.has(sk)) storeSet.set(sk, toSafeString(r.store_name) || sk)
+  }
+
+  if (storeKeyRaw) {
+    const manualByMonth = await fetchManualMonthSalesMapForStore(supabase, storeKeyRaw, monthKeys)
+    for (const [monthKey, manual] of manualByMonth.entries()) {
+      const bucket = monthMap.get(monthKey)
+      if (!bucket) continue
+      bucket.gross_sales_yen = manual.gross_sales_yen
+      if (manual.party_count != null) bucket.party_count = manual.party_count
+      if (manual.guest_count != null) bucket.guest_count = manual.guest_count
+    }
   }
 
   for (const bucket of monthMap.values()) {
