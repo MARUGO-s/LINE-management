@@ -170,13 +170,34 @@ Flex 等に印字する和暦表記は **`formatJapaneseReceiptDateFromIso`** �
 
 実装の目安: `buildReceiptCorrectionFieldSelectionPrompt`、`buildReceiptCorrectionValueInputPrompt`、`normalizeReceiptCorrectionControl`。  
 
-## 9. 定期集計レポート
+## 9. 定期集計レポート（LINE 中間・月間）
 
-- 中間報告: 毎月15日 23:59 (JST)  
-  - 集計期間: 当月1日〜15日  
-- 月間報告: 毎月月末日 23:59 (JST)  
-  - 集計期間: 当月1日〜月末  
-- 月次集計は毎月1日を起点に再計算し、前月値は持ち越さない。  
+詳細は **`docs/RECEIPT_LINE_SALES_REPORT.md`** を参照。
+
+### 9.1 送信スケジュール（JST）
+
+| 種別 | 送信 | 集計期間（`receipt_date`） |
+|------|------|---------------------------|
+| 中間報告 | **毎月 16 日 10:00** | 当月 1〜15 日 |
+| 月間報告 | **翌月 1 日 10:00** | 前月 1 日〜末日 |
+
+- pg_cron は毎分 `receipt-midreport-cron` を起動。上記の **日付・10:00** のときだけ Push する。
+- **予算の営業日切替は 5:00**（§8.0）。レポート送信は **10:00** に分離（早朝通知を避ける）。
+
+### 9.2 集計店舗
+
+- ルーム設定 `receipt_report_store_partition_key` を最優先（未設定時はルーム名等から推定）。
+- 店舗 × レシート日付で集計。売上分析 `GET /receipts/sales` と同系統の取り込み（`created_at` 窓＋`receipt_date` フィルタ）。
+
+### 9.3 Flex の【予算】（中間・月間）
+
+- **含む**: 月次目標、月次実績（達成率 100% 未満は **金額は黒・括弧内％のみ赤**）、日次予算累計（期末日まで）。
+- **含まない**: 当日目標、日次予算差（レシート返信では表示）。
+
+### 9.4 その他
+
+- 重複防止: `line_receipt_mid_reports`。
+- テスト送信: 管理画面または `POST /actions/test-receipt-report`（ログ非記録）。
 
 ## 10. 管理画面での可視化
 

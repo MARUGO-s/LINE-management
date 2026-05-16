@@ -114,6 +114,8 @@ where id = (
 
 ---
 
-## 6. 月中レポート（15日投稿）について
+## 6. 月中・月間レポートの送信ログについて
 
-条件が重なれば `line_receipt_mid_reports` に行が追加されることがあります。テストで増えた行だけ消す場合は `room_id` と `report_month` で特定して削除してください。
+本番の中間・月間 LINE レポート送信時に `line_receipt_mid_reports` に行が追加されることがあります（スケジュールは **`docs/RECEIPT_LINE_SALES_REPORT.md`** 参照: 中間＝16日10:00、月間＝翌月1日10:00）。
+
+テストで増えた行だけ消す場合は `room_id` と `report_month` と `report_kind` で特定して削除してください。管理画面の「テスト送信」はこのテーブルに**書き込みません**。

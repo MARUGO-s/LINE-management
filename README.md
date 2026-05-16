@@ -126,7 +126,7 @@ flowchart LR
 - **グループ／複数人トーク**ではイベントごとに `line_messages` へ保存。**友だち 1:1 では会話テキストは保存しない**（メディア保存のための行のみ挿入する場合あり）。
 - 保存対象メディア種別: `image`, `video`, `audio`, `file`。取得後 `line-media` バケットへアップロードし `line_message_media` にメタデータ保存。
 - **画像（`image`）レシート解析**: MIME が `image/jpeg` / `image/jpg` / `image/png` のとき、`GROQ_API_KEY` があれば **Groq の `meta-llama/llama-4-scout-17b-16e-instruct`** でレシート内容を解析。店舗名・日付・総売上・純売上・消費税・組数・客数・客単価を抽出し `line_receipt_entries` に保存する。
-- **レシート解析返信**: 解析結果を LINE Flex Message（バブルカード）で返信。月間累計（組数・客数）と「📊 売上推移を見る」ボタンを含む。15 日に投稿した場合は中間レポートも同時送信。
+- **レシート解析返信**: 解析結果を LINE Flex Message（バブルカード）で返信。月間累計（組数・客数）と「📊 売上推移を見る」ボタンを含む。**16 日 10:00 以降**にそのルームでレシート処理があった場合、未送信なら中間レポートを先送することあり。
 - テキストメッセージ: 明示コマンド解析、**pending カレンダー確認**、**Groq 一次意図判定**（calendar 作成／一覧／会話検索／none）、各種ヒューリスティック。
 - 新規ルーム初期制御: `room_summary_settings` が未承認状態の場合は管理者申請案内を返し、機能実行を停止。
 - 返信は LINE Reply API。最大 **5 メッセージ**に分割する制御あり。
@@ -156,10 +156,13 @@ flowchart LR
 
 ### 3.6 `receipt-midreport-cron`
 
-- **15 日 23:59 JST** に中間レポート（月初〜15日）、**月末 23:59 JST** に月間レポートを自動配信。
-- レシートデータのある全ルームに **LINE Push API** で Flex Message（バブルカード）を送信。
-- カード内容: 総売上・組数・客数・客単価・1日平均売上・レシート件数。フッターに「📈 売上推移を見る」リンクボタン付き。
-- 重複送信防止: `line_receipt_mid_reports` テーブルで同ルーム・同月・同種別のレコードを確認。
+- **16 日 10:00 JST** に中間レポート（当月 1〜15 日）、**翌月 1 日 10:00 JST** に月間レポート（前月分）を自動配信。詳細は [`docs/RECEIPT_LINE_SALES_REPORT.md`](docs/RECEIPT_LINE_SALES_REPORT.md)。
+- `receipt_midreport_enabled` / `receipt_monthend_report_enabled` が ON のルームに **LINE Push API** で Flex を送信。
+- ルーム設定の **`receipt_report_store_partition_key`** で集計店舗を指定（analytics と同じ店舗キー）。未設定時は推定。
+- カード内容: 総売上・組数合計（日平均付き）・客数合計（日平均付き）・客単価・1日平均売上・レシート件数。**【予算】**（月次目標・月次実績・日次予算累計）。フッターに「📈 売上推移を見る」。
+- 予算の営業日は **5:00 切替**、レポート送信は **10:00**（早朝通知を避ける）。
+- 重複送信防止: `line_receipt_mid_reports`。
+- **テスト送信（任意）**: Edge secret **`RECEIPT_MIDREPORT_CRON_TEST_KEY`** を `receipt-midreport-cron` と **`admin-api` の両方**に同じ値で設定。管理画面ルーム設定から送信可能（**ログ非記録**）。
 
 ### 3.7 `check-cron`
 
@@ -212,7 +215,7 @@ Edge Functions のデプロイだけでは **`index.html` / `analytics.html` 等
    - 店舗名・日付・総売上・純売上・消費税・組数・客数・客単価
    - 当月累計の組数・客数
    - 「📊 売上推移を見る」ボタン（analytics.html へのリンク、自動ログイン付き）
-3. **15 日に投稿した場合**: 中間レポート（月初〜当日）も合わせて送信
+3. **16 日 10:00 以降**にそのルームでレシート処理があり、当月中間が未送信の場合: 中間レポート（1〜15 日）を先送することあり
 
 ### 5.3 会話検索（ルールパース）
 
@@ -398,6 +401,7 @@ GitHub Pages で公開される単一ページアプリ。`admin-api` と Open-M
 | DELETE | `/permissions/users/:line_user_id` | ユーザー権限削除 |
 | DELETE | `/rooms/:room_id` | ルームのメッセージ・メディア・資料・設定を削除（破壊的） |
 | POST | `/actions/run-summary` | `invoke_summary_cron` 実行 |
+| POST | `/actions/test-receipt-report` | 売上中間／月末レポートの **テスト LINE 送信**（要 `RECEIPT_MIDREPORT_CRON_TEST_KEY`、ログ非記録） |
 | POST | `/rooms/sync-chat-members` | LINE `members/ids` で全メンバーを `line_user_permissions` に反映 |
 
 ---
@@ -421,10 +425,13 @@ GitHub Pages で公開される単一ページアプリ。`admin-api` と Open-M
 | `line_user_permissions` | LINE user 単位の機能権限 |
 | `line_receipt_entries` | レシート解析結果（店舗名・日付・売上・組数・客数・客単価・`store_partition_key`） |
 | `line_receipt_mid_reports` | 月次・中間レポートの送信ログ（重複防止） |
+| `line_sales_month_budgets` 等 | 月次予算（レポート【予算】・analytics 用） |
 | `gmail_reservation_alert_logs` | Gmail 通知済み記録 |
 | `security_rate_limits` | レート制限カウンタ |
 | `tabelog_reservation_visit_events` | 食べログ来店イベント（重複防止） |
 | `tabelog_reservation_visit_summaries` | 食べログ来店累積（名前＋電話番号ベース） |
+
+`room_summary_settings.receipt_report_store_partition_key` … 中間・月間レポートの集計店舗（nullable）。
 
 ### 12.2 RLS
 
@@ -544,7 +551,7 @@ done
 | `summary-cron-job` | 毎時 `0 * * * *` | `invoke_summary_cron()` |
 | `gmail-alert-cron-job` | 毎分 `* * * * *` | `invoke_gmail_alert_cron()` |
 | `calendar-pending-cron-job` | 毎分 `* * * * *` | `invoke_calendar_pending_cron()` |
-| `receipt-midreport-cron-job` | 毎分 `* * * * *` | `receipt-midreport-cron` Edge 呼び出し（15 日・月末 23:59 のみ実行） |
+| `receipt-midreport-cron-job` | 毎分 `* * * * *` | `receipt-midreport-cron`（**16 日・翌月 1 日の 10:00 JST** のみ Push） |
 | `security-rate-limit-cleanup-job` | 毎日 `17 3 * * *`（UTC） | `cleanup_security_rate_limits(interval '2 days')` |
 
 ---

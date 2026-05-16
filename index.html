@@ -2147,10 +2147,23 @@
         <label class="room-scope-option" title="無返信自動登録がONで、AIが高確度と判断してカレンダーに書き込んだあと、登録内容（日時・件名など）をこのトークに返信します。AI会話返信もONが必要です。低確度の確認返信とは別に設定できます。"><input id="roomConfigCalendarRegistrationReply" type="checkbox">会話から予定を検知したGoogleカレンダーへの登録内容をLINEで返信する（高確度でも）</label>
         <label class="room-scope-option" title="無返信自動登録がONのときのみ有効です。AIの信頼度が「要確認」レンジのとき、LINEで「登録しますか？」と返信し、はい／いいえで確定します。OFFのときは無言のまま件名に（仮）を付けて登録します（AI会話返信もONが必要）。"><input id="roomConfigCalendarLowConfidenceConfirmReply" type="checkbox">低確度のときは確認の返信を送る（はい／いいえ）</label>
         <label class="room-scope-option"><input id="roomConfigGmailAlert" type="checkbox">Gmail予約通知</label>
-        <label class="room-scope-option"><input id="roomConfigReceiptMidreportEnabled" type="checkbox">売上中間報告をこのルームに送信（15日）</label>
-        <label class="room-scope-option"><input id="roomConfigReceiptMonthendReportEnabled" type="checkbox">売上月末レポートをこのルームに送信（月末）</label>
+        <label class="room-scope-option"><input id="roomConfigReceiptMidreportEnabled" type="checkbox">売上中間報告をこのルームに送信（16日 10:00）</label>
+        <label class="room-scope-option"><input id="roomConfigReceiptMonthendReportEnabled" type="checkbox">売上月末レポートをこのルームに送信（翌月1日 10:00）</label>
       </div>
+      <div class="modal-meta" style="margin-top:12px;">売上レポート（中間・月末）の集計店舗</div>
+      <label class="modal-meta" style="display:block;margin-top:6px;">
+        <span>集計する店舗</span>
+        <select id="roomConfigReceiptReportStoreKey" class="select" style="width:100%;margin-top:6px;" aria-label="売上レポート集計店舗">
+          <option value="">（未設定：ルーム名などから自動推定）</option>
+        </select>
+      </label>
+      <div class="modal-meta" style="margin-top:4px;">analytics と同じ店舗・レシート日付で集計します。未設定のままだとルーム内のレシートだけが対象になり、数字がずれることがあります。</div>
       <div class="modal-meta" style="margin-top:8px;">※資料ライブラリの閲覧権限は資料ごとに「メディア閲覧」画面で設定します。</div>
+      <div class="modal-meta" style="margin-top:10px;">売上レポートの<strong>テスト送信</strong>（LINEに1通・送信ログは残しません）: Supabase の <code>admin-api</code> と <code>receipt-midreport-cron</code> に同じシークレット <code>RECEIPT_MIDREPORT_CRON_TEST_KEY</code> を設定してください。</div>
+      <div class="modal-actions" style="margin-top:8px; flex-wrap:wrap; gap:8px;">
+        <button id="testReceiptMidreportBtn" type="button" class="button ghost">中間レポートをテスト送信（LINE）</button>
+        <button id="testReceiptMonthendBtn" type="button" class="button ghost">月末レポートをテスト送信（LINE）</button>
+      </div>
       <div class="modal-actions">
         <button id="cancelRoomConfigBtn" class="button">キャンセル</button>
         <button id="reviewRoomConfigBtn" class="button warn">効果確認</button>
@@ -2190,8 +2203,8 @@
         <label class="room-scope-option" title="無返信自動登録がONで高確度登録のあと、登録内容をLINEで返信します。AI会話返信もONが必要です。"><input id="newRoomCalendarRegistrationReply" type="checkbox">会話から予定を検知したGoogleカレンダーへの登録内容をLINEで返信する（高確度でも）</label>
         <label class="room-scope-option" title="無返信自動登録がONのときのみ有効です。AIの信頼度が「要確認」レンジのとき、LINEで「登録しますか？」と返信し、はい／いいえで確定します。OFFのときは無言のまま件名に（仮）を付けて登録します（AI会話返信もONが必要）。"><input id="newRoomCalendarLowConfidenceConfirmReply" type="checkbox">低確度のときは確認の返信を送る（はい／いいえ）</label>
         <label class="room-scope-option"><input id="newRoomGmailAlertEnabled" type="checkbox">Gmail予約通知</label>
-        <label class="room-scope-option"><input id="newRoomReceiptMidreportEnabled" type="checkbox">売上中間報告をこのルームに送信（15日）</label>
-        <label class="room-scope-option"><input id="newRoomReceiptMonthendReportEnabled" type="checkbox">売上月末レポートをこのルームに送信（月末）</label>
+        <label class="room-scope-option"><input id="newRoomReceiptMidreportEnabled" type="checkbox">売上中間報告をこのルームに送信（16日 10:00）</label>
+        <label class="room-scope-option"><input id="newRoomReceiptMonthendReportEnabled" type="checkbox">売上月末レポートをこのルームに送信（翌月1日 10:00）</label>
       </div>
       <div class="modal-meta" style="margin-top:8px;">※資料ライブラリの閲覧権限は資料ごとに「メディア閲覧」画面で設定します。</div>
       <div class="controls" style="margin-top:10px;">
@@ -2348,9 +2361,12 @@
       roomConfigGmailAlert: document.getElementById('roomConfigGmailAlert'),
       roomConfigReceiptMidreportEnabled: document.getElementById('roomConfigReceiptMidreportEnabled'),
       roomConfigReceiptMonthendReportEnabled: document.getElementById('roomConfigReceiptMonthendReportEnabled'),
+      roomConfigReceiptReportStoreKey: document.getElementById('roomConfigReceiptReportStoreKey'),
       cancelRoomConfigBtn: document.getElementById('cancelRoomConfigBtn'),
       reviewRoomConfigBtn: document.getElementById('reviewRoomConfigBtn'),
       saveRoomConfigBtn: document.getElementById('saveRoomConfigBtn'),
+      testReceiptMidreportBtn: document.getElementById('testReceiptMidreportBtn'),
+      testReceiptMonthendBtn: document.getElementById('testReceiptMonthendBtn'),
       roomConfigEffectModal: document.getElementById('roomConfigEffectModal'),
       roomConfigEffectModalMeta: document.getElementById('roomConfigEffectModalMeta'),
       roomConfigEffectPreview: document.getElementById('roomConfigEffectPreview'),
@@ -2577,7 +2593,41 @@
         gmail_reservation_alert_enabled: !!dom.roomConfigGmailAlert.checked,
         receipt_midreport_enabled: !!(dom.roomConfigReceiptMidreportEnabled && dom.roomConfigReceiptMidreportEnabled.checked),
         receipt_monthend_report_enabled: !!(dom.roomConfigReceiptMonthendReportEnabled && dom.roomConfigReceiptMonthendReportEnabled.checked),
+        receipt_report_store_partition_key: dom.roomConfigReceiptReportStoreKey
+          ? String(dom.roomConfigReceiptReportStoreKey.value || '').trim()
+          : '',
       };
+    }
+
+    function receiptStoreLabelForKey(storeKey) {
+      const key = String(storeKey || '').trim();
+      if (!key) return '';
+      const options = (currentState && Array.isArray(currentState.receipt_store_options))
+        ? currentState.receipt_store_options
+        : [];
+      const hit = options.find(function(row) { return String(row.store_key) === key; });
+      return hit ? String(hit.store_name || key) : key;
+    }
+
+    function populateReceiptReportStoreSelect(selectedKey) {
+      if (!dom.roomConfigReceiptReportStoreKey) return;
+      const select = dom.roomConfigReceiptReportStoreKey;
+      const prev = String(selectedKey || select.value || '').trim();
+      const options = (currentState && Array.isArray(currentState.receipt_store_options))
+        ? currentState.receipt_store_options
+        : [];
+      select.innerHTML = '<option value="">（未設定：ルーム名などから自動推定）</option>';
+      options.forEach(function(row) {
+        const key = String(row.store_key || '').trim();
+        if (!key) return;
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = String(row.store_name || key) + ' (' + key + ')';
+        select.appendChild(opt);
+      });
+      if (prev && Array.from(select.options).some(function(o) { return o.value === prev; })) {
+        select.value = prev;
+      }
     }
 
     function buildRoomConfigDraftSignature(config) {
@@ -2634,8 +2684,16 @@
         if (calLowConf) enabledFeatures.push('低確度のとき確認返信（はい／いいえ）');
       }
       if (config.gmail_reservation_alert_enabled) enabledFeatures.push('Gmail予約通知');
-      if (config.receipt_midreport_enabled) enabledFeatures.push('売上中間報告をこのルームに送信（15日）');
-      if (config.receipt_monthend_report_enabled) enabledFeatures.push('売上月末レポートをこのルームに送信（月末）');
+      if (config.receipt_midreport_enabled) enabledFeatures.push('売上中間報告をこのルームに送信（16日 10:00）');
+      if (config.receipt_monthend_report_enabled) enabledFeatures.push('売上月末レポートをこのルームに送信（翌月1日 10:00）');
+      if (config.receipt_midreport_enabled || config.receipt_monthend_report_enabled) {
+        const storeKey = String(config.receipt_report_store_partition_key || '').trim();
+        if (storeKey) {
+          scheduledAndAlerts.push('売上レポートの集計店舗: ' + receiptStoreLabelForKey(storeKey) + '（analytics と同じ店舗・レシート日付）');
+        } else {
+          scheduledAndAlerts.push('売上レポートの集計店舗: 未設定（ルーム名などから自動推定。店舗指定を推奨）');
+        }
+      }
 
       if (hm) {
         webhookReplies.push(
@@ -2691,10 +2749,10 @@
         scheduledAndAlerts.push('翌日予定の事前通知を、このトークへ送る設定です（翌日通知ジョブが有効な場合）。');
       }
       if (config.receipt_midreport_enabled) {
-        scheduledAndAlerts.push('月途中の売上レポートを、このルームへ送る設定です（通常は15日前後・バッチ処理）。');
+        scheduledAndAlerts.push('月途中の売上レポートを、このルームへ送る設定です（通常は毎月16日 10:00・バッチ処理）。');
       }
       if (config.receipt_monthend_report_enabled) {
-        scheduledAndAlerts.push('月末の売上レポートを、このルームへ送る設定です（バッチ処理）。');
+        scheduledAndAlerts.push('月末の売上レポートを、このルームへ送る設定です（通常は翌月1日 10:00・バッチ処理）。');
       }
 
       if (config.send_room_summary && config.receive_overall_summary_enabled) {
@@ -4071,6 +4129,7 @@
         gmail_reservation_alert_enabled: gmailAlertEnabledInput ? !!gmailAlertEnabledInput.checked : parseDatasetBoolean(tr.dataset.roomGmailAlertEnabled, false),
         receipt_midreport_enabled: parseDatasetBoolean(tr.dataset.roomReceiptMidreportEnabled, true),
         receipt_monthend_report_enabled: parseDatasetBoolean(tr.dataset.roomReceiptMonthendReportEnabled, true),
+        receipt_report_store_partition_key: String(tr.dataset.roomReceiptReportStoreKey || '').trim(),
       };
       return {
         ...featureConfig,
@@ -4100,6 +4159,7 @@
       tr.dataset.roomGmailAlertEnabled = String(!!config.gmail_reservation_alert_enabled);
       tr.dataset.roomReceiptMidreportEnabled = String(config.receipt_midreport_enabled !== false);
       tr.dataset.roomReceiptMonthendReportEnabled = String(config.receipt_monthend_report_enabled !== false);
+      tr.dataset.roomReceiptReportStoreKey = String(config.receipt_report_store_partition_key || '');
       const badge = tr.querySelector('.room-config-badge');
       if (badge) {
         const tone = roomConfigToneClass(getRoomConfigEnabledCount(normalizedConfig));
@@ -4224,6 +4284,9 @@
           gmail_reservation_alert_enabled: setting && setting.gmail_reservation_alert_enabled === true,
           receipt_midreport_enabled: setting ? setting.receipt_midreport_enabled !== false : true,
           receipt_monthend_report_enabled: setting ? setting.receipt_monthend_report_enabled !== false : true,
+          receipt_report_store_partition_key: setting
+            ? String(setting.receipt_report_store_partition_key || '').trim()
+            : '',
         };
         const tr = document.createElement('tr');
         tr.dataset.roomId = room.room_id;
@@ -4247,6 +4310,7 @@
         tr.dataset.roomGmailAlertEnabled = String(roomFeatureConfig.gmail_reservation_alert_enabled);
         tr.dataset.roomReceiptMidreportEnabled = String(roomFeatureConfig.receipt_midreport_enabled);
         tr.dataset.roomReceiptMonthendReportEnabled = String(roomFeatureConfig.receipt_monthend_report_enabled);
+        tr.dataset.roomReceiptReportStoreKey = String(roomFeatureConfig.receipt_report_store_partition_key || '');
         tr.dataset.messageCleanupTiming = String((setting && setting.message_cleanup_timing) || '');
         const configSummary = buildRoomConfigSummary({
           is_enabled: parseDatasetBoolean(tr.dataset.roomEnabled, true),
@@ -4376,6 +4440,7 @@
       if (dom.roomConfigReceiptMonthendReportEnabled) {
         dom.roomConfigReceiptMonthendReportEnabled.checked = config.receipt_monthend_report_enabled !== false;
       }
+      populateReceiptReportStoreSelect(config.receipt_report_store_partition_key || '');
       syncRoomConfigCalendarSubOptions();
       syncRoomConfigMediaSubOptions();
       invalidateRoomConfigReview();
@@ -4389,6 +4454,52 @@
       dom.roomConfigModal.classList.remove('open');
       dom.roomConfigModal.setAttribute('aria-hidden', 'true');
       closeRoomConfigEffectModal();
+    }
+
+    async function testSendReceiptReportToLine(reportKind) {
+      if (!activeRoomConfigRow) return;
+      const roomId = String(activeRoomConfigRow.dataset.roomId || '').trim();
+      if (!roomId) {
+        alert('ルームIDが取得できません。');
+        return;
+      }
+      const label = reportKind === 'month_end' ? '月末レポート（当月1日〜最終日）' : '中間レポート（当月1〜15日）';
+      if (!window.confirm(
+        label + 'をこのルームにテスト送信します。\n\n' +
+          '・LINE に Flex メッセージが1通届きます\n' +
+          '・line_receipt_mid_reports には記録されません（本番の重複判定に影響しません）\n' +
+          '・Supabase に RECEIPT_MIDREPORT_CRON_TEST_KEY が必要です\n\n' +
+          '実行しますか？',
+      )) {
+        return;
+      }
+      try {
+        const storeKey = dom.roomConfigReceiptReportStoreKey
+          ? String(dom.roomConfigReceiptReportStoreKey.value || '').trim()
+          : '';
+        const res = await api('/actions/test-receipt-report', {
+          method: 'POST',
+          body: JSON.stringify({
+            room_id: roomId,
+            report_kind: reportKind,
+            store_partition_key: storeKey || undefined,
+          }),
+        });
+        if (res && res.ok === true && res.skipped) {
+          alert(
+            '送信しませんでした: ' + String(res.reason || '') + '\n' +
+            '店舗: ' + String(res.store_partition_key || storeKey || '（未指定）') + '\n' +
+            '期間: ' + (res.period ? (res.period.start + ' 〜 ' + res.period.end) : '-') + '\n\n' +
+            '※画面で選んだ店舗はテスト送信に反映されます（保存前でも可）。売上分析と同じ条件で集計します。',
+          );
+        } else if (res && res.ok === true) {
+          alert('テスト送信しました。\n' + String(res.note || ''));
+        } else {
+          alert('応答: ' + JSON.stringify(res));
+        }
+      } catch (e) {
+        alert(e && e.message ? e.message : String(e));
+      }
     }
 
     async function saveRoomConfigModal() {
@@ -4621,6 +4732,7 @@
         gmail_reservation_alert_enabled: roomConfig.gmail_reservation_alert_enabled,
         receipt_midreport_enabled: roomConfig.receipt_midreport_enabled !== false,
         receipt_monthend_report_enabled: roomConfig.receipt_monthend_report_enabled !== false,
+        receipt_report_store_partition_key: roomConfig.receipt_report_store_partition_key || null,
         delivery_hours: parseHours(hoursInput ? hoursInput.value : '', true),
         message_cleanup_timing: roomCleanupTiming,
         last_delivery_summary_mode: roomSummaryMode,
@@ -4741,6 +4853,7 @@
         payload.gmail_reservation_alert_enabled = !!opts.overrideConfig.gmail_reservation_alert_enabled;
         payload.receipt_midreport_enabled = opts.overrideConfig.receipt_midreport_enabled !== false;
         payload.receipt_monthend_report_enabled = opts.overrideConfig.receipt_monthend_report_enabled !== false;
+        payload.receipt_report_store_partition_key = opts.overrideConfig.receipt_report_store_partition_key || null;
         payload.is_enabled = computeRoomEnabledFromFeatureConfig(opts.overrideConfig);
       }
       const response = await api('/settings/rooms', {
@@ -5428,6 +5541,7 @@
       dom.roomConfigGmailAlert,
       dom.roomConfigReceiptMidreportEnabled,
       dom.roomConfigReceiptMonthendReportEnabled,
+      dom.roomConfigReceiptReportStoreKey,
     ].forEach(function(el) {
       if (!el) return;
       el.addEventListener('change', invalidateRoomConfigReview);
@@ -5436,6 +5550,17 @@
     if (dom.reviewRoomConfigBtn) {
       dom.reviewRoomConfigBtn.addEventListener('click', function() {
         openRoomConfigReviewFlow();
+      });
+    }
+
+    if (dom.testReceiptMidreportBtn) {
+      dom.testReceiptMidreportBtn.addEventListener('click', function() {
+        testSendReceiptReportToLine('mid_month');
+      });
+    }
+    if (dom.testReceiptMonthendBtn) {
+      dom.testReceiptMonthendBtn.addEventListener('click', function() {
+        testSendReceiptReportToLine('month_end');
       });
     }
 

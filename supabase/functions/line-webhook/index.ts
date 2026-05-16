@@ -12,13 +12,14 @@ import {
   resolveBestStoreName,
 } from '../_shared/receipt_store_name_resolve.ts'
 import {
-  allocateDailyBudgetsForMonth,
+  buildReceiptBudgetComparisonRows as buildReceiptBudgetComparisonRowsShared,
+} from '../_shared/receipt_budget_comparison.ts'
+import { loadReceiptReportAggregateForRoom } from '../_shared/receipt_report_aggregate.ts'
+import { buildReceiptReportFlexMessages } from '../_shared/receipt_report_flex.ts'
+import {
   enumerateMonthDates,
-  getDefaultJapaneseHolidaySet,
   getJstBusinessDateForReceiptBudget,
-  mergeStoreClosedDateLists,
-  shouldDeferDailyBudgetUntilJstOpen,
-  type SalesBudgetAllocationWeights,
+  RECEIPT_BUDGET_BUSINESS_DAY_START_HOUR_JST,
 } from '../_shared/sales_budget_allocation.ts'
 
 type CalendarListScope =
@@ -345,6 +346,8 @@ type ReceiptFlexBaselineKvRow = {
   margin?: 'md'
   valueColor?: string
   valueUnit?: string | null
+  /** 金額は value（黒）、括弧内などは別色 */
+  valueSuffix?: { text: string; color: string }
   /** 値の下に続ける行。左列は「1日平均」、右列はこの文字列 */
   avgLineValue?: string | null
 }
@@ -5896,22 +5899,6 @@ function formatYenAmount(value: number): string {
   return `¥${Math.round(value).toLocaleString('ja-JP')}`
 }
 
-/** analytics の日次「差額」と同じ符号付き表記（+¥n / -¥n / ¥0） */
-function formatYenSignedDiff(value: number): string {
-  const x = Math.round(value)
-  const absStr = `¥${Math.abs(x).toLocaleString('ja-JP')}`
-  if (x > 0) return `+${absStr}`
-  if (x < 0) return `-${absStr}`
-  return '¥0'
-}
-
-/** JST の「進行日」より後の暦日なら true（将来日は日次予算差を 0 扱い）。進行日は 5 時切り替え。 */
-function receiptDateIsAfterTodayJst(dateKey: string, now: Date = new Date()): boolean {
-  if (!dateKey || !/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return false
-  const asOf = getJstBusinessDateForReceiptBudget(now)
-  return dateKey > asOf
-}
-
 function extractPartyGuestCountsFromText(raw: string | null): { party: number | null; guest: number | null } {
   if (!raw) return { party: null, guest: null }
   const text = decodeEscapedUnicodeSequences(raw)
@@ -6238,60 +6225,6 @@ function lineSafeFlexText(value: string | null | undefined, maxLen: number): str
   return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s
 }
 
-function buildMidMonthReceiptReportMessage(
-  aggregate: LineReceiptAggregate,
-  opts: { periodStartDate: string; periodEndDate: string },
-): Array<Record<string, unknown>> {
-  const dashboardUri = buildReceiptAnalyticsDashboardUri()
-
-  const row = (label: string, value: string): Record<string, unknown> => ({
-    type: 'box', layout: 'baseline', spacing: 'sm',
-    contents: [
-      { type: 'text', text: label, size: 'sm', color: '#888888', flex: 4, wrap: false },
-      { type: 'text', text: value, size: 'sm', color: '#1F1F1F', flex: 6, wrap: true, weight: 'bold' },
-    ],
-  })
-
-  const avgUnit = aggregate.totalGuestCount > 0
-    ? Math.round(aggregate.totalGrossSalesYen / aggregate.totalGuestCount) : null
-
-  const altText = `【${RECEIPT_MID_REPORT_TITLE}】${opts.periodStartDate}〜${opts.periodEndDate} 総売上: ${formatYenAmount(aggregate.totalGrossSalesYen)}`
-
-  return [{
-    type: 'flex',
-    altText: altText.slice(0, 400),
-    contents: {
-      type: 'bubble',
-      header: {
-        type: 'box', layout: 'vertical', paddingAll: '16dp',
-        backgroundColor: '#006c3a',
-        contents: [
-          { type: 'text', text: `📊 ${RECEIPT_MID_REPORT_TITLE}`, size: 'lg', weight: 'bold', color: '#FFFFFF' },
-          { type: 'text', text: `${opts.periodStartDate}〜${opts.periodEndDate}`, size: 'xs', color: '#CCFFDD', margin: 'sm' },
-        ],
-      },
-      body: {
-        type: 'box', layout: 'vertical', spacing: 'sm', paddingAll: '14dp',
-        contents: [
-          row('総売上', formatYenAmount(aggregate.totalGrossSalesYen)),
-          row('組数合計', `${aggregate.totalPartyCount.toLocaleString('ja-JP')} 組`),
-          row('客数合計', `${aggregate.totalGuestCount.toLocaleString('ja-JP')} 名`),
-          ...(avgUnit != null ? [row('客単価', formatYenAmount(avgUnit))] : []),
-          row('1日平均売上', aggregate.avgGrossSalesYen == null ? '-' : formatYenAmount(aggregate.avgGrossSalesYen)),
-          row('レシート', `${aggregate.receiptCount.toLocaleString('ja-JP')} 件`),
-        ],
-      },
-      footer: {
-        type: 'box', layout: 'vertical', spacing: 'sm', paddingAll: '12dp',
-        contents: [{
-          type: 'button', style: 'secondary', height: 'sm',
-          action: { type: 'uri', label: '売上推移を見る', uri: dashboardUri },
-        }],
-      },
-    },
-  }]
-}
-
 function toFiniteReceiptNumber(value: unknown): number | null {
   const n = Number(value)
   if (!Number.isFinite(n)) return null
@@ -6538,63 +6471,6 @@ async function saveLineReceiptEntry(
   }
 }
 
-async function loadReceiptAggregateForRoom(
-  supabase: ReturnType<typeof createClient>,
-  roomId: string,
-  startIso: string,
-  endIso: string,
-): Promise<LineReceiptAggregate | null> {
-  const { data, error } = await supabase
-    .from('line_receipt_entries')
-    .select('gross_sales_yen, party_count, guest_count')
-    .eq('room_id', roomId)
-    .gte('created_at', startIso)
-    .lt('created_at', endIso)
-
-  if (error) {
-    console.error(`Failed to load line_receipt_entries for room=${roomId}:`, error.message)
-    return null
-  }
-
-  const rows = Array.isArray(data) ? (data as Array<Record<string, unknown>>) : []
-  if (rows.length === 0) return null
-
-  let totalGrossSalesYen = 0
-  let totalPartyCount = 0
-  let totalGuestCount = 0
-  let grossCount = 0
-  let partyCountRows = 0
-  let guestCountRows = 0
-
-  for (const row of rows) {
-    const gross = Number(row.gross_sales_yen)
-    if (Number.isFinite(gross) && gross >= 0) {
-      totalGrossSalesYen += Math.round(gross)
-      grossCount += 1
-    }
-    const party = Number(row.party_count)
-    if (Number.isFinite(party) && party >= 0) {
-      totalPartyCount += Math.round(party)
-      partyCountRows += 1
-    }
-    const guest = Number(row.guest_count)
-    if (Number.isFinite(guest) && guest >= 0) {
-      totalGuestCount += Math.round(guest)
-      guestCountRows += 1
-    }
-  }
-
-  return {
-    receiptCount: rows.length,
-    totalGrossSalesYen,
-    totalPartyCount,
-    totalGuestCount,
-    avgGrossSalesYen: grossCount > 0 ? totalGrossSalesYen / grossCount : null,
-    avgPartyCount: partyCountRows > 0 ? totalPartyCount / partyCountRows : null,
-    avgGuestCount: guestCountRows > 0 ? totalGuestCount / guestCountRows : null,
-  }
-}
-
 type MonthCumulativeTotals = {
   grossSalesYen: number | null
   partyCount: number | null
@@ -6661,58 +6537,6 @@ async function loadMonthCumulativeTotalsForStoreMonth(
   return { grossSalesYen: totalGrossSalesYen, partyCount: totalPartyCount, guestCount: totalGuestCount }
 }
 
-async function fetchSalesBudgetRowForWebhook(
-  supabase: ReturnType<typeof createClient>,
-  storePartitionKey: string,
-  targetMonth: string,
-): Promise<{
-  budget_yen: number
-  weekday_weight: number
-  pre_holiday_weight: number
-  holiday_weight: number
-  store_closed_dates: string[]
-} | null> {
-  if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return null
-  const { data, error } = await supabase
-    .from('line_sales_month_budgets')
-    .select('budget_yen, weekday_weight, pre_holiday_weight, holiday_weight, store_closed_dates')
-    .eq('store_partition_key', storePartitionKey)
-    .eq('target_month', targetMonth)
-    .maybeSingle()
-  if (error || !data) return null
-  const row = data as Record<string, unknown>
-  const budgetYen = Number(row.budget_yen)
-  if (!Number.isFinite(budgetYen) || budgetYen <= 0) return null
-  const ww = Number(row.weekday_weight)
-  const pw = Number(row.pre_holiday_weight)
-  const hw = Number(row.holiday_weight)
-  let fromTable: string[] = []
-  const { data: closedRows, error: closedErr } = await supabase
-    .from('line_sales_month_store_closed_days')
-    .select('closed_on')
-    .eq('store_partition_key', storePartitionKey)
-    .eq('target_month', targetMonth)
-  if (!closedErr && Array.isArray(closedRows)) {
-    const allowed = new Set(enumerateMonthDates(targetMonth))
-    for (const cr of closedRows) {
-      const r = cr as { closed_on?: unknown }
-      const s = String(r.closed_on ?? '').trim().slice(0, 10)
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) continue
-      if (!allowed.has(s)) continue
-      fromTable.push(s)
-    }
-    fromTable = [...new Set(fromTable)].sort()
-  }
-  const closedArr = mergeStoreClosedDateLists(fromTable, row.store_closed_dates, targetMonth)
-  return {
-    budget_yen: Math.round(budgetYen),
-    weekday_weight: Number.isFinite(ww) && ww > 0 ? ww : 1,
-    pre_holiday_weight: Number.isFinite(pw) && pw > 0 ? pw : 1.5,
-    holiday_weight: Number.isFinite(hw) && hw > 0 ? hw : 2,
-    store_closed_dates: closedArr,
-  }
-}
-
 /**
  * analytics.html の営業日数 KPI と同じ: 対象月内で `receipt_count > 0` の日数
  * （= `line_receipt_entries` が1件以上ある distinct receipt_date の個数）
@@ -6760,95 +6584,6 @@ async function resolveReceiptMonthDailyAvgDivisor(
   return n
 }
 
-async function loadStoreDayGrossSumForDate(
-  supabase: ReturnType<typeof createClient>,
-  storePartitionKey: string,
-  receiptDateIso: string,
-): Promise<number> {
-  const { data, error } = await supabase
-    .from('line_receipt_entries')
-    .select('gross_sales_yen')
-    .eq('store_partition_key', storePartitionKey)
-    .eq('receipt_date', receiptDateIso)
-  if (error || !Array.isArray(data)) return 0
-  let sum = 0
-  for (const row of data) {
-    const g = Number((row as Record<string, unknown>).gross_sales_yen)
-    if (Number.isFinite(g) && g >= 0) sum += Math.round(g)
-  }
-  return sum
-}
-
-/** 対象月の各日の総売上（analytics の日次 series と同様に日付キーで合算） */
-async function loadStoreGrossSumsByMonthDates(
-  supabase: ReturnType<typeof createClient>,
-  storePartitionKey: string,
-  receiptMonthYyyyMm: string,
-): Promise<Map<string, number>> {
-  const dates = enumerateMonthDates(receiptMonthYyyyMm)
-  const sums = new Map<string, number>()
-  for (const d of dates) sums.set(d, 0)
-  if (dates.length === 0) return sums
-  const start = dates[0]
-  const end = dates[dates.length - 1]
-  const { data, error } = await supabase
-    .from('line_receipt_entries')
-    .select('receipt_date, gross_sales_yen')
-    .eq('store_partition_key', storePartitionKey)
-    .gte('receipt_date', start)
-    .lte('receipt_date', end)
-  if (error || !Array.isArray(data)) return sums
-  for (const row of data) {
-    const raw = (row as Record<string, unknown>).receipt_date
-    const dk = String(raw ?? '').slice(0, 10)
-    if (!sums.has(dk)) continue
-    const g = Number((row as Record<string, unknown>).gross_sales_yen)
-    if (Number.isFinite(g) && g >= 0) sums.set(dk, (sums.get(dk) ?? 0) + Math.round(g))
-  }
-  return sums
-}
-
-/**
- * analytics.html の receiptDailyFooterBudgets（KPI「日次予算差（累計）」）と同じ差額合計。
- * 店舗休日はフッタ集計から差分を除外（同ファイル 1265 行付近と同じ）。
- */
-function computeReceiptDailyDiffTotalLikeAnalyticsFooter(
-  dailyMap: Map<string, number>,
-  storeClosed: Set<string>,
-  receiptMonthYyyyMm: string,
-  grossByDate: Map<string, number>,
-  todayJst: string,
-  now: Date = new Date(),
-): number | null {
-  let diffTotal = 0
-  let anyB = false
-  for (const dk of enumerateMonthDates(receiptMonthYyyyMm)) {
-    let b: number
-    if (storeClosed.has(dk)) {
-      b = 0
-    } else {
-      const lb = dailyMap.get(dk)
-      if (lb == null || !Number.isFinite(lb) || lb < 0) continue
-      b = lb
-    }
-    anyB = true
-    if (storeClosed.has(dk)) continue
-    if (dk > todayJst) continue
-    const g = grossByDate.get(dk) ?? 0
-    if (shouldDeferDailyBudgetUntilJstOpen({
-      receiptDateIso: dk,
-      storeClosed,
-      now,
-    })) {
-      diffTotal += Math.round(g - 0)
-      continue
-    }
-    diffTotal += Math.round(g - b)
-  }
-  if (!anyB) return null
-  return diffTotal
-}
-
 async function buildReceiptBudgetComparisonRows(
   supabase: ReturnType<typeof createClient>,
   storePartitionKey: string,
@@ -6857,90 +6592,12 @@ async function buildReceiptBudgetComparisonRows(
   monthTotals: MonthCumulativeTotals,
 ): Promise<ReceiptFlexBaselineKvRow[] | null> {
   if (!storePartitionKey || storePartitionKey === RECEIPT_STORE_PARTITION_UNKNOWN) return null
-  const row = await fetchSalesBudgetRowForWebhook(supabase, storePartitionKey, receiptMonthYyyyMm)
-  if (!row) return null
-
-  const weights: SalesBudgetAllocationWeights = {
-    weekday: row.weekday_weight,
-    pre_holiday: row.pre_holiday_weight,
-    holiday: row.holiday_weight,
-  }
-  const holidaySet = getDefaultJapaneseHolidaySet()
-  const storeClosed = new Set(row.store_closed_dates ?? [])
-  const dailyMap = allocateDailyBudgetsForMonth(
+  return buildReceiptBudgetComparisonRowsShared(supabase, {
+    storePartitionKey,
+    asOfDateIso: receiptDateIso,
     receiptMonthYyyyMm,
-    row.budget_yen,
-    weights,
-    holidaySet,
-    storeClosed,
-  )
-  const dailyTarget = dailyMap.get(receiptDateIso)
-  if (dailyTarget == null) return null
-
-  const monthActual = monthTotals.grossSalesYen ?? 0
-  const monthPct = row.budget_yen > 0 ? ((monthActual / row.budget_yen) * 100).toFixed(1) : '-'
-  const now = new Date()
-  const [dayActual, grossByMonth] = await Promise.all([
-    loadStoreDayGrossSumForDate(supabase, storePartitionKey, receiptDateIso),
-    loadStoreGrossSumsByMonthDates(supabase, storePartitionKey, receiptMonthYyyyMm),
-  ])
-
-  const isStoreClosed = storeClosed.has(receiptDateIso)
-  const deferBudget =
-    !isStoreClosed &&
-    shouldDeferDailyBudgetUntilJstOpen({
-      receiptDateIso,
-      storeClosed,
-      now,
-    })
-
-  let dailyBudgetDiffStr: string
-  if (isStoreClosed) {
-    dailyBudgetDiffStr = dayActual === 0 ? '-' : formatYenSignedDiff(dayActual)
-  } else if (deferBudget) {
-    dailyBudgetDiffStr = formatYenSignedDiff(0)
-  } else if (receiptDateIsAfterTodayJst(receiptDateIso, now)) {
-    dailyBudgetDiffStr = formatYenSignedDiff(0)
-  } else {
-    dailyBudgetDiffStr = formatYenSignedDiff(dayActual - dailyTarget)
-  }
-
-  /** 按分待ち中も営業日の目標額は表示する（差のみ 0 扱い） */
-  const displayDailyTarget = dailyTarget
-  const canStyleDayDiff =
-    !isStoreClosed && !deferBudget && !receiptDateIsAfterTodayJst(receiptDateIso, now)
-  const dailyDiffYen = canStyleDayDiff ? (dayActual - dailyTarget) : null
-
-  const todayJst = getJstBusinessDateForReceiptBudget(now)
-  const cumDiffYen = computeReceiptDailyDiffTotalLikeAnalyticsFooter(
-    dailyMap,
-    storeClosed,
-    receiptMonthYyyyMm,
-    grossByMonth,
-    todayJst,
-    now,
-  )
-  const cumStr = cumDiffYen == null ? null : formatYenSignedDiff(cumDiffYen)
-
-  const out: ReceiptFlexBaselineKvRow[] = [
-    { label: '月次目標', value: formatYenAmount(row.budget_yen), margin: 'md' },
-    { label: '月次実績', value: `${formatYenAmount(monthActual)}（${monthPct}%）` },
-    { label: '当日目標', value: formatYenAmount(displayDailyTarget) },
-    {
-      label: '日次予算差',
-      value: dailyBudgetDiffStr,
-      ...(dailyDiffYen != null && dailyDiffYen < 0 ? { valueColor: '#C62828' } : {}),
-    },
-  ]
-  /** 日次予算差（累計）は別行（1行に詰めると Flex で省略されるため） */
-  if (cumStr != null && cumDiffYen != null) {
-    out.push({
-      label: '日次予算累計',
-      value: cumStr,
-      ...(cumDiffYen < 0 ? { valueColor: '#C62828' } : {}),
-    })
-  }
-  return out
+    monthActualYen: monthTotals.grossSalesYen ?? 0,
+  })
 }
 
 async function maybeCreateMidMonthReceiptReportOnPost(
@@ -6952,16 +6609,18 @@ async function maybeCreateMidMonthReceiptReportOnPost(
 ): Promise<Array<Record<string, unknown>> | null> {
   if (!receiptMidreportEnabled) return null
   const parts = getJstDateParts(now)
-  if (parts.day !== 15) return null
-
-  const monthRange = monthRangeFromJstYearMonth(parts.year, parts.month)
-  const startIso = monthRange.start.toISOString()
-  const endIso = new Date(now.getTime() + 1000).toISOString()
-  const aggregate = await loadReceiptAggregateForRoom(supabase, roomId, startIso, endIso)
-  if (!aggregate || aggregate.receiptCount === 0) return null
+  // 16日 10時以降（本番 cron 送信と同じ。早朝5時には送らない）
+  if (parts.day !== 16 || parts.hour < 10) return null
 
   const periodStartDate = toJstDateString(parts.year, parts.month, 1)
   const periodEndDate = toJstDateString(parts.year, parts.month, 15)
+  const { aggregate, storePartitionKey } = await loadReceiptReportAggregateForRoom(
+    supabase,
+    roomId,
+    periodStartDate,
+    periodEndDate,
+  )
+  if (!aggregate || aggregate.receiptCount === 0) return null
   const reportMonth = periodStartDate
 
   const { error } = await supabase
@@ -6978,7 +6637,9 @@ async function maybeCreateMidMonthReceiptReportOnPost(
       total_gross_sales_yen: aggregate.totalGrossSalesYen,
       total_party_count: aggregate.totalPartyCount,
       total_guest_count: aggregate.totalGuestCount,
-      avg_gross_sales_yen: aggregate.avgGrossSalesYen == null ? null : Math.round(aggregate.avgGrossSalesYen),
+      avg_gross_sales_yen: aggregate.avgDailyGrossSalesYen == null
+        ? (aggregate.avgGrossSalesYen == null ? null : Math.round(aggregate.avgGrossSalesYen))
+        : aggregate.avgDailyGrossSalesYen,
       avg_party_count: aggregate.avgPartyCount,
       avg_guest_count: aggregate.avgGuestCount,
       sent_at: now.toISOString(),
@@ -6990,7 +6651,12 @@ async function maybeCreateMidMonthReceiptReportOnPost(
     return null
   }
 
-  return buildMidMonthReceiptReportMessage(aggregate, { periodStartDate, periodEndDate })
+  return await buildReceiptReportFlexMessages(supabase, aggregate, {
+    reportTitle: RECEIPT_MID_REPORT_TITLE,
+    periodStartDate,
+    periodEndDate,
+    storePartitionKey,
+  })
 }
 
 function buildMediaStoragePath(
@@ -7376,6 +7042,7 @@ function buildReceiptFlexBaselineRows(
       flex: labelFlex,
     }
     const valueUnit = row.valueUnit != null ? String(row.valueUnit).trim() : ''
+    const valueSuffix = row.valueSuffix
     const mainBaseline: Record<string, unknown> = valueUnit.length > 0
       ? {
         type: 'box',
@@ -7391,6 +7058,25 @@ function buildReceiptFlexBaselineRows(
             contents: [
               { type: 'span', text: `${lineSafeFlexText(row.value, 220)} `, color: valueColor },
               { type: 'span', text: lineSafeFlexText(valueUnit, 8), color: '#7A7A7A' },
+            ],
+          },
+        ],
+      }
+      : valueSuffix
+      ? {
+        type: 'box',
+        layout: 'baseline',
+        spacing: 'sm',
+        contents: [
+          labelCell,
+          {
+            type: 'text',
+            size: 'sm',
+            wrap: true,
+            flex: valueFlex,
+            contents: [
+              { type: 'span', text: lineSafeFlexText(row.value, 200), color: '#1F1F1F' },
+              { type: 'span', text: lineSafeFlexText(valueSuffix.text, 40), color: valueSuffix.color },
             ],
           },
         ],

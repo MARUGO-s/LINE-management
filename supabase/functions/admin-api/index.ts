@@ -12,6 +12,10 @@ import {
   parseStoreClosedDatesForMonth,
   type SalesBudgetAllocationWeights,
 } from "../_shared/sales_budget_allocation.ts"
+import {
+  RECEIPT_STORE_PARTITION_UNKNOWN,
+  toReceiptStorePartitionKey,
+} from "../_shared/receipt_report_aggregate.ts"
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0"
 import JSZip from "https://esm.sh/jszip@3.10.1"
 
@@ -498,6 +502,7 @@ Deno.serve(async (req) => {
           gmail_reservation_alert_enabled: payload.gmail_reservation_alert_enabled,
           receipt_midreport_enabled: payload.receipt_midreport_enabled,
           receipt_monthend_report_enabled: payload.receipt_monthend_report_enabled,
+          receipt_report_store_partition_key: payload.receipt_report_store_partition_key,
           room_sort_order: payload.room_sort_order,
           delivery_hours: payload.delivery_hours,
           message_cleanup_timing: payload.message_cleanup_timing,
@@ -741,6 +746,56 @@ Deno.serve(async (req) => {
       }, 200)
     }
 
+    if (req.method === "POST" && path === "/actions/test-receipt-report") {
+      const body = await parseJson(req)
+      if (!isRecord(body)) {
+        throw { status: 400, message: "Invalid JSON body." } satisfies AppError
+      }
+      const roomId = String(body.room_id ?? "").trim()
+      if (!roomId) {
+        throw { status: 400, message: "room_id is required." } satisfies AppError
+      }
+      const testKey = (Deno.env.get("RECEIPT_MIDREPORT_CRON_TEST_KEY") ?? "").trim()
+      if (!testKey) {
+        throw {
+          status: 503,
+          message:
+            "レポートのテスト送信が未設定です。admin-api と receipt-midreport-cron の両方に Edge secret RECEIPT_MIDREPORT_CRON_TEST_KEY（同一の値）を設定してください。",
+        } satisfies AppError
+      }
+      const reportKindRaw = String(body.report_kind ?? "mid_month").trim().toLowerCase()
+      const reportKind = reportKindRaw === "month_end" ? "month_end" : "mid_month"
+      let year: number | undefined
+      let month: number | undefined
+      if (body.year != null) {
+        const yn = Number(body.year)
+        if (Number.isInteger(yn) && yn >= 2000 && yn <= 2100) year = yn
+      }
+      if (body.month != null) {
+        const mn = Number(body.month)
+        if (Number.isInteger(mn) && mn >= 1 && mn <= 12) month = mn
+      }
+      let storePartitionKey: string | undefined
+      if (body.store_partition_key != null) {
+        const rawKey = String(body.store_partition_key ?? "").trim().toLowerCase()
+        if (rawKey && /^[a-z0-9]{2,120}$/.test(rawKey) && rawKey !== RECEIPT_STORE_PARTITION_UNKNOWN) {
+          storePartitionKey = rawKey
+        }
+      }
+
+      const { status, payload } = await invokeReceiptMidreportCronTestSend({
+        supabaseUrl,
+        serviceRoleKey,
+        testKey,
+        roomId,
+        reportKind,
+        year,
+        month,
+        storePartitionKey,
+      })
+      return json(payload, status)
+    }
+
     return json({ error: "Not found." }, 404)
   } catch (e) {
     const err = asAppError(e)
@@ -875,6 +930,7 @@ async function fetchState(
       USER_PERMISSION_LIST_MAX_LIMIT,
     ),
     marugo_group_store_options: [...MARUGO_GROUP_STORE_OPTIONS],
+    receipt_store_options: await fetchReceiptStoreOptions(supabase),
     job_title_options: [...JOB_TITLE_OPTIONS],
     room_overview: roomOverviewRes.data ?? [],
     delivery_logs: filteredLogs,
@@ -2061,8 +2117,51 @@ async function fetchReservationSearchState(
 }
 
 function normalizeBudgetStoreKey(raw: string): string {
-  const s = String(raw ?? "").trim()
+  const s = String(raw ?? "").trim().toLowerCase()
   return s || "__all__"
+}
+
+type ReceiptStoreOption = {
+  store_key: string
+  store_name: string
+}
+
+async function fetchReceiptStoreOptions(
+  supabase: ReturnType<typeof createClient>,
+): Promise<ReceiptStoreOption[]> {
+  const byKey = new Map<string, string>()
+
+  for (const label of MARUGO_GROUP_STORE_OPTIONS) {
+    const key = toReceiptStorePartitionKey(label)
+    if (key && key !== RECEIPT_STORE_PARTITION_UNKNOWN) {
+      byKey.set(key, label)
+    }
+  }
+  byKey.set("bistrocavacava", "BISTRO CAVA CAVA")
+
+  const { data, error } = await supabase
+    .from("line_receipt_entries")
+    .select("store_partition_key, store_name")
+    .neq("store_partition_key", RECEIPT_STORE_PARTITION_UNKNOWN)
+    .order("store_name", { ascending: true })
+    .limit(5000)
+
+  if (error) {
+    console.error("fetchReceiptStoreOptions failed:", error.message)
+  } else {
+    for (const row of Array.isArray(data) ? data : []) {
+      const key = String((row as Record<string, unknown>).store_partition_key ?? "").trim().toLowerCase()
+      if (!key || key === RECEIPT_STORE_PARTITION_UNKNOWN) continue
+      const name = String((row as Record<string, unknown>).store_name ?? "").trim() || key
+      if (!byKey.has(key) || (byKey.get(key) === key && name !== key)) {
+        byKey.set(key, name)
+      }
+    }
+  }
+
+  return [...byKey.entries()]
+    .map(([store_key, store_name]) => ({ store_key, store_name }))
+    .sort((a, b) => a.store_name.localeCompare(b.store_name, "ja"))
 }
 
 function parsePositiveWeight(value: unknown, fallback: number): number {
@@ -4906,6 +5005,7 @@ function buildRoomSettingsPayload(body: unknown): {
   gmail_reservation_alert_enabled: boolean
   receipt_midreport_enabled: boolean
   receipt_monthend_report_enabled: boolean
+  receipt_report_store_partition_key: string | null
   room_sort_order: number | null
   delivery_hours: number[] | null
   message_cleanup_timing: MessageCleanupTiming | null
@@ -5027,6 +5127,22 @@ function buildRoomSettingsPayload(body: unknown): {
   }
   const receiptMonthendReportEnabled = receiptMonthendReportEnabledRaw !== false
 
+  let receiptReportStorePartitionKey: string | null = null
+  if (body.receipt_report_store_partition_key != null) {
+    const rawKey = typeof body.receipt_report_store_partition_key === "string"
+      ? body.receipt_report_store_partition_key.trim().toLowerCase()
+      : ""
+    if (rawKey) {
+      if (!/^[a-z0-9]{2,120}$/.test(rawKey) || rawKey === RECEIPT_STORE_PARTITION_UNKNOWN) {
+        throw {
+          status: 400,
+          message: "receipt_report_store_partition_key is invalid.",
+        } satisfies AppError
+      }
+      receiptReportStorePartitionKey = rawKey
+    }
+  }
+
   const roomNameRaw = typeof body.room_name === "string" ? body.room_name.trim() : ""
   const roomSortOrderRaw = body.room_sort_order
   let roomSortOrder: number | null = null
@@ -5071,6 +5187,7 @@ function buildRoomSettingsPayload(body: unknown): {
     gmail_reservation_alert_enabled: gmailReservationAlertEnabled,
     receipt_midreport_enabled: receiptMidreportEnabled,
     receipt_monthend_report_enabled: receiptMonthendReportEnabled,
+    receipt_report_store_partition_key: receiptReportStorePartitionKey,
     room_sort_order: roomSortOrder,
     delivery_hours: deliveryHours,
     message_cleanup_timing: roomCleanupTiming,
@@ -5286,6 +5403,46 @@ function asAppError(error: unknown): AppError {
     return { status: error.status, message: error.message }
   }
   return { status: 500, message: error instanceof Error ? error.message : "Internal Server Error" }
+}
+
+async function invokeReceiptMidreportCronTestSend(opts: {
+  supabaseUrl: string
+  serviceRoleKey: string
+  testKey: string
+  roomId: string
+  reportKind: "mid_month" | "month_end"
+  year?: number
+  month?: number
+  storePartitionKey?: string
+}): Promise<{ status: number; payload: unknown }> {
+  const base = opts.supabaseUrl.replace(/\/+$/, "")
+  const url = new URL(`${base}/functions/v1/receipt-midreport-cron`)
+  url.searchParams.set("test_receipt_report", "1")
+  url.searchParams.set("room_id", opts.roomId)
+  url.searchParams.set("report_kind", opts.reportKind)
+  if (opts.year != null) url.searchParams.set("year", String(opts.year))
+  if (opts.month != null) url.searchParams.set("month", String(opts.month))
+  if (opts.storePartitionKey) url.searchParams.set("store_partition_key", opts.storePartitionKey)
+
+  /** Edge の JWT 検証: `apikey` は anon、`Authorization` は service_role が推奨（両方 service で 401 になる環境がある） */
+  const anonKey = (Deno.env.get("SUPABASE_ANON_KEY") ?? "").trim()
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${opts.serviceRoleKey}`,
+      apikey: anonKey || opts.serviceRoleKey,
+      "X-Receipt-Midreport-Test-Key": opts.testKey,
+    },
+  })
+  const text = await res.text()
+  let payload: unknown
+  try {
+    payload = text ? JSON.parse(text) : {}
+  } catch {
+    payload = { ok: false, error: "Invalid JSON from receipt-midreport-cron", raw: text.slice(0, 500) }
+  }
+  return { status: res.status, payload }
 }
 
 function json(body: unknown, status = 200): Response {

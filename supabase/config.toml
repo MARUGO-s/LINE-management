@@ -423,9 +423,16 @@ entrypoint = "./functions/calendar-pending-cron/index.ts"
 
 [functions.receipt-midreport-cron]
 enabled = true
-verify_jwt = true
+# pg_net / カスタム cron トークン・admin-api からの server-to-server 呼び出しと相性が良い（JWT 必須だと 401 になり得る）
+verify_jwt = false
 import_map = "./functions/receipt-midreport-cron/deno.json"
 entrypoint = "./functions/receipt-midreport-cron/index.ts"
+
+[functions.receipt-sheets-sync-cron]
+enabled = true
+verify_jwt = false
+import_map = "./functions/receipt-sheets-sync-cron/deno.json"
+entrypoint = "./functions/receipt-sheets-sync-cron/index.ts"
 
 [functions.admin-api]
 enabled = true
