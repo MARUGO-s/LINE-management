@@ -14,8 +14,16 @@ import {
 import {
   buildReceiptBudgetComparisonRows as buildReceiptBudgetComparisonRowsShared,
 } from '../_shared/receipt_budget_comparison.ts'
-import { loadReceiptReportAggregateForRoom } from '../_shared/receipt_report_aggregate.ts'
-import { buildReceiptReportFlexMessages } from '../_shared/receipt_report_flex.ts'
+import {
+  loadReceiptReportAggregateForRoom,
+  loadReceiptReportAggregateForStoreByReceiptDate,
+} from '../_shared/receipt_report_aggregate.ts'
+import {
+  buildReceiptReportFlexMessages,
+  buildReceiptYoyKvRows,
+  loadReceiptReportYoyComparison,
+  type ReceiptYoyKvRow,
+} from '../_shared/receipt_report_flex.ts'
 import {
   enumerateMonthDates,
   getJstBusinessDateForReceiptBudget,
@@ -2494,6 +2502,11 @@ async function trySaveLineMediaContent(
         parseReceiptDateToIso(imageAnalysis.receipt.date) ?? resolveReceiptDateIsoForPersist(imageAnalysis.receipt.date)
       const monthStrForAvg = receiptIsoForAvg.slice(0, 7)
       const monthAvgBizDays = await resolveReceiptMonthDailyAvgDivisor(supabase, storeKeyForAvg, monthStrForAvg)
+      const yoyExtras = await loadReceiptAnalysisMonthYoyExtras(
+        supabase,
+        storeKeyForAvg,
+        receiptIsoForAvg,
+      )
       const baseReply = buildLineReceiptImageAnalysisReply(
         imageAnalysis.receipt,
         monthCumulativeTotals,
@@ -2501,7 +2514,9 @@ async function trySaveLineMediaContent(
           correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(lineMessageId),
           deletionCommandText: buildReceiptAnalysisDeletionCommandTextForLineMessageId(lineMessageId),
           budgetRows: receiptBudgetFlexRows ?? undefined,
-          monthAvgBusinessDayDivisor: monthAvgBizDays ?? undefined,
+          monthAvgBusinessDayDivisor: yoyExtras.monthOperatingDayCount ?? monthAvgBizDays ?? undefined,
+          monthOperatingDayCount: yoyExtras.monthOperatingDayCount ?? undefined,
+          receiptYoyKvRows: yoyExtras.yoyKvRows ?? undefined,
         },
       )
       if (midMonthReportReply) {
@@ -4102,6 +4117,7 @@ async function tryHandlePendingReceiptCorrection(
         applied.monthCumulativeTotals,
       )
       const monthAvgBizDays = await resolveReceiptMonthDailyAvgDivisor(supabase, sk, rm)
+      const yoyExtras = await loadReceiptAnalysisMonthYoyExtras(supabase, sk, iso)
       const { data: entryMeta } = await supabase
         .from('line_receipt_entries')
         .select('line_message_id')
@@ -4112,7 +4128,9 @@ async function tryHandlePendingReceiptCorrection(
         correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(lmid),
         deletionCommandText: buildReceiptAnalysisDeletionCommandTextForLineMessageId(lmid),
         budgetRows: budgetRows ?? undefined,
-        monthAvgBusinessDayDivisor: monthAvgBizDays ?? undefined,
+        monthAvgBusinessDayDivisor: yoyExtras.monthOperatingDayCount ?? monthAvgBizDays ?? undefined,
+        monthOperatingDayCount: yoyExtras.monthOperatingDayCount ?? undefined,
+        receiptYoyKvRows: yoyExtras.yoyKvRows ?? undefined,
       })
     }
     const field = parseReceiptCorrectionFieldChoice(text)
@@ -4595,6 +4613,11 @@ async function completePendingReceiptDuplicateAndReply(
     pending.store_partition_key,
     receiptMonthStr,
   )
+  const yoyExtras = await loadReceiptAnalysisMonthYoyExtras(
+    supabase,
+    pending.store_partition_key,
+    pending.receipt_date,
+  )
   const midMonthReportReply = await maybeCreateMidMonthReceiptReportOnPost(
     supabase,
     pending.room_id,
@@ -4609,7 +4632,9 @@ async function completePendingReceiptDuplicateAndReply(
       correctionCommandText: buildReceiptCorrectionCommandTextForLineMessageId(pending.line_message_id),
       deletionCommandText: buildReceiptAnalysisDeletionCommandTextForLineMessageId(pending.line_message_id),
       budgetRows: receiptBudgetFlexRows ?? undefined,
-      monthAvgBusinessDayDivisor: monthAvgBizDays ?? undefined,
+      monthAvgBusinessDayDivisor: yoyExtras.monthOperatingDayCount ?? monthAvgBizDays ?? undefined,
+      monthOperatingDayCount: yoyExtras.monthOperatingDayCount ?? undefined,
+      receiptYoyKvRows: yoyExtras.yoyKvRows ?? undefined,
     },
   )
   if (midMonthReportReply) {
@@ -6584,6 +6609,50 @@ async function resolveReceiptMonthDailyAvgDivisor(
   return n
 }
 
+/** レシート日の月初〜当日までの営業日数・前年同期間比（日次レシート返信用） */
+async function loadReceiptAnalysisMonthYoyExtras(
+  supabase: ReturnType<typeof createClient>,
+  storePartitionKey: string,
+  receiptDateIso: string,
+): Promise<{
+  monthOperatingDayCount: number | null
+  yoyKvRows: ReceiptYoyKvRow[] | null
+}> {
+  const empty = { monthOperatingDayCount: null, yoyKvRows: null }
+  const storeKey = String(storePartitionKey ?? '').trim().toLowerCase()
+  if (!storeKey || storeKey === RECEIPT_STORE_PARTITION_UNKNOWN) return empty
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(receiptDateIso ?? '').trim())) return empty
+
+  const periodStart = `${receiptDateIso.slice(0, 7)}-01`
+  const mtdAggregate = await loadReceiptReportAggregateForStoreByReceiptDate(
+    supabase,
+    storeKey,
+    periodStart,
+    receiptDateIso,
+  )
+  const monthOperatingDayCount = mtdAggregate?.operatingDayCount ?? null
+  if (!mtdAggregate) return { monthOperatingDayCount, yoyKvRows: null }
+
+  const yoy = await loadReceiptReportYoyComparison(supabase, storeKey, periodStart, receiptDateIso)
+  if (!yoy) return { monthOperatingDayCount, yoyKvRows: null }
+
+  return {
+    monthOperatingDayCount,
+    yoyKvRows: [
+      {
+        label: '昨年差異日',
+        value: yoy.priorPeriodStartDate,
+        margin: 'md',
+      },
+      {
+        label: '　',
+        value: `〜 ${yoy.priorPeriodEndDate}`,
+      },
+      ...buildReceiptYoyKvRows(mtdAggregate, yoy),
+    ],
+  }
+}
+
 async function buildReceiptBudgetComparisonRows(
   supabase: ReturnType<typeof createClient>,
   storePartitionKey: string,
@@ -7159,6 +7228,10 @@ function buildLineReceiptImageAnalysisReply(
     budgetRows?: ReceiptFlexBaselineKvRow[]
     /** analytics 営業日数と同じ分母（レシートがある日数）。未指定時は 1 日平均を付けない */
     monthAvgBusinessDayDivisor?: number | null
+    /** 当月月初〜レシート日の営業日数（distinct receipt_date） */
+    monthOperatingDayCount?: number | null
+    /** 【前年同月比】2行表示（月初〜当日 vs 昨年同期間） */
+    receiptYoyKvRows?: ReceiptYoyKvRow[] | null
   },
 ): LineReplyMessage[] {
   const labelFlex = 6
@@ -7171,8 +7244,14 @@ function buildLineReceiptImageAnalysisReply(
     formatJapaneseReceiptDateFromIso(receiptIso) ??
     receipt.date
   const receiptMonthYm = /^\d{4}-\d{2}-\d{2}$/.test(receiptIso) ? receiptIso.slice(0, 7) : ''
+  const mtdOperatingDaysRaw = options?.monthOperatingDayCount
+  const mtdOperatingDays = typeof mtdOperatingDaysRaw === 'number' && mtdOperatingDaysRaw >= 0
+    ? Math.round(mtdOperatingDaysRaw)
+    : null
   const avgDenomRaw = options?.monthAvgBusinessDayDivisor
-  const avgDenomDays = typeof avgDenomRaw === 'number' && avgDenomRaw >= 1 ? avgDenomRaw : 0
+  const avgDenomDays = mtdOperatingDays != null && mtdOperatingDays >= 1
+    ? mtdOperatingDays
+    : (typeof avgDenomRaw === 'number' && avgDenomRaw >= 1 ? avgDenomRaw : 0)
   const showMonthDailyAvg = receiptMonthYm.length > 0 && avgDenomDays >= 1
   const storeDisplay =
     receipt.storeName && String(receipt.storeName).trim()
@@ -7195,10 +7274,14 @@ function buildLineReceiptImageAnalysisReply(
   const guestAvgStr = formatMonthAvgPartyGuestCount(cum.guestCount, avgDenomDays, showMonthDailyAvg)
   const monthRows: ReceiptFlexBaselineKvRow[] = [
     {
+      label: '営業日数',
+      value: mtdOperatingDays != null ? `${mtdOperatingDays.toLocaleString('ja-JP')} 日` : '-',
+      margin: 'md',
+    },
+    {
       label: '月間総売上',
       value: lineSafeFlexText(cum.grossSalesYen == null ? '-' : formatYenAmount(cum.grossSalesYen), 240),
       avgLineValue: grossAvgStr,
-      margin: 'md',
     },
     {
       label: '月間会計組数',
@@ -7234,6 +7317,17 @@ function buildLineReceiptImageAnalysisReply(
     })
   }
 
+  const monthDetailRows = buildReceiptFlexBaselineRows(monthRows, labelFlex, valueFlex)
+  if (monthDetailRows.length > 0) {
+    bodyContents.push(buildReceiptFlexDashedSectionDivider())
+    bodyContents.push({
+      type: 'box',
+      layout: 'vertical',
+      spacing: 'xs',
+      contents: monthDetailRows,
+    })
+  }
+
   if (budgetRows.length > 0) {
     bodyContents.push(buildReceiptFlexDashedSectionDivider())
     bodyContents.push({
@@ -7253,14 +7347,32 @@ function buildLineReceiptImageAnalysisReply(
     })
   }
 
-  const monthDetailRows = buildReceiptFlexBaselineRows(monthRows, labelFlex, valueFlex)
-  if (monthDetailRows.length > 0) {
+  const yoyKvRows = Array.isArray(options?.receiptYoyKvRows) ? options!.receiptYoyKvRows! : []
+  if (yoyKvRows.length > 0) {
     bodyContents.push(buildReceiptFlexDashedSectionDivider())
+    bodyContents.push({
+      type: 'text',
+      text: '【前年同月比】',
+      size: 'sm',
+      weight: 'bold',
+      color: '#7A7A7A',
+      margin: 'md',
+      wrap: true,
+    })
+    const yoyFlexRows: ReceiptFlexBaselineKvRow[] = yoyKvRows.map((row) => ({
+      label: row.label,
+      value: row.value,
+      margin: row.margin,
+      ...(row.valueColor ? { valueColor: row.valueColor } : {}),
+      ...(row.avgLineValue != null && String(row.avgLineValue).trim().length > 0
+        ? { avgLineValue: row.avgLineValue }
+        : {}),
+    }))
     bodyContents.push({
       type: 'box',
       layout: 'vertical',
       spacing: 'xs',
-      contents: monthDetailRows,
+      contents: buildReceiptFlexBaselineRows(yoyFlexRows, labelFlex, valueFlex),
     })
   }
 

@@ -130,6 +130,17 @@ function weightForDayKind(kind: DayKind, w: SalesBudgetAllocationWeights): numbe
   return w.weekday
 }
 
+/** 暦月の日数 − 店休日数（1日1休業日としてカウント） */
+export function countOperatingDaysInCalendarMonth(
+  targetMonth: string,
+  storeClosedDates: string[],
+): number {
+  const monthDays = enumerateMonthDates(targetMonth)
+  if (monthDays.length === 0) return 0
+  const closed = new Set(parseStoreClosedDatesForMonth(storeClosedDates, targetMonth))
+  return Math.max(0, monthDays.length - closed.size)
+}
+
 export function enumerateMonthDates(targetMonth: string): string[] {
   const m = /^(\d{4})-(\d{2})$/.exec(String(targetMonth).trim())
   if (!m) return []

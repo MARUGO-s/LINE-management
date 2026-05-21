@@ -1645,6 +1645,7 @@ function ensureManualMonthGridBuilt() {
     appendManualMonthField(block, '総売上（円）', 'manualG' + suffix, '1000');
     appendManualMonthField(block, '会計組数', 'manualP' + suffix, '1');
     appendManualMonthField(block, '客数', 'manualC' + suffix, '1');
+    appendManualMonthField(block, '営業日数', 'manualO' + suffix, '1');
     grid.appendChild(block);
   }
 }
@@ -1675,6 +1676,7 @@ async function refreshManualMonthForm(year) {
     const elG = document.getElementById('manualG' + suffix);
     const elP = document.getElementById('manualP' + suffix);
     const elC = document.getElementById('manualC' + suffix);
+    const elO = document.getElementById('manualO' + suffix);
     const raw = months[key];
     const row = raw != null && typeof raw === 'object' ? raw : null;
     const gross = row ? row.gross_sales_yen : raw;
@@ -1688,6 +1690,10 @@ async function refreshManualMonthForm(year) {
     if (elC) {
       const g = row?.guest_count;
       elC.value = g != null && Number.isFinite(Number(g)) ? String(g) : '';
+    }
+    if (elO) {
+      const o = row?.operating_days_count;
+      elO.value = o != null && Number.isFinite(Number(o)) ? String(o) : '';
     }
   }
 }
@@ -2271,6 +2277,7 @@ if (dom.priorYearModalSave) {
       const rawG = document.getElementById('manualG' + suffix)?.value?.trim() ?? '';
       const rawP = document.getElementById('manualP' + suffix)?.value?.trim() ?? '';
       const rawC = document.getElementById('manualC' + suffix)?.value?.trim() ?? '';
+      const rawO = document.getElementById('manualO' + suffix)?.value?.trim() ?? '';
       if (rawG !== '') {
         const n = Number(rawG.replace(/,/g, ''));
         if (!Number.isFinite(n) || n < 0) {
@@ -2288,11 +2295,21 @@ if (dom.priorYearModalSave) {
         if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${mi}月・客数: 0以上の数値を入力してください`;
         return;
       }
+      const opDays = parseManualMonthOptionalCount(rawO);
+      if (Number.isNaN(opDays)) {
+        if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${mi}月・営業日数: 1以上の整数を入力してください`;
+        return;
+      }
+      if (opDays != null && opDays < 1) {
+        if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = `${mi}月・営業日数: 1以上の整数を入力してください`;
+        return;
+      }
       entries.push({
         sales_month: key,
         gross_sales_yen: rawG === '' ? null : Math.round(Number(rawG.replace(/,/g, ''))),
         party_count: party,
         guest_count: guest,
+        operating_days_count: opDays,
       });
     }
     if (dom.priorYearModalHint) dom.priorYearModalHint.textContent = '保存中…';

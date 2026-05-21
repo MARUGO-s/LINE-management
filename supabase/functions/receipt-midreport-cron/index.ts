@@ -153,6 +153,7 @@ Deno.serve(async (req) => {
       periodStartDate: schedule.periodStartDate,
       periodEndDate: schedule.periodEndDate,
       storePartitionKey,
+      reportKind: schedule.reportKind,
     })
     const sendResult = await sendLinePushMessages(roomId, reportMessages, lineAccessToken)
     if (!sendResult.ok) {
@@ -316,6 +317,7 @@ async function handleReceiptReportTestSend(
     periodStartDate: slice.periodStartDate,
     periodEndDate: slice.periodEndDate,
     storePartitionKey,
+    reportKind: slice.reportKind,
   })
   const sendResult = await sendLinePushMessages(spec.roomId, reportMessages, deps.lineAccessToken)
   if (!sendResult.ok) {

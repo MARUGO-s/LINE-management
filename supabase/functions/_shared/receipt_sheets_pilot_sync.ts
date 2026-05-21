@@ -1,12 +1,13 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0"
 import {
-  parseManualMonthPartyGuestFromUnknown,
   upsertManualMonthSalesEntries,
   type ManualMonthSalesUpsertEntry,
+  parsePastSalesSheetRow,
 } from "./manual_month_sales.ts"
 import {
   allocateDailyBudgetsForMonth,
   getDefaultJapaneseHolidaySet,
+  countOperatingDaysInCalendarMonth,
   parseStoreClosedDatesForMonth,
   type SalesBudgetAllocationWeights,
 } from "./sales_budget_allocation.ts"
@@ -145,11 +146,19 @@ export type ReceiptSheetsGasClosedDateUpdate = {
   value: string
 }
 
+export type ReceiptSheetsGasOperatingDaysUpdate = {
+  row: number
+  month: string
+  operating_days: number
+}
+
 export type ReceiptSheetsGasSheetExport = {
   daily_sales?: { header: string[]; rows: string[][] }
   closed_dates_by_month: Record<string, string[]>
   /** GAS が行番号で H 列へ直接書込（月セルの Date 型ずれを回避） */
   closed_dates_updates?: ReceiptSheetsGasClosedDateUpdate[]
+  /** GAS が行番号で I 列（営業日数）へ書込 */
+  budget_operating_days_updates?: ReceiptSheetsGasOperatingDaysUpdate[]
 }
 
 function readReceiptSheetsPilotStoreConfig(): ReceiptSheetsPilotStoreConfig | null {
@@ -299,6 +308,10 @@ export async function runReceiptSheetsPilotSyncViaGas(
       config.storePartitionKey,
       closedExport.dates_by_month,
     )
+    sheetExport.budget_operating_days_updates = buildBudgetOperatingDaysSheetUpdates(
+      input.monthly_budget_rows,
+      config.storePartitionKey,
+    )
   }
   result.sheet_export = sheetExport
 
@@ -324,7 +337,7 @@ async function pullFromSheetsToDb(
   const { values: budgetRows } = await getSheetValuesForTab(
     config.spreadsheetId,
     TAB_ALIASES_BUDGETS,
-    "A2:I500",
+    "A2:J500",
   )
   const { values: pastRows } = await getSheetValuesForTab(
     config.spreadsheetId,
@@ -346,13 +359,15 @@ async function processPullRowsToDb(
   let budgetsSkipped = 0
   let pastApplied = 0
   let pastSkipped = 0
+  const budgetOperatingDaysByMonth = new Map<string, number>()
 
   for (let i = 0; i < budgetRows.length; i += 1) {
     const row = budgetRows[i]
     const rowNum = i + 2
     const month = normalizeMonthCell(row[0])
     const storeKey = normalizePilotStoreKey(row[2])
-    const enabled = parseEnabledCell(row[8])
+    const budgetCols = parseMonthlyBudgetSheetRow(row)
+    const enabled = parseEnabledCell(row[budgetCols.enabledCol])
     if (!enabled) {
       budgetsSkipped += 1
       continue
@@ -373,15 +388,19 @@ async function processPullRowsToDb(
       continue
     }
     try {
-      const closedCellRaw = String(row[7] ?? "").trim()
+      const closedCellRaw = String(row[budgetCols.closedCol] ?? "").trim()
       const sheetSpecifiedClosed = closedCellRaw.length > 0
-      let storeClosedDates = parseClosedDatesCell(row[7], month)
+      let storeClosedDates = parseClosedDatesCell(row[budgetCols.closedCol], month)
       if (!sheetSpecifiedClosed) {
         storeClosedDates = await loadStoreClosedDatesForMonth(
           supabase,
           config.storePartitionKey,
           month,
         )
+      }
+      const operatingDays = countOperatingDaysInCalendarMonth(month, storeClosedDates)
+      if (operatingDays > 0) {
+        budgetOperatingDaysByMonth.set(month, operatingDays)
       }
       await upsertBudgetRow(supabase, {
         store_partition_key: config.storePartitionKey,
@@ -404,8 +423,8 @@ async function processPullRowsToDb(
     const rowNum = i + 2
     const salesMonth = normalizeMonthCell(row[0])
     const storeKey = String(row[1] ?? "").trim().toLowerCase()
-    const enabledCol = row.length >= 6 ? 5 : 3
-    const enabled = parseEnabledCell(row[enabledCol])
+    const pastCols = parsePastSalesSheetRow(row)
+    const enabled = parseEnabledCell(row[pastCols.enabledCol])
     if (!enabled || storeKey !== config.storePartitionKey) {
       pastSkipped += 1
       continue
@@ -421,14 +440,13 @@ async function processPullRowsToDb(
       pastApplied += 1
     } else {
       const gross = parseNonNegativeInt(rawGross)
-      const counts = row.length >= 6
-        ? parseManualMonthPartyGuestFromUnknown(row[3], row[4])
-        : { party_count: null, guest_count: null }
+      const opDaysFromBudget = budgetOperatingDaysByMonth.get(salesMonth) ?? null
       pastEntries.push({
         sales_month: salesMonth,
         gross_sales_yen: gross,
-        party_count: counts.party_count,
-        guest_count: counts.guest_count,
+        party_count: pastCols.party_count,
+        guest_count: pastCols.guest_count,
+        operating_days_count: pastCols.operating_days_count ?? opDaysFromBudget,
       })
       pastApplied += 1
     }
@@ -636,7 +654,7 @@ async function exportClosedDatesFromDbToBudgetSheet(
   const { values: budgetRows, tabName } = await getSheetValuesForTab(
     config.spreadsheetId,
     TAB_ALIASES_BUDGETS,
-    "A2:I500",
+    "A2:J500",
   )
 
   let rowsUpdated = 0
@@ -675,7 +693,7 @@ function normalizePilotStoreKey(raw: unknown): string {
   return String(raw ?? "").trim().toLowerCase()
 }
 
-/** シート表示用: 同月内は M/D、連休は 5/3〜5/6、長いときは改行 */
+/** シート表示用: 同月内は M/D、連休は 5/3〜5/6（常に1行・「、」区切り） */
 function formatClosedDatesForSheetCell(dates: string[], month?: string): string {
   if (dates.length === 0) return ""
   const sorted = [...dates].sort()
@@ -693,14 +711,7 @@ function formatClosedDatesForSheetCell(dates: string[], month?: string): string 
   if (dayNums.length === 0) return sorted.join("、")
 
   const segments = compressClosedDaysToSegments(dayNums, monthNum)
-  if (segments.length <= 3 && segments.join("、").length <= 28) {
-    return segments.join("、")
-  }
-  const lines: string[] = []
-  for (let i = 0; i < segments.length; i += 2) {
-    lines.push(segments.slice(i, i + 2).join("、"))
-  }
-  return lines.join("\n")
+  return segments.join("、")
 }
 
 function compressClosedDaysToSegments(days: number[], monthNum: number): string[] {
@@ -1012,6 +1023,46 @@ function formatYearMonthJst(d: Date): string {
   const y = parts.find((p) => p.type === "year")?.value ?? "1970"
   const m = parts.find((p) => p.type === "month")?.value ?? "01"
   return `${y}-${m}`
+}
+
+/** 月間予算シート行（10列=営業日数あり / 9列=旧形式） */
+export function parseMonthlyBudgetSheetRow(row: unknown[]): {
+  enabledCol: number
+  closedCol: number
+  operatingDaysCol: number | null
+} {
+  const len = Array.isArray(row) ? row.length : 0
+  if (len >= 10) {
+    const enabledRaw = String(row[9] ?? "").trim().toLowerCase()
+    if (
+      enabledRaw === "true" || enabledRaw === "false" || enabledRaw === "有効"
+      || enabledRaw === "0" || enabledRaw === ""
+    ) {
+      return { enabledCol: 9, closedCol: 7, operatingDaysCol: 8 }
+    }
+  }
+  return { enabledCol: 8, closedCol: 7, operatingDaysCol: null }
+}
+
+export function buildBudgetOperatingDaysSheetUpdates(
+  budgetRows: SheetValues,
+  storePartitionKey: string,
+): ReceiptSheetsGasOperatingDaysUpdate[] {
+  const pilotKey = String(storePartitionKey ?? "").trim().toLowerCase()
+  const updates: ReceiptSheetsGasOperatingDaysUpdate[] = []
+  for (let i = 0; i < budgetRows.length; i += 1) {
+    const row = budgetRows[i]
+    const month = normalizeMonthCell(row[0])
+    const storeKey = normalizePilotStoreKey(row[2])
+    const budgetCols = parseMonthlyBudgetSheetRow(row)
+    if (!month || storeKey !== pilotKey) continue
+    if (!parseEnabledCell(row[budgetCols.enabledCol])) continue
+    const closed = parseClosedDatesCell(row[budgetCols.closedCol], month)
+    const operatingDays = countOperatingDaysInCalendarMonth(month, closed)
+    if (operatingDays <= 0) continue
+    updates.push({ row: i + 2, month, operating_days: operatingDays })
+  }
+  return updates
 }
 
 function parseEnabledCell(raw: unknown): boolean {

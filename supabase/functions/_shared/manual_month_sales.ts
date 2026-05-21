@@ -4,6 +4,8 @@ export type ManualMonthSalesRecord = {
   gross_sales_yen: number
   party_count: number | null
   guest_count: number | null
+  /** その月の営業日数（前年比の途中期間按分に使用。未入力時は暦日数比） */
+  operating_days_count: number | null
 }
 
 export type ManualMonthSalesUpsertEntry = {
@@ -11,6 +13,7 @@ export type ManualMonthSalesUpsertEntry = {
   gross_sales_yen: number | null
   party_count?: number | null
   guest_count?: number | null
+  operating_days_count?: number | null
 }
 
 function parseOptionalNonNegativeInt(value: unknown): number | null {
@@ -18,6 +21,13 @@ function parseOptionalNonNegativeInt(value: unknown): number | null {
   const n = Number(value)
   if (!Number.isFinite(n) || n < 0) return null
   return Math.round(n)
+}
+
+/** 営業日数（1以上）。0・空欄は null */
+export function parseManualMonthOperatingDays(value: unknown): number | null {
+  const n = parseOptionalNonNegativeInt(value)
+  if (n == null || n <= 0) return null
+  return n
 }
 
 export function parseManualMonthPartyGuestFromUnknown(
@@ -32,6 +42,40 @@ export function parseManualMonthPartyGuestFromUnknown(
   }
 }
 
+/** 過去売上シート行（7列=営業日数あり / 6列=組数客数あり / 4列=旧形式） */
+export function parsePastSalesSheetRow(row: unknown[]): {
+  enabledCol: number
+  party_count: number | null
+  guest_count: number | null
+  operating_days_count: number | null
+} {
+  const len = row.length
+  if (len >= 7) {
+    const counts = parseManualMonthPartyGuestFromUnknown(row[3], row[4])
+    return {
+      enabledCol: 6,
+      party_count: counts.party_count,
+      guest_count: counts.guest_count,
+      operating_days_count: parseManualMonthOperatingDays(row[5]),
+    }
+  }
+  if (len >= 6) {
+    const counts = parseManualMonthPartyGuestFromUnknown(row[3], row[4])
+    return {
+      enabledCol: 5,
+      party_count: counts.party_count,
+      guest_count: counts.guest_count,
+      operating_days_count: null,
+    }
+  }
+  return {
+    enabledCol: 3,
+    party_count: null,
+    guest_count: null,
+    operating_days_count: null,
+  }
+}
+
 export function manualMonthSalesFromRow(
   row: Record<string, unknown> | null | undefined,
 ): ManualMonthSalesRecord | null {
@@ -42,6 +86,7 @@ export function manualMonthSalesFromRow(
     gross_sales_yen: Math.round(gross),
     party_count: parseOptionalNonNegativeInt(row.party_count),
     guest_count: parseOptionalNonNegativeInt(row.guest_count),
+    operating_days_count: parseManualMonthOperatingDays(row.operating_days_count),
   }
 }
 
@@ -56,7 +101,7 @@ export async function fetchManualMonthSales(
 
   const { data, error } = await supabase
     .from("line_sales_manual_month_gross")
-    .select("gross_sales_yen, party_count, guest_count")
+    .select("gross_sales_yen, party_count, guest_count, operating_days_count")
     .eq("store_partition_key", key)
     .eq("sales_month", month)
     .maybeSingle()
@@ -82,7 +127,7 @@ export async function fetchManualMonthSalesMapForStore(
 
   const { data, error } = await supabase
     .from("line_sales_manual_month_gross")
-    .select("sales_month, gross_sales_yen, party_count, guest_count")
+    .select("sales_month, gross_sales_yen, party_count, guest_count, operating_days_count")
     .eq("store_partition_key", key)
     .in("sales_month", months)
 
@@ -128,6 +173,9 @@ export async function upsertManualMonthSalesEntries(
     const guest = entry.guest_count === undefined
       ? null
       : parseOptionalNonNegativeInt(entry.guest_count)
+    const operatingDays = entry.operating_days_count === undefined
+      ? null
+      : parseManualMonthOperatingDays(entry.operating_days_count)
 
     const { error } = await supabase
       .from("line_sales_manual_month_gross")
@@ -138,6 +186,7 @@ export async function upsertManualMonthSalesEntries(
           gross_sales_yen: Math.round(entry.gross_sales_yen),
           party_count: party,
           guest_count: guest,
+          operating_days_count: operatingDays,
           updated_at: updatedAt,
         },
         { onConflict: "store_partition_key,sales_month" },

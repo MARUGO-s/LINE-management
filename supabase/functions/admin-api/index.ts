@@ -2472,7 +2472,7 @@ async function fetchManualMonthsForYearState(
   const endExclusive = `${year + 1}-01`
   const { data, error } = await supabase
     .from("line_sales_manual_month_gross")
-    .select("sales_month, gross_sales_yen, party_count, guest_count")
+    .select("sales_month, gross_sales_yen, party_count, guest_count, operating_days_count")
     .eq("store_partition_key", store_partition_key)
     .gte("sales_month", start)
     .lt("sales_month", endExclusive)
@@ -2485,6 +2485,7 @@ async function fetchManualMonthsForYearState(
     gross_sales_yen: number
     party_count: number | null
     guest_count: number | null
+    operating_days_count: number | null
   }> = {}
   for (const row of Array.isArray(data) ? data : []) {
     const r = row as Record<string, unknown>
@@ -2499,7 +2500,16 @@ async function fetchManualMonthsForYearState(
     const guest = guestRaw === null || guestRaw === undefined || guestRaw === ""
       ? null
       : toNonNegativeInteger(guestRaw)
-    months[sm] = { gross_sales_yen: gross, party_count: party, guest_count: guest }
+    const opRaw = r.operating_days_count
+    const operating_days_count = opRaw === null || opRaw === undefined || opRaw === ""
+      ? null
+      : toNonNegativeInteger(opRaw)
+    months[sm] = {
+      gross_sales_yen: gross,
+      party_count: party,
+      guest_count: guest,
+      operating_days_count: operating_days_count > 0 ? operating_days_count : null,
+    }
   }
 
   return {
@@ -2525,6 +2535,7 @@ async function upsertManualMonthEntries(
     gross_sales_yen: number | null
     party_count?: number | null
     guest_count?: number | null
+    operating_days_count?: number | null
   }> = []
   let applied = 0
 
@@ -2545,11 +2556,16 @@ async function upsertManualMonthEntries(
       const guest = guestRaw === null || guestRaw === undefined || guestRaw === ""
         ? null
         : toNonNegativeInteger(guestRaw)
+      const opRaw = entry.operating_days_count
+      const operatingDays = opRaw === null || opRaw === undefined || opRaw === ""
+        ? null
+        : toNonNegativeInteger(opRaw)
       upsertPayload.push({
         sales_month,
         gross_sales_yen: yenVal,
         party_count: party,
         guest_count: guest,
+        operating_days_count: operatingDays > 0 ? operatingDays : null,
       })
     }
     applied += 1

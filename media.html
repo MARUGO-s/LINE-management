@@ -942,7 +942,7 @@
       </div>
       <div id="documentDropZone" class="document-drop-zone" role="button" tabindex="0" aria-label="資料をドラッグ＆ドロップまたはクリックして選択">
         <div class="drop-main">ここにTXT/PDF/Word/Excelをドラッグ＆ドロップ</div>
-        <div class="drop-sub">クリックしてファイル選択もできます</div>
+        <div class="drop-sub">ドロップでそのままアップロード（PDF含む）／クリックでファイル選択</div>
       </div>
       <div id="documentSelectedMeta" class="meta">選択中: なし</div>
       <div class="meta">TXT/PDF/DOCX/XLSX は抽出できた本文を検索対象化します（画像だけのPDFは抽出できない場合があります）。</div>
@@ -1180,11 +1180,128 @@
       return name.slice(idx + 1).toLowerCase();
     }
 
+    const DOCUMENT_MIME_BY_EXTENSION = {
+      txt: 'text/plain',
+      pdf: 'application/pdf',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    };
+
+    function isPdfHeaderBytes(bytes) {
+      return bytes.length >= 4
+        && bytes[0] === 0x25
+        && bytes[1] === 0x50
+        && bytes[2] === 0x44
+        && bytes[3] === 0x46;
+    }
+
+    function isZipHeaderBytes(bytes) {
+      return bytes.length >= 4
+        && bytes[0] === 0x50
+        && bytes[1] === 0x4b
+        && bytes[2] === 0x03
+        && bytes[3] === 0x04;
+    }
+
+    async function readFileHeaderBytes(file, length) {
+      const buffer = await file.slice(0, length).arrayBuffer();
+      return new Uint8Array(buffer);
+    }
+
+    function extensionFromDocumentMimeType(mimeType) {
+      if (mimeType === 'text/plain') return 'txt';
+      if (mimeType === 'application/pdf') return 'pdf';
+      if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        return 'docx';
+      }
+      if (mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+        return 'xlsx';
+      }
+      return '';
+    }
+
+    function withNormalizedDocumentFile(file, ext) {
+      const normalizedExt = String(ext || '').toLowerCase();
+      const mimeType = DOCUMENT_MIME_BY_EXTENSION[normalizedExt] || String(file.type || '');
+      const rawName = String(file.name || '').trim() || 'document';
+      const baseName = rawName.replace(/[\\/]+$/, '').replace(/\.[^.\\/]+$/, '') || 'document';
+      const nextName = getFileExtension(rawName) === normalizedExt
+        ? rawName
+        : baseName + '.' + normalizedExt;
+      if (file.name === nextName && file.type === mimeType) return file;
+      return new File([file], nextName, {
+        type: mimeType,
+        lastModified: file.lastModified,
+      });
+    }
+
     function isSupportedDocumentFile(file) {
       if (!(file instanceof File)) return false;
       const ext = getFileExtension(file.name);
+      if (DOCUMENT_UPLOAD_ALLOWED_EXTENSIONS.has(ext)) return true;
       const mimeType = String(file.type || '').split(';')[0].trim().toLowerCase();
-      return DOCUMENT_UPLOAD_ALLOWED_EXTENSIONS.has(ext) || DOCUMENT_UPLOAD_ALLOWED_MIME_TYPES.has(mimeType);
+      if (DOCUMENT_UPLOAD_ALLOWED_MIME_TYPES.has(mimeType)) return true;
+      if (mimeType === 'application/octet-stream' || mimeType === 'binary/octet-stream') {
+        return DOCUMENT_UPLOAD_ALLOWED_EXTENSIONS.has(ext);
+      }
+      return false;
+    }
+
+    async function sniffDocumentExtension(file) {
+      if (!(file instanceof File)) return '';
+      const ext = getFileExtension(file.name);
+      if (DOCUMENT_UPLOAD_ALLOWED_EXTENSIONS.has(ext)) return ext;
+      const mimeType = String(file.type || '').split(';')[0].trim().toLowerCase();
+      const extFromMime = extensionFromDocumentMimeType(mimeType);
+      if (extFromMime) return extFromMime;
+      let header;
+      try {
+        header = await readFileHeaderBytes(file, 8);
+      } catch (_) {
+        return '';
+      }
+      if (isPdfHeaderBytes(header)) return 'pdf';
+      if (isZipHeaderBytes(header) && (ext === 'docx' || ext === 'xlsx')) return ext;
+      if (
+        (mimeType === 'application/octet-stream' || mimeType === 'binary/octet-stream' || mimeType === '')
+        && (ext === 'txt' || ext === 'log' || ext === 'md' || ext === 'csv')
+      ) {
+        return 'txt';
+      }
+      return '';
+    }
+
+    async function normalizeDocumentFile(file) {
+      if (!(file instanceof File)) {
+        throw new Error('アップロードするファイルを選択してください。');
+      }
+      if (isSupportedDocumentFile(file)) {
+        const ext = getFileExtension(file.name) || extensionFromDocumentMimeType(
+          String(file.type || '').split(';')[0].trim().toLowerCase(),
+        );
+        if (ext) return withNormalizedDocumentFile(file, ext);
+      }
+      const sniffedExt = await sniffDocumentExtension(file);
+      if (!sniffedExt) {
+        throw new Error('TXT / PDF / DOCX / XLSX ファイルを選択してください。');
+      }
+      return withNormalizedDocumentFile(file, sniffedExt);
+    }
+
+    function resolveDroppedDocumentFile(event) {
+      const dataTransfer = event && event.dataTransfer ? event.dataTransfer : null;
+      if (!dataTransfer) return null;
+      const items = dataTransfer.items;
+      if (items && items.length > 0) {
+        for (let i = 0; i < items.length; i += 1) {
+          const item = items[i];
+          if (!item || item.kind !== 'file') continue;
+          const file = item.getAsFile();
+          if (file instanceof File) return file;
+        }
+      }
+      const files = dataTransfer.files;
+      return files && files.length > 0 ? files[0] : null;
     }
 
     function syncDocumentInputFile(file) {
@@ -1224,8 +1341,23 @@
       if (!isSupportedDocumentFile(file)) {
         throw new Error('TXT / PDF / DOCX / XLSX ファイルを選択してください。');
       }
-      state.selectedDocumentFile = file;
-      syncDocumentInputFile(file);
+      const ext = getFileExtension(file.name) || extensionFromDocumentMimeType(
+        String(file.type || '').split(';')[0].trim().toLowerCase(),
+      );
+      const normalized = ext ? withNormalizedDocumentFile(file, ext) : file;
+      state.selectedDocumentFile = normalized;
+      syncDocumentInputFile(normalized);
+      updateSelectedDocumentMeta();
+    }
+
+    async function setSelectedDocumentFileAsync(file) {
+      if (!(file instanceof File)) {
+        clearSelectedDocumentFile();
+        return;
+      }
+      const normalized = await normalizeDocumentFile(file);
+      state.selectedDocumentFile = normalized;
+      syncDocumentInputFile(normalized);
       updateSelectedDocumentMeta();
     }
 
@@ -2041,13 +2173,11 @@
 
     async function uploadDocument() {
       const inputFiles = dom.documentFileInput.files;
-      const file = state.selectedDocumentFile || (inputFiles && inputFiles.length > 0 ? inputFiles[0] : null);
-      if (!(file instanceof File)) {
-        throw new Error('アップロードするファイルを選択してください。');
-      }
-      if (!isSupportedDocumentFile(file)) {
-        throw new Error('TXT / PDF / DOCX / XLSX ファイルを選択してください。');
-      }
+      const rawFile = state.selectedDocumentFile || (inputFiles && inputFiles.length > 0 ? inputFiles[0] : null);
+      const file = await normalizeDocumentFile(rawFile);
+      state.selectedDocumentFile = file;
+      syncDocumentInputFile(file);
+      updateSelectedDocumentMeta();
       const roomId = String(dom.documentUploadRoomSelect.value || '').trim();
       const formData = new FormData();
       formData.append('file', file);
@@ -2307,12 +2437,14 @@
     dom.documentFileInput.addEventListener('change', function() {
       const files = dom.documentFileInput.files;
       const file = files && files.length > 0 ? files[0] : null;
-      try {
-        setSelectedDocumentFile(file);
-      } catch (error) {
-        clearSelectedDocumentFile();
-        alert(error.message || String(error));
-      }
+      void (async function() {
+        try {
+          await setSelectedDocumentFileAsync(file);
+        } catch (error) {
+          clearSelectedDocumentFile();
+          alert(error.message || String(error));
+        }
+      })();
     });
 
     if (dom.documentDropZone) {
@@ -2356,14 +2488,17 @@
         event.preventDefault();
         state.documentDropDepth = 0;
         dom.documentDropZone.classList.remove('dragover');
-        const files = event.dataTransfer ? event.dataTransfer.files : null;
-        const file = files && files.length > 0 ? files[0] : null;
-        try {
-          setSelectedDocumentFile(file);
-        } catch (error) {
-          clearSelectedDocumentFile();
-          alert(error.message || String(error));
-        }
+        const file = resolveDroppedDocumentFile(event);
+        void (async function() {
+          try {
+            if (!(file instanceof File)) return;
+            await setSelectedDocumentFileAsync(file);
+            await uploadDocument();
+          } catch (error) {
+            clearSelectedDocumentFile();
+            alert(error.message || String(error));
+          }
+        })();
       });
     }
 

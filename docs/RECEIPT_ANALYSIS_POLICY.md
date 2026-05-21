@@ -147,9 +147,16 @@ Flex 等に印字する和暦表記は **`formatJapaneseReceiptDateFromIso`** �
 
 | 処理 | 関数・フィールド |
 |------|------------------|
-| 営業日数の算出 | `countReceiptActiveDaysInStoreMonth` |
-| 返信組み立て時の分母解決 | `resolveReceiptMonthDailyAvgDivisor` → `buildLineReceiptImageAnalysisReply` の `monthAvgBusinessDayDivisor` |
-| Flex 行の生成 | `buildLineReceiptImageAnalysisReply` 内の `monthRows`、`buildReceiptFlexBaselineRows` |
+| 営業日数の算出 | `countReceiptActiveDaysInStoreMonth`（月全体）／`loadReceiptReportAggregateForStoreByReceiptDate`（月初〜レシート日） |
+| 返信組み立て時の分母解決 | `loadReceiptAnalysisMonthYoyExtras` の営業日数 → `monthAvgBusinessDayDivisor`（未算出時は `resolveReceiptMonthDailyAvgDivisor`） |
+| Flex 行の生成 | `buildLineReceiptImageAnalysisReply` 内の `monthRows`（**営業日数**・月間 KPI）、**【前年同月比】**（`buildReceiptYoyKvRows`）、`buildReceiptFlexBaselineRows` |
+
+#### レシート返信 Flex の表示順（上→下）
+
+1. 当日サマリー（店名・日付・総売上・組数・客数など）
+2. **月間 KPI**（営業日数・月間総売上・月間会計組数・月間客数）
+3. **【予算】**
+4. **【前年同月比】**
 
 ダッシュボード側の KPI 定義は **`analytics.html`**（`activeDays = dailySeries.filter(d => d.receipt_count > 0).length`）を参照。
 
