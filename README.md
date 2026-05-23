@@ -193,7 +193,18 @@ Edge Functions のデプロイだけでは **`index.html` / `analytics.html` 等
 - **GitHub Pages**（本リポジトリのワークフロー `pages build and deployment` と併用）
 - 任意の静的ホスティング（S3 + CloudFront、Netlify、Vercel 等）
 
-管理画面の API 呼び出し先は、HTML 内の **`FIXED_PROJECT_URL`** と、ブラウザに保存したトークンに依存します。リポジトリをフォーク／複製した場合は **自プロジェクトの Supabase URL に合わせて変更**してください。
+### 4.1 GitHub Pages が2つある（リダイレクトではない）
+
+同じ画面を **別 URL の2サイト** として公開しています（詳細: [`docs/PAGES_DUAL_SITES.md`](./docs/PAGES_DUAL_SITES.md)）。
+
+| サイト | URL 例 |
+|--------|--------|
+| **line_report（本番 Pages・公式）** | `https://marugo-s.github.io/line_report/analytics.html` |
+| LINE-management（従来・並行） | `https://marugo-s.github.io/LINE-management/analytics.html` |
+
+どちらも本番 Supabase（`jhpmzqxqvapdkyvvhyra`）に接続します。静的 UI の本番デプロイ先は **`MARUGO-s/line_report`**（`./scripts/deploy-line-report-pages.sh`）。
+
+管理画面の API 呼び出し先は、HTML 内の **`FIXED_PROJECT_URL`** / **`PROJECT_URL`** と、ブラウザに保存したトークンに依存します。リポジトリをフォーク／複製した場合は **自プロジェクトの Supabase URL に合わせて変更**してください。
 
 ---
 
@@ -326,7 +337,8 @@ Groq で `create_calendar` / `list_calendar` / `search_messages` / `none` を判
 
 GitHub Pages で公開される単一ページアプリ。`admin-api` と Open-Meteo（無料天気 API）を組み合わせて売上と天候を可視化する。
 
-**URL**: `https://marugo-s.github.io/LINE-management/analytics.html`
+**URL（新規リンク・LINE ボタン）**: `https://marugo-s.github.io/line_report/analytics.html`  
+**URL（従来サイト・ブックマーク可）**: `https://marugo-s.github.io/LINE-management/analytics.html` — 同一内容の別 URL（[`docs/PAGES_DUAL_SITES.md`](./docs/PAGES_DUAL_SITES.md)）
 
 ### 10.1 アクセス方法
 
@@ -399,7 +411,7 @@ GitHub Pages で公開される単一ページアプリ。`admin-api` と Open-M
 | GET | `/permissions/users` | ユーザー権限一覧 |
 | PUT | `/permissions/users` | ユーザー権限 upsert |
 | DELETE | `/permissions/users/:line_user_id` | ユーザー権限削除 |
-| DELETE | `/rooms/:room_id` | ルームのメッセージ・メディア・資料・設定を削除（破壊的） |
+| DELETE | `/rooms/:id` | ルームを管理一覧から外す（`X-Admin-Surface`: `legacy`=旧サイト, `line_report`=新サイト。メッセージ・メディア・レシートは保持） |
 | POST | `/actions/run-summary` | `invoke_summary_cron` 実行 |
 | POST | `/actions/test-receipt-report` | 売上中間／月末レポートの **テスト LINE 送信**（要 `RECEIPT_MIDREPORT_CRON_TEST_KEY`、ログ非記録） |
 | POST | `/rooms/sync-chat-members` | LINE `members/ids` で全メンバーを `line_user_permissions` に反映 |

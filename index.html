@@ -3282,6 +3282,7 @@
       const headers = Object.assign({
         'x-admin-token': t,
         'Content-Type': 'application/json',
+        'x-admin-surface': 'legacy',
       }, request.headers || {});
       const res = await fetch(
         base + '/functions/v1/admin-api' + requestPath,
@@ -4982,7 +4983,7 @@
       const nameInput = tr.querySelector('.room-name');
       const roomName = nameInput ? nameInput.value.trim() : '';
       const label = roomName || roomId;
-      const ok = window.confirm('ルーム「' + label + '」を削除します。\\nこの操作で当該ルームの保存メッセージと設定を削除します。よろしいですか？');
+      const ok = window.confirm('ルーム「' + label + '」を旧サイトの管理一覧から外します。\\n保存済みのメッセージ・メディア・レシートデータは削除せず残します。新サイト（Webhook管理）の一覧には影響しません。よろしいですか？');
       if (!ok) return;
       await api('/rooms/' + encodeURIComponent(roomId), { method: 'DELETE' });
       isRoomDirty = false;
@@ -5284,7 +5285,7 @@
           alert('ルーム設定を削除して全体設定継承に戻しました。');
         } else if (target.classList.contains('room-delete')) {
           await deleteRoomRow(tr);
-          alert('ルームを削除しました。');
+          alert('ルームを旧サイトの一覧から外しました。（保存データは保持されています）');
         } else if (target.classList.contains('room-config-open')) {
           openRoomConfigModal(tr);
         } else if (target.classList.contains('room-show-id')) {
@@ -5335,7 +5336,7 @@
             alert('ルーム設定を削除して全体設定継承に戻しました。');
           } else if (target.classList.contains('room-card-delete')) {
             await deleteRoomRow(tr);
-            alert('ルームを削除しました。');
+            alert('ルームを旧サイトの一覧から外しました。（保存データは保持されています）');
           } else if (target.classList.contains('room-card-config-open')) {
             openRoomConfigModal(tr);
           } else if (target.classList.contains('room-card-show-id')) {

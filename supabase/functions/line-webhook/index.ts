@@ -6223,7 +6223,7 @@ const LINE_MESSAGING_URI_MAX_LEN = 1000
 const LINE_MESSAGE_ACTION_TEXT_MAX_LEN = 300
 
 function buildReceiptAnalyticsDashboardUri(): string {
-  const base = 'https://marugo-s.github.io/LINE-management/analytics.html'
+  const base = 'https://marugo-s.github.io/line_report/analytics.html'
   const token = String(Deno.env.get('ADMIN_DASHBOARD_TOKEN') ?? '').trim()
   if (!token) return base
   for (let n = token.length; n >= 0; n--) {
@@ -6789,6 +6789,18 @@ async function syncRoomDisplayNameIfMissing(
   if (!sourceType || (sourceType !== 'group' && sourceType !== 'room' && sourceType !== 'user')) {
     return
   }
+
+  const { data: dismissedRow, error: dismissedError } = await supabase
+    .from('line_room_dismissed')
+    .select('room_id')
+    .eq('room_id', normalizedRoomId)
+    .eq('admin_surface', 'legacy')
+    .maybeSingle()
+  if (dismissedError) {
+    console.error(`Failed to inspect line_room_dismissed for ${normalizedRoomId}:`, dismissedError.message)
+    return
+  }
+  if (dismissedRow?.room_id) return
 
   const { data: existing, error: existingError } = await supabase
     .from('room_summary_settings')

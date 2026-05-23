@@ -24,9 +24,12 @@ import {
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.44.0"
 import JSZip from "https://esm.sh/jszip@3.10.1"
 
+const ADMIN_SURFACE_LEGACY = "legacy"
+const ADMIN_SURFACE_LINE_REPORT = "line_report"
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-admin-token",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-admin-token, x-admin-surface",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
 }
 
@@ -271,7 +274,8 @@ Deno.serve(async (req) => {
 
   try {
     if (req.method === "GET" && path === "/state") {
-      const state = await fetchState(supabase, url)
+      const adminSurface = resolveAdminSurface(req, url)
+      const state = await fetchState(supabase, url, adminSurface)
       return json(state, 200)
     }
 
@@ -525,6 +529,15 @@ Deno.serve(async (req) => {
       if (error) {
         throw { status: 500, message: `Failed to update room settings: ${error.message}` } satisfies AppError
       }
+      const adminSurface = resolveAdminSurface(req, url)
+      const { error: undismissError } = await supabase
+        .from("line_room_dismissed")
+        .delete()
+        .eq("room_id", payload.room_id)
+        .eq("admin_surface", adminSurface)
+      if (undismissError) {
+        throw { status: 500, message: `Failed to restore dismissed room: ${undismissError.message}` } satisfies AppError
+      }
       console.log(
         "[admin-api] room settings upsert result:",
         JSON.stringify({
@@ -633,77 +646,17 @@ Deno.serve(async (req) => {
         throw { status: 400, message: "room_id is required." } satisfies AppError
       }
 
-      const mediaCleanup = await removeRoomMediaObjects(supabase, roomId)
-      if (!mediaCleanup.ok) {
-        throw { status: 500, message: mediaCleanup.message } satisfies AppError
-      }
-      const documentCleanup = await removeRoomDocuments(supabase, roomId)
-      if (!documentCleanup.ok) {
-        throw { status: 500, message: documentCleanup.message } satisfies AppError
-      }
-
-      const { count: messageCount, error: messageCountError } = await supabase
-        .from("line_messages")
-        .select("id", { count: "exact", head: true })
-        .eq("room_id", roomId)
-      if (messageCountError) {
-        throw { status: 500, message: `Failed to count room messages: ${messageCountError.message}` } satisfies AppError
-      }
-
-      const { error: messageDeleteError } = await supabase
-        .from("line_messages")
-        .delete()
-        .eq("room_id", roomId)
-      if (messageDeleteError) {
-        throw { status: 500, message: `Failed to delete room messages: ${messageDeleteError.message}` } satisfies AppError
-      }
-
-      const { data: roomSettingsRow, error: roomSettingsCountError } = await supabase
-        .from("room_summary_settings")
-        .select("room_id")
-        .eq("room_id", roomId)
-        .maybeSingle()
-      if (roomSettingsCountError) {
-        throw { status: 500, message: `Failed to inspect room settings: ${roomSettingsCountError.message}` } satisfies AppError
-      }
-
-      const { error: roomSettingsDeleteError } = await supabase
-        .from("room_summary_settings")
-        .delete()
-        .eq("room_id", roomId)
-      if (roomSettingsDeleteError) {
-        throw { status: 500, message: `Failed to delete room settings: ${roomSettingsDeleteError.message}` } satisfies AppError
-      }
-
-      // get_room_overview は line_room_names も room 一覧に含める。ここを消さないとメッセージ0でも行が残る。
-      const { data: lineRoomNamesRow, error: lineRoomNamesInspectError } = await supabase
-        .from("line_room_names")
-        .select("room_id")
-        .eq("room_id", roomId)
-        .maybeSingle()
-      if (lineRoomNamesInspectError) {
-        throw { status: 500, message: `Failed to inspect line_room_names: ${lineRoomNamesInspectError.message}` } satisfies AppError
-      }
-      const { error: lineRoomNamesDeleteError } = await supabase
-        .from("line_room_names")
-        .delete()
-        .eq("room_id", roomId)
-      if (lineRoomNamesDeleteError) {
-        throw { status: 500, message: `Failed to delete line_room_names: ${lineRoomNamesDeleteError.message}` } satisfies AppError
+      const adminSurface = resolveAdminSurface(req, url)
+      const unregister = await unregisterRoomFromAdmin(supabase, roomId, adminSurface)
+      if (!unregister.ok) {
+        throw { status: 500, message: unregister.message } satisfies AppError
       }
 
       return json({
         success: true,
         room_id: roomId,
-        deleted: {
-          messages: messageCount ?? 0,
-          media_files: mediaCleanup.deletedFiles,
-          media_metadata: mediaCleanup.deletedMetadataRows,
-          document_files: documentCleanup.deletedFiles,
-          document_metadata: documentCleanup.deletedMetadataRows,
-          room_settings: roomSettingsRow ? 1 : 0,
-          line_room_names: lineRoomNamesRow ? 1 : 0,
-        },
+        unregistered: unregister.unregistered,
+        retained: unregister.retained,
       }, 200)
     }
 
@@ -882,6 +835,7 @@ async function hashToken(value: string): Promise<string> {
 async function fetchState(
   supabase: ReturnType<typeof createClient>,
   url: URL,
+  adminSurface: string,
 ) {
   const logsLimit = clampInt(url.searchParams.get("logs_limit"), 30, 10, 30)
   const logsFetchLimit = logsLimit * 8
@@ -893,7 +847,7 @@ async function fetchState(
         .from("room_summary_settings")
         .select("*")
         .order("updated_at", { ascending: false }),
-      supabase.rpc("get_room_overview"),
+      supabase.rpc("get_room_overview", { p_admin_surface: adminSurface }),
       supabase
         .from("summary_delivery_logs")
         .select("id, run_at, jst_hour, status, reason, should_send_overall, rooms_targeted, messages_in_queue, messages_marked_processed, line_send_attempted, line_send_success, line_http_status, target_room_id, details")
@@ -4761,6 +4715,122 @@ async function deleteDocumentById(
   }
 }
 
+async function unregisterRoomFromAdmin(
+  supabase: ReturnType<typeof createClient>,
+  roomId: string,
+  adminSurface: string,
+): Promise<
+  | {
+    ok: true
+    admin_surface: string
+    unregistered: { room_settings: number; line_room_names: number; dismissed: number; webhook_unlinked: number }
+    retained: { messages: number }
+  }
+  | { ok: false; message: string }
+> {
+  const surface = adminSurface === ADMIN_SURFACE_LINE_REPORT
+    ? ADMIN_SURFACE_LINE_REPORT
+    : ADMIN_SURFACE_LEGACY
+
+  const { count: messageCount, error: messageCountError } = await supabase
+    .from("line_messages")
+    .select("id", { count: "exact", head: true })
+    .eq("room_id", roomId)
+  if (messageCountError) {
+    return { ok: false, message: `Failed to count room messages: ${messageCountError.message}` }
+  }
+
+  const { data: roomSettingsRow, error: roomSettingsCountError } = await supabase
+    .from("room_summary_settings")
+    .select("room_id, receipt_report_store_partition_key")
+    .eq("room_id", roomId)
+    .maybeSingle()
+  if (roomSettingsCountError) {
+    return { ok: false, message: `Failed to inspect room settings: ${roomSettingsCountError.message}` }
+  }
+
+  const { data: lineRoomNamesRow, error: lineRoomNamesInspectError } = await supabase
+    .from("line_room_names")
+    .select("room_id")
+    .eq("room_id", roomId)
+    .maybeSingle()
+  if (lineRoomNamesInspectError) {
+    return { ok: false, message: `Failed to inspect line_room_names: ${lineRoomNamesInspectError.message}` }
+  }
+
+  const now = new Date().toISOString()
+  const { error: dismissError } = await supabase
+    .from("line_room_dismissed")
+    .upsert({
+      room_id: roomId,
+      admin_surface: surface,
+      dismissed_at: now,
+    }, { onConflict: "room_id,admin_surface" })
+  if (dismissError) {
+    return { ok: false, message: `Failed to dismiss room: ${dismissError.message}` }
+  }
+
+  let webhookUnlinked = 0
+  if (surface === ADMIN_SURFACE_LINE_REPORT) {
+    if (roomSettingsRow?.room_id && roomSettingsRow.receipt_report_store_partition_key) {
+      const { error: unlinkError } = await supabase
+        .from("room_summary_settings")
+        .update({
+          receipt_report_store_partition_key: null,
+          updated_at: now,
+        })
+        .eq("room_id", roomId)
+      if (unlinkError) {
+        return { ok: false, message: `Failed to unlink room webhook assignment: ${unlinkError.message}` }
+      }
+      webhookUnlinked = 1
+    }
+    return {
+      ok: true,
+      admin_surface: surface,
+      unregistered: {
+        room_settings: 0,
+        line_room_names: 0,
+        dismissed: 1,
+        webhook_unlinked: webhookUnlinked,
+      },
+      retained: {
+        messages: messageCount ?? 0,
+      },
+    }
+  }
+
+  const { error: roomSettingsDeleteError } = await supabase
+    .from("room_summary_settings")
+    .delete()
+    .eq("room_id", roomId)
+  if (roomSettingsDeleteError) {
+    return { ok: false, message: `Failed to delete room settings: ${roomSettingsDeleteError.message}` }
+  }
+
+  const { error: lineRoomNamesDeleteError } = await supabase
+    .from("line_room_names")
+    .delete()
+    .eq("room_id", roomId)
+  if (lineRoomNamesDeleteError) {
+    return { ok: false, message: `Failed to delete line_room_names: ${lineRoomNamesDeleteError.message}` }
+  }
+
+  return {
+    ok: true,
+    admin_surface: surface,
+    unregistered: {
+      room_settings: roomSettingsRow ? 1 : 0,
+      line_room_names: lineRoomNamesRow ? 1 : 0,
+      dismissed: 1,
+      webhook_unlinked: 0,
+    },
+    retained: {
+      messages: messageCount ?? 0,
+    },
+  }
+}
+
 async function removeRoomMediaObjects(
   supabase: ReturnType<typeof createClient>,
   roomId: string,
@@ -5548,6 +5618,14 @@ async function invokeReceiptMidreportCronTestSend(opts: {
     payload = { ok: false, error: "Invalid JSON from receipt-midreport-cron", raw: text.slice(0, 500) }
   }
   return { status: res.status, payload }
+}
+
+function resolveAdminSurface(req: Request, url: URL): string {
+  const header = String(req.headers.get("x-admin-surface") ?? "").trim().toLowerCase()
+  if (header === ADMIN_SURFACE_LINE_REPORT) return ADMIN_SURFACE_LINE_REPORT
+  const query = String(url.searchParams.get("admin_surface") ?? "").trim().toLowerCase()
+  if (query === ADMIN_SURFACE_LINE_REPORT) return ADMIN_SURFACE_LINE_REPORT
+  return ADMIN_SURFACE_LEGACY
 }
 
 function json(body: unknown, status = 200): Response {

@@ -1098,7 +1098,7 @@ const html = String.raw`<!doctype html>
         <span id="authState" class="pill">未接続</span>
         <span class="pill">API: <strong>/functions/v1/admin-api</strong></span>
         <span id="lastRefresh" class="pill">最終更新: なし</span>
-        <a class="pill link" href="https://marugo-s.github.io/LINE-management/media.html" target="_blank" rel="noopener noreferrer">LINEメディアビューアー</a>
+        <a class="pill link" href="https://marugo-s.github.io/line_report/media.html" target="_blank" rel="noopener noreferrer">LINEメディアビューアー</a>
         <a id="receiptSheetsPilotHeaderLink" class="pill link" href="#" target="_blank" rel="noopener noreferrer" style="display:none">売上シート</a>
       </div>
     </header>
@@ -1117,7 +1117,7 @@ const html = String.raw`<!doctype html>
             <div class="controls" style="margin-top:8px;">
               <button id="reloadBtn" class="button">再読み込み</button>
               <button id="runNowBtn" class="button warn">今すぐ要約実行</button>
-              <a class="button media-highlight" href="https://marugo-s.github.io/LINE-management/media.html" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
+              <a class="button media-highlight" href="https://marugo-s.github.io/line_report/media.html" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;text-decoration:none;">メディア閲覧</a>
               <a id="receiptSheetsPilotActionLink" class="button media-highlight" href="#" target="_blank" rel="noopener noreferrer" style="display:none;align-items:center;text-decoration:none;">売上シート</a>
             </div>
           </div>
@@ -2149,6 +2149,7 @@ const html = String.raw`<!doctype html>
       const headers = Object.assign({
         'x-admin-token': t,
         'Content-Type': 'application/json',
+        'x-admin-surface': 'legacy',
       }, request.headers || {});
 
       const finalPath = (request.method || 'GET').toUpperCase() === 'GET' && path.startsWith('/state')
@@ -3483,7 +3484,7 @@ const html = String.raw`<!doctype html>
       const roomNameInput = tr.querySelector('.room-name');
       const roomName = roomNameInput ? roomNameInput.value.trim() : '';
       const label = roomName || roomId;
-      const ok = window.confirm('ルーム「' + label + '」を削除します。\\nこの操作で当該ルームの保存メッセージと設定を削除します。よろしいですか？');
+      const ok = window.confirm('ルーム「' + label + '」を旧サイトの管理一覧から外します。\\n保存済みのメッセージ・メディア・レシートデータは削除せず残します。新サイト（Webhook管理）の一覧には影響しません。よろしいですか？');
       if (!ok) return;
       await api('/rooms/' + encodeURIComponent(roomId), { method: 'DELETE' });
       isRoomDirty = false;
@@ -3866,7 +3867,7 @@ const html = String.raw`<!doctype html>
           alert('ルーム設定を削除し、全体設定継承に戻しました。');
         } else if (target.classList.contains('room-delete')) {
           await deleteRoomCompletely(tr);
-          alert('ルームを削除しました。');
+          alert('ルームを旧サイトの一覧から外しました。（保存データは保持されています）');
         } else if (target.classList.contains('room-config-open')) {
           openRoomConfigModal(tr);
         } else if (target.classList.contains('room-show-id')) {
